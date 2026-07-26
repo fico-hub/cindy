@@ -131,8 +131,12 @@ describe('CallbackListener(xAI loopback 回调)', () => {
     const codePromise = listener.waitForCode('state-2');
     codePromise.catch(() => undefined);
 
+    // 完全无参数(走 state-mismatch 拒绝)与 state 匹配但缺 code(走缺 code 分支)
+    // 两条路径都不得终止登录。
     const res = await send('GET', '/callback');
     expect(res.status).toBe(400);
+    const matchedNoCode = await send('GET', '/callback?state=state-2');
+    expect(matchedNoCode.status).toBe(400);
     await expectStillPending(codePromise);
 
     const getPromise = send('GET', '/callback?code=xyz&state=state-2');
@@ -236,12 +240,15 @@ describe('CallbackListener(xAI loopback 回调)', () => {
   it('error 终态后的重试回调重放 4xx,不得误报成功', async () => {
     const codePromise = listener.waitForCode('state-5c');
     codePromise.catch(() => undefined);
-    const first = await send('GET', '/callback?error=access_denied', {
+    // state 必须匹配:否则请求走 state-mismatch 分支被拒,终态从未建立,
+    // 本用例就测不到「error 终态后的重放」路径(3f98a3f 曾漏改此处)。
+    const first = await send('GET', '/callback?error=access_denied&state=state-5c', {
       origin: XAI_ORIGIN,
     });
     expect(first.status).toBe(400);
+    await expect(codePromise).rejects.toThrow('No authorization code received');
 
-    const retry = await send('GET', '/callback?error=access_denied', {
+    const retry = await send('GET', '/callback?error=access_denied&state=state-5c', {
       origin: XAI_ORIGIN,
     });
     expect(retry.status).toBe(400);
