@@ -2682,6 +2682,10 @@ function RailPanels({
     y: number;
     projectKey: string;
   } | null>(null);
+  // 菜单关闭后把焦点还给唤起它的项目行:Radix 默认还焦到 trigger,但这里的
+  // trigger 是零尺寸 aria-hidden span,不接管会让焦点掉到 document、打断
+  // Shift+F10 之后的键盘导航(DESIGN.md §14.2 焦点回归契约;codex review)。
+  const projectMenuAnchorRef = useRef<HTMLElement | null>(null);
   // 面板经 closeAll 路径(⌘B 隐藏/侧栏展开/触发器消失)关闭时不会走菜单的
   // onOpenChange —— openSection 离开 projects 就同步清掉菜单状态,否则组件常驻
   // (只是 return null),下次打开面板旧菜单会按旧坐标复现并引用旧项目(review)。
@@ -2900,6 +2904,9 @@ function RailPanels({
       className={cn(
         'flex h-6 w-6 shrink-0 items-center justify-center self-center rounded-md -my-1',
         'text-[var(--text-tertiary)] transition-colors hover:text-[var(--text-secondary)]',
+        // globals.css 移除了 Chromium 默认 outline,键盘可达按钮必须自带
+        // token 化 focus 环(DESIGN.md §10;codex review)。
+        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]',
       )}
     >
       <SquarePen size={14} strokeWidth={2} />
@@ -2975,6 +2982,7 @@ function RailPanels({
                     }}
                     onContextMenu={(e) => {
                       e.preventDefault();
+                      projectMenuAnchorRef.current = e.currentTarget;
                       setProjectMenu({ x: e.clientX, y: e.clientY, projectKey: p.projectKey });
                     }}
                     onMouseLeave={() => railPanelStore.scheduleProjectClose()}
@@ -3091,6 +3099,13 @@ function RailPanels({
         <DropdownMenuContent
           align="start"
           sideOffset={2}
+          onCloseAutoFocus={(e) => {
+            // 还焦到唤起菜单的项目行(而非零尺寸 trigger span)。行已被卸载
+            // (面板关闭)时不抢焦点。
+            e.preventDefault();
+            const anchor = projectMenuAnchorRef.current;
+            if (anchor?.isConnected) anchor.focus();
+          }}
           className={cn(
             'min-w-[180px] rounded-xl p-1 overflow-hidden',
             'bg-[var(--cmd-palette-bg)]',
