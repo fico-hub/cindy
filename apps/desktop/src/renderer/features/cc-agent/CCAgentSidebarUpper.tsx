@@ -20,7 +20,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, use
 import type { ReactNode } from 'react';
 import type { SchedulerEvent } from '@cindy/maker-scheduler';
 import { createPortal } from 'react-dom';
-import { Archive, ChevronRight, CirclePlus, Folder, Plug, Timer, Trash2, X } from 'lucide-react';
+import { Archive, ChevronRight, CirclePlus, Folder, Plug, SquarePen, Timer, Trash2, X } from 'lucide-react';
 import { useNavigate, useMatch } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 
@@ -2383,6 +2383,8 @@ function ExpandedView({
         onMoveSession={handleMoveSession}
         projectOptions={projectPickerOptions}
         onScheduleAction={handleScheduleAction}
+        onCreateDialogue={handleCreateDialogue}
+        onCreateInProject={handleCreateInProject}
       />
       {deleteScheduleDialog}
     </>
@@ -2634,6 +2636,11 @@ interface RailPanelsProps {
   onMoveSession: Parameters<typeof SessionEntryList>[0]['onMoveSession'];
   projectOptions: Parameters<typeof SessionEntryList>[0]['projectOptions'];
   onScheduleAction: Parameters<typeof SessionEntryList>[0]['onScheduleAction'];
+  /** 新建对话(对话面板头部 SquarePen)——展开态 DialogueSection 段头同源 handler。 */
+  onCreateDialogue: () => void;
+  /** 在此项目内新建(项目行右键菜单 + 三级面板头部)——展开态 ProjectNode
+   *  的 newInDirectory 主操作同源 handler(内置远程写保护)。 */
+  onCreateInProject: (project: ProjectNode) => void;
 }
 
 /**
@@ -2663,9 +2670,18 @@ function RailPanels({
   onMoveSession,
   projectOptions,
   onScheduleAction,
+  onCreateDialogue,
+  onCreateInProject,
 }: RailPanelsProps) {
   const { t } = useTranslation();
   const panelState = useSyncExternalStore(railPanelStore.subscribe, railPanelStore.getSnapshot);
+  // 项目行右键菜单(「在此项目内新建」)——controlled DropdownMenu + 不可见
+  // trigger 跟坐标(Automations 菜单同款模式)。
+  const [projectMenu, setProjectMenu] = useState<{
+    x: number;
+    y: number;
+    projectKey: string;
+  } | null>(null);
   const attentionKinds = useSessionAttentionKinds();
   const urgentSet = useSessionAttentionUrgencySet();
   // 项目列表「显示全部」:面板关闭后复位(与 ProjectsSection 的段收起复位同语义)。
@@ -2853,13 +2869,34 @@ function RailPanels({
     onScheduleAction,
   } as const;
 
-  const panelHead = (title: string, count: number) => (
+  const panelHead = (title: string, count: number, action?: ReactNode) => (
     <div className="flex items-baseline gap-1.5 px-2.5 pb-1 pt-1.5">
       <span className="min-w-0 flex-1 truncate text-[12.5px] font-extrabold text-foreground">{title}</span>
       <span className="shrink-0 text-[10px] text-[var(--text-tertiary)]">
         {t('ccAgent.sidebar.railNavCount', { count })}
       </span>
+      {action}
     </div>
+  );
+
+  /** 面板头部的新建按钮(展开态段头 SquarePen 同款配色);创建动作导航去
+   *  新建页,面板随之收起。 */
+  const panelHeadCreateButton = (label: string, onCreate: () => void) => (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      onClick={() => {
+        railPanelStore.closeAll();
+        onCreate();
+      }}
+      className={cn(
+        'flex h-6 w-6 shrink-0 items-center justify-center self-center rounded-md -my-1',
+        'text-[var(--text-tertiary)] transition-colors hover:text-[var(--text-secondary)]',
+      )}
+    >
+      <SquarePen size={14} strokeWidth={2} />
+    </button>
   );
 
   if (!panelState.openSection || !panelState.anchor) return null;
@@ -2880,7 +2917,11 @@ function RailPanels({
       >
         {panelState.openSection === 'dialogues' && (
           <>
-            {panelHead(t('ccAgent.sidebar.railNav.dialogues'), dialogues.length)}
+            {panelHead(
+              t('ccAgent.sidebar.railNav.dialogues'),
+              dialogues.length,
+              panelHeadCreateButton(t('ccAgent.sidebar.newDialogue'), onCreateDialogue),
+            )}
             <div className="max-h-[420px] overflow-y-auto [scrollbar-width:thin]">
               <SessionEntryList
                 sessions={dialogues}
@@ -2924,6 +2965,10 @@ function RailPanels({
                     onClick={(e) => {
                       const rect = e.currentTarget.getBoundingClientRect();
                       railPanelStore.openProject(p.projectKey, { right: rect.right, top: rect.top });
+                    }}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setProjectMenu({ x: e.clientX, y: e.clientY, projectKey: p.projectKey });
                     }}
                     onMouseLeave={() => railPanelStore.scheduleProjectClose()}
                     className={cn(
@@ -2992,7 +3037,14 @@ function RailPanels({
             railPanelStore.scheduleClose();
           }}
         >
-          {panelHead(projectDisplayLabelWithMachine(openProject), openProject.sessions.length)}
+          {panelHead(
+            projectDisplayLabelWithMachine(openProject),
+            openProject.sessions.length,
+            panelHeadCreateButton(
+              t('ccAgent.sidebar.projectAction.newInDirectory'),
+              () => onCreateInProject(openProject),
+            ),
+          )}
           <div className="max-h-[420px] overflow-y-auto [scrollbar-width:thin]">
             {/* key 按项目:hover 直切另一项目时列表组件被复用,内部「显示全部」
                 状态会泄漏给下一个项目、绕过折叠上限(codex review)——换 key 强制
@@ -3007,6 +3059,54 @@ function RailPanels({
           </div>
         </RailPanelShell>
       )}
+
+      {/* 项目行右键菜单 —— Automations 菜单同款「controlled + 坐标 trigger」;
+          Radix 浮层在保活白名单内,阻断性浮层守卫保证面板不被 hover 宽限收掉。 */}
+      <DropdownMenu
+        open={projectMenu !== null}
+        onOpenChange={(open) => {
+          if (!open) setProjectMenu(null);
+        }}
+      >
+        <DropdownMenuTrigger asChild>
+          <span
+            aria-hidden
+            style={{
+              position: 'fixed',
+              left: projectMenu?.x ?? 0,
+              top: projectMenu?.y ?? 0,
+              width: 0,
+              height: 0,
+              pointerEvents: 'none',
+            }}
+          />
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="start"
+          sideOffset={2}
+          className={cn(
+            'min-w-[180px] rounded-xl p-1 overflow-hidden',
+            'bg-[var(--cmd-palette-bg)]',
+            'border border-[var(--cmd-palette-border)]',
+            'shadow-[var(--shadow-menu)]',
+          )}
+        >
+          <DropdownMenuItem
+            onSelect={() => {
+              const target = projectMenu
+                ? projects.find((x) => x.projectKey === projectMenu.projectKey)
+                : null;
+              setProjectMenu(null);
+              if (!target) return;
+              railPanelStore.closeAll();
+              onCreateInProject(target);
+            }}
+            className="cursor-pointer text-sm text-[var(--msg-assistant-text)] hover:bg-[var(--cmd-palette-item-hover)]"
+          >
+            {t('ccAgent.sidebar.projectAction.newInDirectory')}
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </>
   );
 }
