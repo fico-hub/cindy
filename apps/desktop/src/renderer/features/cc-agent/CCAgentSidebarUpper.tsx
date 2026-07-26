@@ -2732,24 +2732,56 @@ function RailPanels({
   // 键盘打开(popover 焦点契约,DESIGN.md §14.2):焦点移入一级面板的首个
   // 可聚焦元素(对话面板=头部新建钮/项目面板=首行),Tab 不再穿越 portal 间隔
   // 的无关控件(codex review);关闭时还焦到触发瓷砖,键盘导航可继续。
+  // 还焦前必须查**可见性**而非仅 isConnected:折叠/展开两视图常驻挂载,
+  // 侧栏展开或 ⌘B 隐藏后 rail 瓷砖仍 connected 但 opacity-0 + pointer-events
+  // -none,把焦点还给不可见元素会让键盘用户失联(codex review)。
+  const focusIfVisible = (el: HTMLElement | null): void => {
+    if (!el?.isConnected) return;
+    if (
+      typeof el.checkVisibility === 'function' &&
+      !el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
+    )
+      return;
+    el.focus();
+  };
+  const focusFirstIn = (selector: string): void => {
+    document
+      .querySelector(selector)
+      ?.querySelector<HTMLElement>('button, [role="menuitem"], [tabindex]:not([tabindex="-1"])')
+      ?.focus();
+  };
   const keyboardFocusReturnRef = useRef<HTMLElement | null>(null);
   useEffect(() => {
     if (!panelState.openedViaKeyboard || !panelState.openSection) return;
     keyboardFocusReturnRef.current = panelState.anchorEl;
-    const raf = requestAnimationFrame(() => {
-      const shell = document.querySelector('[data-rail-panel-level="1"]');
-      shell
-        ?.querySelector<HTMLElement>('button, [role="menuitem"], [tabindex]:not([tabindex="-1"])')
-        ?.focus();
-    });
+    const raf = requestAnimationFrame(() => focusFirstIn('[data-rail-panel-level="1"]'));
     return () => cancelAnimationFrame(raf);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [panelState.openedViaKeyboard, panelState.openSection]);
   useEffect(() => {
     if (panelState.openSection !== null) return;
     const returnTo = keyboardFocusReturnRef.current;
     keyboardFocusReturnRef.current = null;
-    if (returnTo?.isConnected) returnTo.focus();
+    focusIfVisible(returnTo);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [panelState.openSection]);
+  // 项目三级面板的同款契约(codex review:一级 effect 只观察 openSection,
+  // 覆盖不到 openProjectKey):键盘展开 → 焦点入三级首个可聚焦;收起 → 还焦
+  // 到展开它的项目行。
+  const keyboardProjectReturnRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (!panelState.projectOpenedViaKeyboard || !panelState.openProjectKey) return;
+    const raf = requestAnimationFrame(() => focusFirstIn('[data-rail-panel-level="2"]'));
+    return () => cancelAnimationFrame(raf);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [panelState.projectOpenedViaKeyboard, panelState.openProjectKey]);
+  useEffect(() => {
+    if (panelState.openProjectKey !== null) return;
+    const returnTo = keyboardProjectReturnRef.current;
+    keyboardProjectReturnRef.current = null;
+    focusIfVisible(returnTo);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [panelState.openProjectKey]);
 
   // 触发瓷砖可见性监测:⌘B 完全隐藏(aside w-0)、rail 滚出等任何"触发器
   // 消失"路径,即刻收面板——不依赖指针再动(review P1「键盘隐藏仍会残留」)。
@@ -3019,7 +3051,14 @@ function RailPanels({
                     // 同一条 openProject 路径,否则三级面板只有鼠标能打开(codex review)。
                     onClick={(e) => {
                       const rect = e.currentTarget.getBoundingClientRect();
-                      railPanelStore.openProject(p.projectKey, { right: rect.right, top: rect.top });
+                      // 键盘激活(detail===0)按 popover 契约展开三级并记录还焦行。
+                      const viaKeyboard = e.detail === 0;
+                      if (viaKeyboard) keyboardProjectReturnRef.current = e.currentTarget;
+                      railPanelStore.openProject(
+                        p.projectKey,
+                        { right: rect.right, top: rect.top },
+                        viaKeyboard,
+                      );
                     }}
                     onContextMenu={(e) => {
                       e.preventDefault();

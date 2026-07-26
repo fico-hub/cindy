@@ -405,7 +405,13 @@ export function RailNav({
           // (openedViaKeyboard)覆写成 false、并清掉已展开的项目三级,破坏
           // popover 显式关闭契约(copilot review);锚点不变,重开本无意义。
           onMouseEnter={(e) => {
-            if (panelState.openSection !== key) openSectionAt(key, e.currentTarget);
+            if (panelState.openSection !== key) {
+              openSectionAt(key, e.currentTarget);
+            } else {
+              // 不重开,但要取消可能在途的收回计时(离开瓷砖 120ms 内折返;
+              // copilot review)——全局 pointermove 保活通常已覆盖,这里兜底。
+              railPanelStore.cancelClose();
+            }
           }}
           onMouseLeave={() => railPanelStore.scheduleClose()}
           // 键盘激活(Enter/Space 的合成 click,detail===0):按 popover 焦点契约

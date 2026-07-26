@@ -29,6 +29,8 @@ export interface RailPanelState {
    *  hover 宽限收回让位,只经 Esc/面板外点击/执行动作显式关闭。 */
   openedViaKeyboard: boolean;
   openProjectKey: string | null;
+  /** 项目三级面板由键盘打开(Enter/Space 于项目行):同 popover 契约。 */
+  projectOpenedViaKeyboard: boolean;
   projectAnchor: RailPanelAnchor | null;
   /** 灯语取样范围(会话 id):由 RailPanels(ExpandedView)发布,与面板实际
    *  展示的过滤后集合一致(vendor/项目筛选/未分类都算);null = 尚未发布,
@@ -50,6 +52,7 @@ const CLOSED_FIELDS = {
   anchorEl: null,
   openedViaKeyboard: false,
   openProjectKey: null,
+  projectOpenedViaKeyboard: false,
   projectAnchor: null,
 } as const;
 
@@ -132,6 +135,7 @@ export const railPanelStore = {
       openedViaKeyboard: viaKeyboard,
       openProjectKey: null,
       projectAnchor: null,
+      projectOpenedViaKeyboard: false,
     });
   },
 
@@ -150,11 +154,16 @@ export const railPanelStore = {
     emit({ ...state, lampScope: scope });
   },
   /** 项目一级面板内 hover 具体项目 → 打开二级。 */
-  openProject(projectKey: string, anchor: RailPanelAnchor): void {
+  openProject(projectKey: string, anchor: RailPanelAnchor, viaKeyboard = false): void {
     clearCloseTimer();
     clearProjectCloseTimer();
     if (state.openSection !== 'projects') return;
-    emit({ ...state, openProjectKey: projectKey, projectAnchor: anchor });
+    emit({
+      ...state,
+      openProjectKey: projectKey,
+      projectAnchor: anchor,
+      projectOpenedViaKeyboard: viaKeyboard,
+    });
   },
 
   cancelClose(): void {
@@ -177,13 +186,14 @@ export const railPanelStore = {
     clearProjectCloseTimer();
   },
   scheduleProjectClose(): void {
-    if (state.openedViaKeyboard) return;
+    if (state.openedViaKeyboard || state.projectOpenedViaKeyboard) return;
     if (suppressAutoClose()) return;
     clearProjectCloseTimer();
     projectCloseTimer = setTimeout(() => {
       projectCloseTimer = null;
       if (suppressAutoClose()) return;
-      if (state.openProjectKey) emit({ ...state, openProjectKey: null, projectAnchor: null });
+      if (state.openProjectKey)
+        emit({ ...state, openProjectKey: null, projectAnchor: null, projectOpenedViaKeyboard: false });
     }, RAIL_PANEL_CLOSE_GRACE_MS);
   },
 
