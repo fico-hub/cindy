@@ -401,7 +401,12 @@ export function RailNav({
           title={t(`ccAgent.sidebar.railNav.${key}`)}
           aria-haspopup="menu"
           aria-expanded={panelState.openSection === key}
-          onMouseEnter={(e) => openSectionAt(key, e.currentTarget)}
+          // 同 section 已打开时 hover 不重复 open:重复调用会把键盘打开态
+          // (openedViaKeyboard)覆写成 false、并清掉已展开的项目三级,破坏
+          // popover 显式关闭契约(copilot review);锚点不变,重开本无意义。
+          onMouseEnter={(e) => {
+            if (panelState.openSection !== key) openSectionAt(key, e.currentTarget);
+          }}
           onMouseLeave={() => railPanelStore.scheduleClose()}
           // 键盘激活(Enter/Space 的合成 click,detail===0):按 popover 焦点契约
           // 打开——焦点移入面板、hover 收回让位、显式关闭(codex review)。
