@@ -2682,12 +2682,19 @@ function RailPanels({
     y: number;
     projectKey: string;
   } | null>(null);
+  // 面板经 closeAll 路径(⌘B 隐藏/侧栏展开/触发器消失)关闭时不会走菜单的
+  // onOpenChange —— openSection 离开 projects 就同步清掉菜单状态,否则组件常驻
+  // (只是 return null),下次打开面板旧菜单会按旧坐标复现并引用旧项目(review)。
+  // 与下方 showAllProjects 的复位同构。
   const attentionKinds = useSessionAttentionKinds();
   const urgentSet = useSessionAttentionUrgencySet();
   // 项目列表「显示全部」:面板关闭后复位(与 ProjectsSection 的段收起复位同语义)。
   const [showAllProjects, setShowAllProjects] = useState(false);
   useEffect(() => {
-    if (panelState.openSection !== 'projects') setShowAllProjects(false);
+    if (panelState.openSection !== 'projects') {
+      setShowAllProjects(false);
+      setProjectMenu(null);
+    }
   }, [panelState.openSection]);
 
   // 生命周期清理(review P1「Portal 面板跨视图残留」):
