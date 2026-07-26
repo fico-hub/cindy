@@ -27,8 +27,11 @@ export function persistVoiceInputSelectionWithCustomAsrSecret<T>(
     return persistSelection();
   } catch (error) {
     if (!restoreSecret(secretStore, previousSecret)) {
+      const quarantined = quarantineSecret(secretStore);
       throw new Error(
-        'Failed to save voice input model selection and restore the previous ASR key.',
+        quarantined
+          ? 'Failed to save voice input model selection; the ASR key was cleared because restoring it failed.'
+          : 'Failed to save voice input model selection and restore the previous ASR key.',
         { cause: error },
       );
     }
@@ -55,7 +58,23 @@ function restoreSecret(
   secretStore: CustomAsrSecretStore,
   previousSecret: string | null,
 ): boolean {
-  return previousSecret === null
-    ? secretStore.remove('voice-asr').success
-    : secretStore.set('voice-asr', previousSecret);
+  try {
+    return previousSecret === null
+      ? secretStore.remove('voice-asr').success
+      : secretStore.set('voice-asr', previousSecret);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * If compensation cannot restore the previous secret, remove the uncertain
+ * value so the old config fails closed instead of pairing with the new key.
+ */
+function quarantineSecret(secretStore: CustomAsrSecretStore): boolean {
+  try {
+    return secretStore.remove('voice-asr').success;
+  } catch {
+    return false;
+  }
 }

@@ -128,6 +128,7 @@ export function useVoiceInputModelSelection(): {
       serviceMode: null,
       asrProvider: null,
       customAsr: null,
+      customAsrApiKey: null,
       refinerProvider: null,
       refinerModel: null,
       refinerProviderChain: null,

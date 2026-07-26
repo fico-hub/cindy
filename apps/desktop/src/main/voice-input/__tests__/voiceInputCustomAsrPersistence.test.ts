@@ -76,6 +76,7 @@ describe('custom ASR model-selection persistence', () => {
     vi.mocked(store.set)
       .mockReturnValueOnce(true)
       .mockReturnValueOnce(false);
+    vi.mocked(store.remove).mockReturnValue({ success: false });
     const configError = new Error('config write failed');
 
     let thrown: unknown;
@@ -94,6 +95,24 @@ describe('custom ASR model-selection persistence', () => {
     expect(thrown).toBeInstanceOf(Error);
     expect((thrown as Error).message).toContain('restore the previous ASR key');
     expect((thrown as Error & { cause?: unknown }).cause).toBe(configError);
+  });
+
+  it('clears the uncertain key when restore fails but quarantine succeeds', () => {
+    const store = createSecretStore('old-key');
+    vi.mocked(store.set)
+      .mockReturnValueOnce(true)
+      .mockReturnValueOnce(false);
+    const configError = new Error('config write failed');
+
+    expect(() => persistVoiceInputSelectionWithCustomAsrSecret(
+      () => {
+        throw configError;
+      },
+      store,
+      { action: 'set', value: 'new-key' },
+    )).toThrow('the ASR key was cleared');
+    expect(store.value).toBeNull();
+    expect(store.remove).toHaveBeenCalledWith('voice-asr');
   });
 
   it('commits both key and selection when both writes succeed', () => {

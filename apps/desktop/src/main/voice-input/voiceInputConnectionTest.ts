@@ -52,6 +52,7 @@ export function classifyVoiceInputConnectionTestError(
     || normalized.includes('missing credential')
     || normalized.includes('sign-in is required')
     || normalized.includes('login is required')
+    || normalized.includes('configure the realtime asr websocket url')
   ) {
     return 'credentials-missing';
   }

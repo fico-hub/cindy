@@ -1796,7 +1796,10 @@ export function registerVoiceInputIpc(): void {
       return runSerializedVoiceInputConnectionTest({
         provider,
         providerModel,
-        createProvider: () => createVoiceInputProvider(provider, undefined),
+        createProvider: () => {
+          invalidatePrewarmedRealtimeAsrWebSocketSession();
+          return createVoiceInputProvider(provider, undefined);
+        },
         onError: (error) => {
           log.warn('voice input connection test failed', {
             provider,
