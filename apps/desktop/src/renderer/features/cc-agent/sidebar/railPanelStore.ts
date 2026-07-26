@@ -93,7 +93,9 @@ export function panelHasEditingFocus(): boolean {
  *  - 纯 inline style 读取,热路径(全局 pointermove)零选择器解析开销,
  *    也没有 :has 的引擎兼容面。 */
 function panelHasBlockingOverlay(): boolean {
-  return typeof document !== 'undefined' && document.body.style.pointerEvents === 'none';
+  // body 可空(极早初始化 / 非浏览器测试环境),空时按无浮层处理。
+  const body = typeof document !== 'undefined' ? document.body : null;
+  return body != null && body.style.pointerEvents === 'none';
 }
 
 function suppressAutoClose(): boolean {

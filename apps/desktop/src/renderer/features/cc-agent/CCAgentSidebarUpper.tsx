@@ -2764,6 +2764,11 @@ function RailPanels({
       if (e.key !== 'Escape') return;
       // 行内重命名编辑中:Esc 归编辑器(取消编辑),不整面板收掉。
       if (panelHasEditingFocus()) return;
+      // 有 Radix 浮层(行菜单/右键菜单/子菜单)挂载时:这一记 Esc 归浮层
+      // (Radix 自己会 dismiss),不能同帧把面板也收掉——否则触发行被卸载,
+      // 还焦逻辑失效、焦点掉到 document(codex review)。浮层的 React 卸载
+      // 发生在本事件处理之后,此刻 querySelector 仍能命中。
+      if (document.querySelector('[data-radix-popper-content-wrapper]')) return;
       railPanelStore.closeAll();
     };
     const onDown = (e: MouseEvent) => {
@@ -2983,7 +2988,15 @@ function RailPanels({
                     onContextMenu={(e) => {
                       e.preventDefault();
                       projectMenuAnchorRef.current = e.currentTarget;
-                      setProjectMenu({ x: e.clientX, y: e.clientY, projectKey: p.projectKey });
+                      // 键盘唤起(Shift+F10/Menu 键)时浏览器报 clientX/Y=0,
+                      // 菜单会飘到视口左上角——退回行矩形定位(codex review)。
+                      const keyboardInvoked = e.clientX === 0 && e.clientY === 0;
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      setProjectMenu({
+                        x: keyboardInvoked ? rect.left + 12 : e.clientX,
+                        y: keyboardInvoked ? rect.bottom - 2 : e.clientY,
+                        projectKey: p.projectKey,
+                      });
                     }}
                     onMouseLeave={() => railPanelStore.scheduleProjectClose()}
                     className={cn(
