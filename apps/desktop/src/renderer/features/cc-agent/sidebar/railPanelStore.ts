@@ -78,6 +78,26 @@ export function panelHasEditingFocus(): boolean {
   return ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable;
 }
 
+/** 有阻断性浮层(Radix 菜单/子菜单/选择器/确认弹窗)打开时抑制 hover 宽限收回:
+ *  Radix modal 浮层会给 body 挂 pointer-events:none,面板上的指针判定全部失灵——
+ *  mouseleave(relatedTarget 不匹配保活白名单)与全局 pointermove(target 退化成
+ *  `<html>`)都会误判「指针已离开」,把面板连同刚弹出的菜单一起收掉(实测:行 ⋮
+ *  菜单弹出即自动关闭;右键菜单因光标恰好落在菜单内容上而幸免)。浮层关闭后
+ *  body 恢复,下一次 pointermove 重新接管收回。tooltip 也挂 popper wrapper,
+ *  用 :has 限定菜单/列表内容,不让悬浮提示误阻收回。 */
+function panelHasBlockingOverlay(): boolean {
+  if (typeof document === 'undefined') return false;
+  return (
+    document.querySelector(
+      '[data-radix-popper-content-wrapper]:has([role="menu"],[role="listbox"]),[role="dialog"],[role="alertdialog"]',
+    ) != null
+  );
+}
+
+function suppressAutoClose(): boolean {
+  return panelHasEditingFocus() || panelHasBlockingOverlay();
+}
+
 export const railPanelStore = {
   subscribe(listener: () => void): () => void {
     listeners.add(listener);
@@ -120,18 +140,25 @@ export const railPanelStore = {
     clearCloseTimer();
   },
   scheduleClose(): void {
-    if (panelHasEditingFocus()) return;
+    if (suppressAutoClose()) return;
     clearCloseTimer();
-    closeTimer = setTimeout(() => { closeTimer = null; railPanelStore.closeAll(); }, RAIL_PANEL_CLOSE_GRACE_MS);
+    closeTimer = setTimeout(() => {
+      closeTimer = null;
+      // 触发时再验一次:浮层可能在计时器排下之后、走完之前才挂载
+      // (点击 ⋮ → mouseleave 先到、菜单内容后 mount 的竞态)。
+      if (suppressAutoClose()) return;
+      railPanelStore.closeAll();
+    }, RAIL_PANEL_CLOSE_GRACE_MS);
   },
   cancelProjectClose(): void {
     clearProjectCloseTimer();
   },
   scheduleProjectClose(): void {
-    if (panelHasEditingFocus()) return;
+    if (suppressAutoClose()) return;
     clearProjectCloseTimer();
     projectCloseTimer = setTimeout(() => {
       projectCloseTimer = null;
+      if (suppressAutoClose()) return;
       if (state.openProjectKey) emit({ ...state, openProjectKey: null, projectAnchor: null });
     }, RAIL_PANEL_CLOSE_GRACE_MS);
   },
