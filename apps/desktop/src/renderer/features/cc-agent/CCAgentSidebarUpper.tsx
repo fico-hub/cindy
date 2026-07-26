@@ -132,7 +132,11 @@ import {
   SIDEBAR_RAIL_ICON_BUTTON_CLASS,
 } from '@/components/sidebar/SidebarIconButton';
 import { RailNav, remoteLampOf } from './sidebar/RailNav';
-import { panelHasEditingFocus, railPanelStore } from './sidebar/railPanelStore';
+import {
+  panelHasBlockingOverlay,
+  panelHasEditingFocus,
+  railPanelStore,
+} from './sidebar/railPanelStore';
 import { SessionEntryList } from './sidebar/SessionEntryList';
 import { AttentionDot } from '@/components/sidebar/AttentionDot';
 import {
@@ -2764,11 +2768,18 @@ function RailPanels({
       if (e.key !== 'Escape') return;
       // 行内重命名编辑中:Esc 归编辑器(取消编辑),不整面板收掉。
       if (panelHasEditingFocus()) return;
-      // 有 Radix 浮层(行菜单/右键菜单/子菜单)挂载时:这一记 Esc 归浮层
-      // (Radix 自己会 dismiss),不能同帧把面板也收掉——否则触发行被卸载,
-      // 还焦逻辑失效、焦点掉到 document(codex review)。浮层的 React 卸载
-      // 发生在本事件处理之后,此刻 querySelector 仍能命中。
-      if (document.querySelector('[data-radix-popper-content-wrapper]')) return;
+      // 有浮层挂载时:这一记 Esc 归浮层(Radix 自己会 dismiss),不能同帧把
+      // 面板也收掉——否则触发行被卸载,还焦逻辑失效、焦点掉到 document
+      // (codex review)。两路判定:菜单/子菜单看 popper 存在性(React 卸载
+      // 发生在本事件处理之后,此刻必命中);ConfirmDialog 等弹窗看模态信号
+      // (panelHasBlockingOverlay,copilot review)——不能按 role 全量匹配,
+      // 否则 FindInPageBar 的常驻非模态 role="dialog" 会让 Esc 永远收不掉
+      // 面板(#505 同款教训)。
+      if (
+        document.querySelector('[data-radix-popper-content-wrapper]') ||
+        panelHasBlockingOverlay()
+      )
+        return;
       railPanelStore.closeAll();
     };
     const onDown = (e: MouseEvent) => {

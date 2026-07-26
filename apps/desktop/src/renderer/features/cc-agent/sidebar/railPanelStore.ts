@@ -92,7 +92,7 @@ export function panelHasEditingFocus(): boolean {
  *    关闭后由下一次 pointermove 收回,是可达的最优行为;
  *  - 纯 inline style 读取,热路径(全局 pointermove)零选择器解析开销,
  *    也没有 :has 的引擎兼容面。 */
-function panelHasBlockingOverlay(): boolean {
+export function panelHasBlockingOverlay(): boolean {
   // body 可空(极早初始化 / 非浏览器测试环境),空时按无浮层处理。
   const body = typeof document !== 'undefined' ? document.body : null;
   return body != null && body.style.pointerEvents === 'none';
