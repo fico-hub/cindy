@@ -2729,6 +2729,28 @@ function RailPanels({
     });
   }, [projects, unclassified, dialogues]);
 
+  // 键盘打开(popover 焦点契约,DESIGN.md §14.2):焦点移入一级面板的首个
+  // 可聚焦元素(对话面板=头部新建钮/项目面板=首行),Tab 不再穿越 portal 间隔
+  // 的无关控件(codex review);关闭时还焦到触发瓷砖,键盘导航可继续。
+  const keyboardFocusReturnRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (!panelState.openedViaKeyboard || !panelState.openSection) return;
+    keyboardFocusReturnRef.current = panelState.anchorEl;
+    const raf = requestAnimationFrame(() => {
+      const shell = document.querySelector('[data-rail-panel-level="1"]');
+      shell
+        ?.querySelector<HTMLElement>('button, [role="menuitem"], [tabindex]:not([tabindex="-1"])')
+        ?.focus();
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [panelState.openedViaKeyboard, panelState.openSection]);
+  useEffect(() => {
+    if (panelState.openSection !== null) return;
+    const returnTo = keyboardFocusReturnRef.current;
+    keyboardFocusReturnRef.current = null;
+    if (returnTo?.isConnected) returnTo.focus();
+  }, [panelState.openSection]);
+
   // 触发瓷砖可见性监测:⌘B 完全隐藏(aside w-0)、rail 滚出等任何"触发器
   // 消失"路径,即刻收面板——不依赖指针再动(review P1「键盘隐藏仍会残留」)。
   useEffect(() => {
@@ -2907,12 +2929,14 @@ function RailPanels({
   );
 
   /** 面板头部的新建按钮(展开态段头 SquarePen 同款配色);创建动作导航去
-   *  新建页,面板随之收起。 */
-  const panelHeadCreateButton = (label: string, onCreate: () => void) => (
+   *  新建页,面板随之收起。disabled = 远程写保护(与展开态 ProjectAction
+   *  同语义置灰,不收面板不丢上下文,codex review)。 */
+  const panelHeadCreateButton = (label: string, onCreate: () => void, disabled = false) => (
     <button
       type="button"
       aria-label={label}
       title={label}
+      disabled={disabled}
       onClick={() => {
         railPanelStore.closeAll();
         onCreate();
@@ -2923,6 +2947,7 @@ function RailPanels({
         // globals.css 移除了 Chromium 默认 outline,键盘可达按钮必须自带
         // token 化 focus 环(DESIGN.md §10;codex review)。
         'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]',
+        'disabled:opacity-40 disabled:hover:text-[var(--text-tertiary)]',
       )}
     >
       <SquarePen size={14} strokeWidth={2} />
@@ -3080,8 +3105,11 @@ function RailPanels({
             projectDisplayLabelWithMachine(openProject),
             openProject.sessions.length,
             panelHeadCreateButton(
-              t('ccAgent.sidebar.projectAction.newInDirectory'),
+              isDeviceLinkWriteBlocked(openProject)
+                ? t('ccAgent.remoteSession.actionsUnavailable')
+                : t('ccAgent.sidebar.projectAction.newInDirectory'),
               () => onCreateInProject(openProject),
+              isDeviceLinkWriteBlocked(openProject),
             ),
           )}
           <div className="max-h-[420px] overflow-y-auto [scrollbar-width:thin]">
@@ -3137,20 +3165,30 @@ function RailPanels({
             'shadow-[var(--shadow-menu)]',
           )}
         >
-          <DropdownMenuItem
-            onSelect={() => {
-              const target = projectMenu
-                ? projects.find((x) => x.projectKey === projectMenu.projectKey)
-                : null;
-              setProjectMenu(null);
-              if (!target) return;
-              railPanelStore.closeAll();
-              onCreateInProject(target);
-            }}
-            className="cursor-pointer text-sm text-[var(--msg-assistant-text)] hover:bg-[var(--cmd-palette-item-hover)]"
-          >
-            {t('ccAgent.sidebar.projectAction.newInDirectory')}
-          </DropdownMenuItem>
+          {(() => {
+            // 远程写保护项目:菜单项与展开态同语义禁用(codex review),不触发
+            // closeAll 丢上下文。
+            const menuTarget = projectMenu
+              ? projects.find((x) => x.projectKey === projectMenu.projectKey) ?? null
+              : null;
+            const menuTargetBlocked = menuTarget != null && isDeviceLinkWriteBlocked(menuTarget);
+            return (
+              <DropdownMenuItem
+                disabled={menuTarget == null || menuTargetBlocked}
+                onSelect={() => {
+                  setProjectMenu(null);
+                  if (!menuTarget || menuTargetBlocked) return;
+                  railPanelStore.closeAll();
+                  onCreateInProject(menuTarget);
+                }}
+                className="cursor-pointer text-sm text-[var(--msg-assistant-text)] hover:bg-[var(--cmd-palette-item-hover)]"
+              >
+                {menuTargetBlocked
+                  ? t('ccAgent.remoteSession.actionsUnavailable')
+                  : t('ccAgent.sidebar.projectAction.newInDirectory')}
+              </DropdownMenuItem>
+            );
+          })()}
         </DropdownMenuContent>
       </DropdownMenu>
     </>

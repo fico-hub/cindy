@@ -291,11 +291,14 @@ export function RailNav({
     [activeSessionId, navigate, sessions],
   );
 
-  const openSectionAt = useCallback((section: RailPanelSection, el: HTMLElement) => {
-    setPreview(null);
-    const rect = el.getBoundingClientRect();
-    railPanelStore.openSection(section, { right: rect.right, top: rect.top }, el);
-  }, []);
+  const openSectionAt = useCallback(
+    (section: RailPanelSection, el: HTMLElement, viaKeyboard = false) => {
+      setPreview(null);
+      const rect = el.getBoundingClientRect();
+      railPanelStore.openSection(section, { right: rect.right, top: rect.top }, el, viaKeyboard);
+    },
+    [],
+  );
 
   return (
     <>
@@ -400,7 +403,9 @@ export function RailNav({
           aria-expanded={panelState.openSection === key}
           onMouseEnter={(e) => openSectionAt(key, e.currentTarget)}
           onMouseLeave={() => railPanelStore.scheduleClose()}
-          onClick={(e) => openSectionAt(key, e.currentTarget)}
+          // 键盘激活(Enter/Space 的合成 click,detail===0):按 popover 焦点契约
+          // 打开——焦点移入面板、hover 收回让位、显式关闭(codex review)。
+          onClick={(e) => openSectionAt(key, e.currentTarget, e.detail === 0)}
           className={cn(
             'relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors duration-150',
             panelState.openSection === key

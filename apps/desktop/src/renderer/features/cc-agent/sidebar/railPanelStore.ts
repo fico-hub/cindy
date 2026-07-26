@@ -25,6 +25,9 @@ export interface RailPanelState {
   /** 触发瓷砖元素——RailPanels 用 IntersectionObserver 监测其可见性,
    *  触发器消失(⌘B 完全隐藏 / rail 滚出)即收面板,不依赖指针再动。 */
   anchorEl: HTMLElement | null;
+  /** 本次面板由键盘激活打开(Enter/Space):按 popover 焦点契约,焦点移入面板、
+   *  hover 宽限收回让位,只经 Esc/面板外点击/执行动作显式关闭。 */
+  openedViaKeyboard: boolean;
   openProjectKey: string | null;
   projectAnchor: RailPanelAnchor | null;
   /** 灯语取样范围(会话 id):由 RailPanels(ExpandedView)发布,与面板实际
@@ -45,6 +48,7 @@ const CLOSED_FIELDS = {
   openSection: null,
   anchor: null,
   anchorEl: null,
+  openedViaKeyboard: false,
   openProjectKey: null,
   projectAnchor: null,
 } as const;
@@ -112,10 +116,23 @@ export const railPanelStore = {
   },
 
   /** 打开(或切换)一级面板;同时收起可能开着的项目二级。 */
-  openSection(section: RailPanelSection, anchor: RailPanelAnchor, anchorEl: HTMLElement): void {
+  openSection(
+    section: RailPanelSection,
+    anchor: RailPanelAnchor,
+    anchorEl: HTMLElement,
+    viaKeyboard = false,
+  ): void {
     clearCloseTimer();
     clearProjectCloseTimer();
-    emit({ ...state, openSection: section, anchor, anchorEl, openProjectKey: null, projectAnchor: null });
+    emit({
+      ...state,
+      openSection: section,
+      anchor,
+      anchorEl,
+      openedViaKeyboard: viaKeyboard,
+      openProjectKey: null,
+      projectAnchor: null,
+    });
   },
 
   /** 由 RailPanels 发布与面板展示一致的灯语取样范围(浅比较去抖,防循环)。 */
@@ -144,6 +161,8 @@ export const railPanelStore = {
     clearCloseTimer();
   },
   scheduleClose(): void {
+    // 键盘打开的面板不做 hover 宽限收回(popover 契约:显式关闭)。
+    if (state.openedViaKeyboard) return;
     if (suppressAutoClose()) return;
     clearCloseTimer();
     closeTimer = setTimeout(() => {
@@ -158,6 +177,7 @@ export const railPanelStore = {
     clearProjectCloseTimer();
   },
   scheduleProjectClose(): void {
+    if (state.openedViaKeyboard) return;
     if (suppressAutoClose()) return;
     clearProjectCloseTimer();
     projectCloseTimer = setTimeout(() => {
