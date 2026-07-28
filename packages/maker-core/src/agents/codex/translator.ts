@@ -527,8 +527,9 @@ interface ContextCompactionItem {
  * 剥掉,不把内部语法漏给用户。
  */
 // 属性区 = 「非引号非花括号字符 或 双引号串」的序列:双引号串内允许出现 { } ,
-// 路径含花括号(如 /tmp/a{b}.md)不会让标记匹配失败而把内部语法漏给用户。
-const CODEX_FILE_CITATION_RE = /:codex-file-citation\{((?:[^"{}]|"[^"]*")*)\}/g;
+// 且支持反斜杠转义(\" 表示文件名里的引号)——路径含花括号 / 引号都不会让标记
+// 匹配失败而把内部语法漏给用户。
+const CODEX_FILE_CITATION_RE = /:codex-file-citation\{((?:[^"{}]|"(?:[^"\\]|\\.)*")*)\}/g;
 const CODEX_FILE_CITATION_OPEN = ':codex-file-citation{';
 
 /**
@@ -546,7 +547,10 @@ function inlineCodePath(path: string): string {
 export function normalizeCodexFileCitations(text: string): string {
   if (!text.includes(CODEX_FILE_CITATION_OPEN)) return text;
   return text.replace(CODEX_FILE_CITATION_RE, (_all, attrs: string) => {
-    const path = /path="([^"]*)"/.exec(attrs)?.[1]?.trim();
+    // 引号串取值支持 \" / \\ 转义;取出后不做 trim——文件名首尾空白是路径的
+    // 一部分,悄悄改写会指向另一个文件(review 反馈)。
+    const raw = /path="((?:[^"\\]|\\.)*)"/.exec(attrs)?.[1];
+    const path = raw === undefined ? undefined : raw.replace(/\\(.)/g, '$1');
     return path ? inlineCodePath(path) : '';
   });
 }
@@ -559,7 +563,9 @@ function findCitationClose(text: string, attrsStart: number): number {
   let inQuote = false;
   for (let i = attrsStart; i < text.length; i += 1) {
     const ch = text[i];
-    if (ch === '"') {
+    if (inQuote && ch === '\\') {
+      i += 1; // 引号串内的转义对(如 \")整体跳过,与正则同口径。
+    } else if (ch === '"') {
       inQuote = !inQuote;
     } else if (!inQuote && ch === '}') {
       return i;

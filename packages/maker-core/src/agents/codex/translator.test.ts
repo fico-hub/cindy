@@ -927,6 +927,14 @@ describe('codex file citation 归一化 (#785)', () => {
     expect(
       normalizeCodexFileCitations(':codex-file-citation{path="/tmp/ab`" purpose="output"}'),
     ).toBe('`` /tmp/ab` ``');
+    // 路径含转义引号(\"):解出真实文件名(review 反馈)。
+    expect(
+      normalizeCodexFileCitations(':codex-file-citation{path="/tmp/a\\"b.md" purpose="output"}'),
+    ).toBe('`/tmp/a"b.md`');
+    // 文件名首尾空白保留,不 trim(悄悄改写会指向另一个文件)。
+    expect(
+      normalizeCodexFileCitations(':codex-file-citation{path="/tmp/ab.md " purpose="output"}'),
+    ).toBe('`/tmp/ab.md `');
   });
 
   it('stableCitationBoundary 按住未写完的标记尾巴', async () => {
