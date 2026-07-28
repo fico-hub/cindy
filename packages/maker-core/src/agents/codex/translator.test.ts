@@ -915,6 +915,18 @@ describe('codex file citation 归一化 (#785)', () => {
       'bad  end',
     );
     expect(normalizeCodexFileCitations('no marker here')).toBe('no marker here');
+    // 路径含花括号(引号串内):标记仍完整匹配,不把内部语法漏给用户。
+    expect(
+      normalizeCodexFileCitations(':codex-file-citation{path="/tmp/a{b}.md" purpose="output"}'),
+    ).toBe('`/tmp/a{b}.md`');
+    // 路径含反引号:围栏升级为双反引号,code span 不被撑破。
+    expect(
+      normalizeCodexFileCitations(':codex-file-citation{path="/tmp/a`b.md" purpose="output"}'),
+    ).toBe('``/tmp/a`b.md``');
+    // 路径以反引号结尾:按 CommonMark 两侧补空格。
+    expect(
+      normalizeCodexFileCitations(':codex-file-citation{path="/tmp/ab`" purpose="output"}'),
+    ).toBe('`` /tmp/ab` ``');
   });
 
   it('stableCitationBoundary 按住未写完的标记尾巴', async () => {
@@ -926,6 +938,11 @@ describe('codex file citation 归一化 (#785)', () => {
     expect(stableCitationBoundary(partialPrefix)).toBe(4);
     const complete = 'abc :codex-file-citation{path="/x"}';
     expect(stableCitationBoundary(complete)).toBe(complete.length);
+    // 引号串内的 } 不是闭合边界:标记未写完仍要按住(review 反馈的花括号路径场景)。
+    const braceInQuote = 'abc :codex-file-citation{path="/tmp/a{b}';
+    expect(stableCitationBoundary(braceInQuote)).toBe(4);
+    const braceComplete = 'abc :codex-file-citation{path="/tmp/a{b}.md"}';
+    expect(stableCitationBoundary(braceComplete)).toBe(braceComplete.length);
   });
 
   it('agentMessage 流式:标记跨 update 分段到达,delta 流与 final 全文一致且无内部语法', async () => {

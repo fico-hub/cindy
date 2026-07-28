@@ -526,15 +526,49 @@ interface ContextCompactionItem {
  * 是不可读的内部语法,归一化成行内代码的文件路径。没有 path 属性的畸形标记整个
  * 剥掉,不把内部语法漏给用户。
  */
-const CODEX_FILE_CITATION_RE = /:codex-file-citation\{([^{}]*)\}/g;
+// 属性区 = 「非引号非花括号字符 或 双引号串」的序列:双引号串内允许出现 { } ,
+// 路径含花括号(如 /tmp/a{b}.md)不会让标记匹配失败而把内部语法漏给用户。
+const CODEX_FILE_CITATION_RE = /:codex-file-citation\{((?:[^"{}]|"[^"]*")*)\}/g;
 const CODEX_FILE_CITATION_OPEN = ':codex-file-citation{';
+
+/**
+ * 路径包成 Markdown 行内代码:围栏取「比路径内最长反引号连跑多一个」的反引号数,
+ * 路径以反引号开头/结尾时按 CommonMark 规则两侧补空格——路径自身含反引号也不会
+ * 把 code span 撑破。
+ */
+function inlineCodePath(path: string): string {
+  const longestRun = path.match(/`+/g)?.reduce((max, run) => Math.max(max, run.length), 0) ?? 0;
+  const fence = '`'.repeat(longestRun + 1);
+  const pad = path.startsWith('`') || path.endsWith('`') ? ' ' : '';
+  return `${fence}${pad}${path}${pad}${fence}`;
+}
 
 export function normalizeCodexFileCitations(text: string): string {
   if (!text.includes(CODEX_FILE_CITATION_OPEN)) return text;
   return text.replace(CODEX_FILE_CITATION_RE, (_all, attrs: string) => {
     const path = /path="([^"]*)"/.exec(attrs)?.[1]?.trim();
-    return path ? `\`${path}\`` : '';
+    return path ? inlineCodePath(path) : '';
   });
+}
+
+/**
+ * 属性区闭合 `}` 的位置(与 CODEX_FILE_CITATION_RE 同一口径:双引号串内的花括号
+ * 不算边界);找不到(未写完 / 引号未闭合 / 出现非法裸 `{`)→ -1。
+ */
+function findCitationClose(text: string, attrsStart: number): number {
+  let inQuote = false;
+  for (let i = attrsStart; i < text.length; i += 1) {
+    const ch = text[i];
+    if (ch === '"') {
+      inQuote = !inQuote;
+    } else if (!inQuote && ch === '}') {
+      return i;
+    } else if (!inQuote && ch === '{') {
+      // 裸 { 让正则永不匹配 —— 当作未完成按住;completed 时原样透出,不误吞正文。
+      return -1;
+    }
+  }
+  return -1;
 }
 
 /**
@@ -544,7 +578,7 @@ export function normalizeCodexFileCitations(text: string): string {
  */
 export function stableCitationBoundary(text: string): number {
   const open = text.lastIndexOf(CODEX_FILE_CITATION_OPEN);
-  if (open !== -1 && text.indexOf('}', open + CODEX_FILE_CITATION_OPEN.length) === -1) {
+  if (open !== -1 && findCitationClose(text, open + CODEX_FILE_CITATION_OPEN.length) === -1) {
     return open;
   }
   const maxProbe = Math.min(text.length, CODEX_FILE_CITATION_OPEN.length - 1);
