@@ -1196,7 +1196,58 @@ function messageFingerprint(
   text: string,
   createdAt: number,
 ): MessageFingerprint {
-  return { role, text: normalizeFingerprintText(text), createdAt };
+  // assistant 指纹两侧统一过 citation 规范化:升级前落库的旧行仍带原始
+  // `:codex-file-citation{...}` 标记,导入侧新文本已归一化;不同构比较会把同一条
+  // 回复判成两条、重复插入(review 反馈)。规范化只影响比较,不改任何落库内容。
+  const canonical = role === 'assistant' ? canonicalizeCodexCitations(text) : text;
+  return { role, text: normalizeFingerprintText(canonical), createdAt };
+}
+
+// 与 maker-core translator 的 finalizeCodexCitationText 同构(剥「扫描到文本末尾仍
+// 未闭合」的截断残尾 + 标记→行内代码路径)。SSoT 在
+// packages/maker-core/src/agents/codex/translator.ts;eval-fallback worker
+// (WorkerThreadTransport WORKER_CODE)无法 import,两份 worker 各内联一份,
+// translator 口径变更时需同步(有 tx.test 用真实标记 fixture 钉行为)。
+const CODEX_CITATION_RE = /:codex-file-citation\{((?:[^"{}]|"(?:[^"\\]|\\.)*")*)\}/g;
+const CODEX_CITATION_OPEN = ':codex-file-citation{';
+
+function codexCitationClose(text: string, attrsStart: number): number {
+  let inQuote = false;
+  for (let i = attrsStart; i < text.length; i += 1) {
+    const ch = text[i];
+    if (inQuote && ch === '\\') i += 1;
+    else if (ch === '"') inQuote = !inQuote;
+    else if (!inQuote && ch === '}') return i;
+    else if (!inQuote && ch === '{') return -2; // 裸 { = 畸形标记,原样透出
+  }
+  return -1; // 扫描到末尾未闭合 = 截断残尾
+}
+
+function canonicalizeCodexCitations(text: string): string {
+  if (text.indexOf(CODEX_CITATION_OPEN) === -1) return text;
+  let from = 0;
+  let openAt = -1;
+  for (;;) {
+    const open = text.indexOf(CODEX_CITATION_OPEN, from);
+    if (open === -1) break;
+    const close = codexCitationClose(text, open + CODEX_CITATION_OPEN.length);
+    if (close === -1) {
+      openAt = open;
+      break;
+    }
+    from = close === -2 ? open + CODEX_CITATION_OPEN.length : close + 1;
+  }
+  const base = openAt === -1 ? text : text.slice(0, openAt);
+  return base.replace(CODEX_CITATION_RE, (_all, attrs: string) => {
+    const raw = /path="((?:[^"\\]|\\.)*)"/.exec(attrs)?.[1];
+    const path = raw === undefined ? undefined : raw.replace(/\\([\\"])/g, '$1');
+    if (!path) return '';
+    const longestRun = path.match(/`+/g)?.reduce((max, run) => Math.max(max, run.length), 0) ?? 0;
+    const fence = '`'.repeat(longestRun + 1);
+    const symmetricSpace = path.startsWith(' ') && path.endsWith(' ') && path.trim().length > 0;
+    const pad = path.startsWith('`') || path.endsWith('`') || symmetricSpace ? ' ' : '';
+    return `${fence}${pad}${path}${pad}${fence}`;
+  });
 }
 
 function normalizeStoredMessageText(raw: string): string {

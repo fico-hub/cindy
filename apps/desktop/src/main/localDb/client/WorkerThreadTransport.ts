@@ -1202,7 +1202,51 @@ function isLikelyLocalDuplicate(existing, row) {
 }
 
 function messageFingerprint(role, text, createdAt) {
-  return { role, text: normalizeFingerprintText(text), createdAt };
+  const canonical = role === 'assistant' ? canonicalizeCodexCitations(text) : text;
+  return { role, text: normalizeFingerprintText(canonical), createdAt };
+}
+
+// 与 maker-core translator finalizeCodexCitationText 同构;SSoT 见
+// packages/maker-core/src/agents/codex/translator.ts,口径变更需同步(镜像另见
+// worker/opHandlers/tx.ts)。assistant 指纹两侧统一规范化,只影响比较不改落库内容。
+const CODEX_CITATION_RE = /:codex-file-citation\\{((?:[^"{}]|"(?:[^"\\\\]|\\\\.)*")*)\\}/g;
+const CODEX_CITATION_OPEN = ':codex-file-citation{';
+
+function codexCitationClose(text, attrsStart) {
+  let inQuote = false;
+  for (let i = attrsStart; i < text.length; i += 1) {
+    const ch = text[i];
+    if (inQuote && ch === '\\\\') i += 1;
+    else if (ch === '"') inQuote = !inQuote;
+    else if (!inQuote && ch === '}') return i;
+    else if (!inQuote && ch === '{') return -2;
+  }
+  return -1;
+}
+
+function canonicalizeCodexCitations(text) {
+  if (text.indexOf(CODEX_CITATION_OPEN) === -1) return text;
+  let from = 0;
+  let openAt = -1;
+  for (;;) {
+    const open = text.indexOf(CODEX_CITATION_OPEN, from);
+    if (open === -1) break;
+    const close = codexCitationClose(text, open + CODEX_CITATION_OPEN.length);
+    if (close === -1) { openAt = open; break; }
+    from = close === -2 ? open + CODEX_CITATION_OPEN.length : close + 1;
+  }
+  const base = openAt === -1 ? text : text.slice(0, openAt);
+  return base.replace(CODEX_CITATION_RE, (_all, attrs) => {
+    const m = /path="((?:[^"\\\\]|\\\\.)*)"/.exec(attrs);
+    const path = m ? m[1].replace(/\\\\([\\\\"])/g, '$1') : undefined;
+    if (!path) return '';
+    const runs = path.match(/\`+/g);
+    const longestRun = runs ? runs.reduce((max, run) => Math.max(max, run.length), 0) : 0;
+    const fence = '\`'.repeat(longestRun + 1);
+    const symmetricSpace = path.startsWith(' ') && path.endsWith(' ') && path.trim().length > 0;
+    const pad = path.startsWith('\`') || path.endsWith('\`') || symmetricSpace ? ' ' : '';
+    return fence + pad + path + pad + fence;
+  });
 }
 
 function normalizeStoredMessageText(raw) {

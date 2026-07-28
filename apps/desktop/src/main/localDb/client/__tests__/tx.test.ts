@@ -195,6 +195,47 @@ describe('db worker tx handlers', () => {
     });
   });
 
+  it('codex.importMessages dedupes pre-upgrade local rows that still carry raw citation markers', async () => {
+    await withClient(async (client) => {
+      await seedSession(client, 's1');
+      // 升级前经流式路径落库的本地 assistant 行:正文仍是原始 citation 标记。
+      await client.exec(
+        'INSERT INTO messages (id, client_id, session_id, role, content, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+        [
+          'local-1',
+          'local-1',
+          's1',
+          'assistant',
+          JSON.stringify('已保存::codex-file-citation{path="/tmp/报告.docx" purpose="output"},请查收。'),
+          1000,
+        ],
+      );
+
+      // 升级后再导入同一条回复:导入侧文本已归一化。两侧指纹统一规范化后应判定为
+      // 同一条,不插入第二份(review 反馈)。
+      const result = await client.tx('codex.importMessages', {
+        sessionId: 's1',
+        importClientIdPrefix: 'codex-import:',
+        sdkSessionId: 'thread-1',
+        model: 'gpt-5',
+        rows: [
+          {
+            lineNo: 1,
+            role: 'assistant',
+            text: '已保存:`/tmp/报告.docx`,请查收。',
+            content: '已保存:`/tmp/报告.docx`,请查收。',
+            createdAt: 1001,
+          },
+        ],
+      });
+
+      expect(result).toEqual({ changed: 0 });
+      await expect(
+        client.query('SELECT client_id FROM messages WHERE session_id = ?', ['s1']),
+      ).resolves.toEqual([{ client_id: 'local-1' }]);
+    });
+  });
+
   it('codex.importMessages does not rewrite tombstoned imported messages', async () => {
     await withClient(async (client) => {
       await seedSession(client, 's1');

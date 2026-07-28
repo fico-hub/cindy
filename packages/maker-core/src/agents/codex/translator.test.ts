@@ -946,6 +946,23 @@ describe('codex file citation 归一化 (#785)', () => {
     expect(
       normalizeCodexFileCitations(':codex-file-citation{path="/tmp/ab.md " purpose="output"}'),
     ).toBe('`/tmp/ab.md `');
+    // 首尾都是空格:CommonMark 渲染器会对这种 code span 各剥一个空格,补空格垫让
+    // 展示串回到真实路径(review 反馈);单侧空格渲染器不剥,不垫。
+    expect(
+      normalizeCodexFileCitations(':codex-file-citation{path=" ab.md " purpose="output"}'),
+    ).toBe('`  ab.md  `');
+  });
+
+  it('finalizeCodexCitationText:剥截断残尾 + 归一化,幂等(#785 导入口径)', async () => {
+    const { finalizeCodexCitationText } = await import('./translator.js');
+    // 截断残尾剥除,与流式 completed 同口径。
+    expect(finalizeCodexCitationText('文件在 :codex-file-citation{path="/tmp/x')).toBe('文件在 ');
+    // 完整标记归一化。
+    expect(
+      finalizeCodexCitationText('done :codex-file-citation{path="/a/b.md" purpose="output"}'),
+    ).toBe('done `/a/b.md`');
+    // 对已归一化文本幂等。
+    expect(finalizeCodexCitationText('done `/a/b.md`')).toBe('done `/a/b.md`');
   });
 
   it('stableCitationBoundary 按住未写完的标记尾巴', async () => {

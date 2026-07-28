@@ -540,7 +540,11 @@ const CODEX_FILE_CITATION_OPEN = ':codex-file-citation{';
 function inlineCodePath(path: string): string {
   const longestRun = path.match(/`+/g)?.reduce((max, run) => Math.max(max, run.length), 0) ?? 0;
   const fence = '`'.repeat(longestRun + 1);
-  const pad = path.startsWith('`') || path.endsWith('`') ? ' ' : '';
+  // 补空格垫的两种情形:路径以反引号开头/结尾(隔开围栏),或首尾都是空格且非全空格
+  // (CommonMark 渲染器对这种 code span 会各剥一个空格,不垫会把真实路径的首尾空白
+  // 剥掉指向别的文件;单侧空格渲染器不剥,不垫)。
+  const symmetricSpace = path.startsWith(' ') && path.endsWith(' ') && path.trim().length > 0;
+  const pad = path.startsWith('`') || path.endsWith('`') || symmetricSpace ? ' ' : '';
   return `${fence}${pad}${path}${pad}${fence}`;
 }
 
@@ -606,6 +610,16 @@ function findUnfinishedCitationOpen(text: string): number {
  * update 补全),归一化后的文本对这段尾巴不是 append-only。返回可安全发出的原文
  * 前缀长度,未写完的尾巴按住等下一轮;completed 时全量补发,不丢内容。
  */
+/**
+ * final 文本统一口径(流式 completed 与历史 rollout 导入共用):先剥「扫描到文本
+ * 末尾仍未闭合」的确定截断残尾(它之后没有正文可吞),再做 citation 归一化。
+ * 对已归一化文本幂等(无标记 → 原样返回)。
+ */
+export function finalizeCodexCitationText(text: string): string {
+  const openAt = findUnfinishedCitationOpen(text);
+  return normalizeCodexFileCitations(openAt === -1 ? text : text.slice(0, openAt));
+}
+
 export function stableCitationBoundary(text: string): number {
   const open = findUnfinishedCitationOpen(text);
   if (open !== -1) {
@@ -638,14 +652,10 @@ function handleAgentMessage(
     // 输出被截断在标记中间(有明确的 open、永远等不到 close)时,把残尾剥掉——
     // 内部语法不该漏给用户;只剥「扫描到文本末尾仍未闭合」的确定截断残尾(它之后
     // 没有正文可吞),疑似前缀(不足完整 open 字面量)可能是真实正文,保留。
-    let finalRaw = rawText;
-    const openAt = findUnfinishedCitationOpen(finalRaw);
-    if (openAt !== -1) {
-      finalRaw = finalRaw.slice(0, openAt);
-    }
+    // finalizeCodexCitationText 是与历史导入共用的统一口径。
     queue.push({
       type: 'text',
-      data: { text: normalizeCodexFileCitations(finalRaw), isFinal: true },
+      data: { text: finalizeCodexCitationText(rawText), isFinal: true },
       source: 'codex',
     });
     return;

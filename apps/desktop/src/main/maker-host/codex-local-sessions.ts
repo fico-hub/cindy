@@ -22,7 +22,7 @@ import {
 } from '@cindy/maker-shared/brand-identity';
 import { CURRENT_CINDY_REGION } from '../../shared/brandRegion.js';
 
-import { normalizeCodexFileCitations } from '@cindy/maker-core';
+import { finalizeCodexCitationText } from '@cindy/maker-core';
 
 import { getCurrentDbClientUserId, getDbClient } from '../localDb/client/current.js';
 import { createBetterSqliteDatabase } from '../localDb/betterSqliteFactory.js';
@@ -1953,12 +1953,13 @@ export function parseCodexRolloutMessageLine(
   const role = payload.role === 'assistant' ? 'assistant' : payload.role === 'user' ? 'user' : null;
   if (!role) return null;
   const rawText = extractContentText(payload.content);
-  // assistant 正文与流式路径同口径做 citation 归一化——rollout 存的是含
-  // `:codex-file-citation{...}` 内部语法的原文,直接入库会把它漏给用户(#785)。
+  // assistant 正文与流式 completed 同口径:剥截断残尾 + citation 归一化——rollout
+  // 存的是含 `:codex-file-citation{...}` 内部语法的原文(生成被打断时还带未闭合
+  // 残尾),直接入库会把它漏给用户(#785)。
   const text = (
     role === 'user'
       ? stripCompleteIdeOpenedFileBlocks(rawText)
-      : normalizeCodexFileCitations(rawText)
+      : finalizeCodexCitationText(rawText)
   ).trim();
   if (!text) return null;
   return {
@@ -1990,12 +1991,13 @@ async function parseCodexRolloutMessageLineForImport(
   if (!role) return null;
 
   const rawText = extractContentText(payload.content);
-  // assistant 正文与流式路径同口径做 citation 归一化——rollout 存的是含
-  // `:codex-file-citation{...}` 内部语法的原文,直接入库会把它漏给用户(#785)。
+  // assistant 正文与流式 completed 同口径:剥截断残尾 + citation 归一化——rollout
+  // 存的是含 `:codex-file-citation{...}` 内部语法的原文(生成被打断时还带未闭合
+  // 残尾),直接入库会把它漏给用户(#785)。
   const text = (
     role === 'user'
       ? stripCompleteIdeOpenedFileBlocks(rawText)
-      : normalizeCodexFileCitations(rawText)
+      : finalizeCodexCitationText(rawText)
   ).trim();
   const images = role === 'user'
     ? await extractCodexUserImages(payload.content, sessionId, lineNo)
