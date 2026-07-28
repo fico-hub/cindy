@@ -1206,9 +1206,7 @@ function messageFingerprint(role, text, createdAt) {
   return { role, text: normalizeFingerprintText(canonical), createdAt };
 }
 
-// 与 maker-core translator finalizeCodexCitationText 同构;SSoT 见
-// packages/maker-core/src/agents/codex/translator.ts,口径变更需同步(镜像另见
-// worker/opHandlers/tx.ts)。assistant 指纹两侧统一规范化,只影响比较不改落库内容。
+// 与 opHandlers/tx.ts 的指纹规范形同构;SSoT 注释见该文件,口径变更需同步。
 const CODEX_CITATION_RE = /:codex-file-citation\\{((?:[^"{}]|"(?:[^"\\\\]|\\\\.)*")*)\\}/g;
 const CODEX_CITATION_OPEN = ':codex-file-citation{';
 
@@ -1224,29 +1222,32 @@ function codexCitationClose(text, attrsStart) {
   return -1;
 }
 
+function decodeCitationPathForFingerprint(attrs) {
+  const m = /(?:^|\\s)path="((?:[^"\\\\]|\\\\.)*)"/.exec(attrs);
+  if (!m) return '';
+  const raw = m[1];
+  const nativeUnc = raw.startsWith('\\\\\\\\') && raw[2] !== '\\\\';
+  const head = nativeUnc ? '\\\\\\\\' : '';
+  return head + (nativeUnc ? raw.slice(2) : raw).replace(/\\\\([\\\\"])/g, '$1');
+}
+
 function canonicalizeCodexCitations(text) {
-  if (text.indexOf(CODEX_CITATION_OPEN) === -1) return text;
+  if (text.indexOf(CODEX_CITATION_OPEN) === -1 && text.indexOf('\`') === -1) return text;
+  let out = text;
   let from = 0;
-  let openAt = -1;
   for (;;) {
-    const open = text.indexOf(CODEX_CITATION_OPEN, from);
+    const open = out.indexOf(CODEX_CITATION_OPEN, from);
     if (open === -1) break;
-    const close = codexCitationClose(text, open + CODEX_CITATION_OPEN.length);
-    if (close === -1) { openAt = open; break; }
+    const close = codexCitationClose(out, open + CODEX_CITATION_OPEN.length);
+    if (close === -1) { out = out.slice(0, open); break; }
     from = close === -2 ? open + CODEX_CITATION_OPEN.length : close + 1;
   }
-  const base = openAt === -1 ? text : text.slice(0, openAt);
-  return base.replace(CODEX_CITATION_RE, (_all, attrs) => {
-    const m = /path="((?:[^"\\\\]|\\\\.)*)"/.exec(attrs);
-    const path = m ? m[1].replace(/\\\\([\\\\"])/g, (pair, ch, offset) => (offset === 0 && ch === '\\\\' ? pair : ch)) : undefined;
-    if (!path) return '';
-    const runs = path.match(/\`+/g);
-    const longestRun = runs ? runs.reduce((max, run) => Math.max(max, run.length), 0) : 0;
-    const fence = '\`'.repeat(longestRun + 1);
-    const symmetricSpace = path.startsWith(' ') && path.endsWith(' ') && path.trim().length > 0;
-    const pad = path.startsWith('\`') || path.endsWith('\`') || symmetricSpace ? ' ' : '';
-    return fence + pad + path + pad + fence;
-  });
+  for (let i = 0; i < 5; i += 1) {
+    const next = out.replace(CODEX_CITATION_RE, (_all, attrs) => decodeCitationPathForFingerprint(attrs));
+    if (next === out) break;
+    out = next;
+  }
+  return out.replace(/\`+/g, '').replace(/\\s+/g, ' ');
 }
 
 function normalizeStoredMessageText(raw) {

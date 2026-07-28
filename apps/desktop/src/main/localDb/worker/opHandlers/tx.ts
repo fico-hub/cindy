@@ -1203,11 +1203,13 @@ function messageFingerprint(
   return { role, text: normalizeFingerprintText(canonical), createdAt };
 }
 
-// 与 maker-core translator 的 finalizeCodexCitationText 同构(剥「扫描到文本末尾仍
-// 未闭合」的截断残尾 + 标记→行内代码路径)。SSoT 在
-// packages/maker-core/src/agents/codex/translator.ts;eval-fallback worker
-// (WorkerThreadTransport WORKER_CODE)无法 import,两份 worker 各内联一份,
-// translator 口径变更时需同步(有 tx.test 用真实标记 fixture 钉行为)。
+// 指纹专用规范形——与展示形(maker-core finalizeCodexCitationText)**刻意不同**:
+// 标记替换为解码路径本体(无 code span 围栏/空格垫),循环到不动点,再去掉全部
+// 反引号并折叠空白。这样「升级前的原始标记行」与「已归一化的展示形文本」两侧
+// 都收敛到同一规范形——路径本身解码出完整标记字面量的极端文件名也一致(review
+// 反馈:展示形二次处理不幂等,不能拿来当指纹)。只用于去重比较,不落库。
+// eval-fallback worker(WorkerThreadTransport WORKER_CODE)无法 import,两份 worker
+// 各内联一份,口径变更需同步(tx.test 用真实标记 fixture 钉行为)。
 const CODEX_CITATION_RE = /:codex-file-citation\{((?:[^"{}]|"(?:[^"\\]|\\.)*")*)\}/g;
 const CODEX_CITATION_OPEN = ':codex-file-citation{';
 
@@ -1223,36 +1225,41 @@ function codexCitationClose(text: string, attrsStart: number): number {
   return -1; // 扫描到末尾未闭合 = 截断残尾
 }
 
+// path 属性解码(与 translator extractCitationPath 同口径:完整属性名边界、
+// \"/\\ 转义、开头恰好两个反斜杠 = 原生 UNC 整体保留)。
+function decodeCitationPathForFingerprint(attrs: string): string {
+  const raw = /(?:^|\s)path="((?:[^"\\]|\\.)*)"/.exec(attrs)?.[1];
+  if (raw === undefined) return '';
+  const nativeUnc = raw.startsWith('\\\\') && raw[2] !== '\\';
+  const head = nativeUnc ? '\\\\' : '';
+  return head + (nativeUnc ? raw.slice(2) : raw).replace(/\\([\\"])/g, '$1');
+}
+
 function canonicalizeCodexCitations(text: string): string {
-  if (text.indexOf(CODEX_CITATION_OPEN) === -1) return text;
+  if (text.indexOf(CODEX_CITATION_OPEN) === -1 && text.indexOf('`') === -1) return text;
+  // 截断残尾剥除(与展示口径一致:只剥「扫描到文本末尾仍未闭合」的标记)。
+  let out = text;
   let from = 0;
-  let openAt = -1;
   for (;;) {
-    const open = text.indexOf(CODEX_CITATION_OPEN, from);
+    const open = out.indexOf(CODEX_CITATION_OPEN, from);
     if (open === -1) break;
-    const close = codexCitationClose(text, open + CODEX_CITATION_OPEN.length);
+    const close = codexCitationClose(out, open + CODEX_CITATION_OPEN.length);
     if (close === -1) {
-      openAt = open;
+      out = out.slice(0, open);
       break;
     }
     from = close === -2 ? open + CODEX_CITATION_OPEN.length : close + 1;
   }
-  const base = openAt === -1 ? text : text.slice(0, openAt);
-  return base.replace(CODEX_CITATION_RE, (_all, attrs: string) => {
-    const raw = /path="((?:[^"\\]|\\.)*)"/.exec(attrs)?.[1];
-    const path =
-      raw === undefined
-        ? undefined
-        : raw.replace(/\\([\\"])/g, (pair, ch: string, offset: number) =>
-            offset === 0 && ch === '\\' ? pair : ch,
-          );
-    if (!path) return '';
-    const longestRun = path.match(/`+/g)?.reduce((max, run) => Math.max(max, run.length), 0) ?? 0;
-    const fence = '`'.repeat(longestRun + 1);
-    const symmetricSpace = path.startsWith(' ') && path.endsWith(' ') && path.trim().length > 0;
-    const pad = path.startsWith('`') || path.endsWith('`') || symmetricSpace ? ' ' : '';
-    return `${fence}${pad}${path}${pad}${fence}`;
-  });
+  // 标记 → 解码路径,循环到不动点(路径解码可能暴露新的完整标记字面量;有界防御)。
+  for (let i = 0; i < 5; i += 1) {
+    const next = out.replace(CODEX_CITATION_RE, (_all, attrs: string) =>
+      decodeCitationPathForFingerprint(attrs),
+    );
+    if (next === out) break;
+    out = next;
+  }
+  // 展示形的围栏/空格垫与换行渲染差异不参与指纹比较。
+  return out.replace(/`+/g, '').replace(/\s+/g, ' ');
 }
 
 function normalizeStoredMessageText(raw: string): string {

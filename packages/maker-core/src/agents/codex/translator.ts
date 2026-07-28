@@ -551,20 +551,29 @@ function inlineCodePath(path: string): string {
 export function normalizeCodexFileCitations(text: string): string {
   if (!text.includes(CODEX_FILE_CITATION_OPEN)) return text;
   return text.replace(CODEX_FILE_CITATION_RE, (_all, attrs: string) => {
-    // 引号串取值只解 \" 与 \\ 两种转义——Windows 原生路径(C:\Users\...)里的
-    // 反斜杠不是转义前缀,全量 \\(.) 反转义会把路径毁成 C:Users...(review 反馈)。
-    // UNC 路径(\\server\share\...)的开头双反斜杠是路径本体,不当作转义对(review
-    // 反馈);只有非开头的 \\ 才解为单个反斜杠。
-    // 取出后不做 trim——文件名首尾空白是路径的一部分,悄悄改写会指向另一个文件。
-    const raw = /path="((?:[^"\\]|\\.)*)"/.exec(attrs)?.[1];
-    const path =
-      raw === undefined
-        ? undefined
-        : raw.replace(/\\([\\"])/g, (pair, ch: string, offset: number) =>
-            offset === 0 && ch === '\\' ? pair : ch,
-          );
+    const path = extractCitationPath(attrs);
     return path ? inlineCodePath(path) : '';
   });
+}
+
+/**
+ * 属性区取 path 值并解码。
+ * - 属性名要求完整边界(串首或空白后的 `path=`):`display_path=` 这类「以 path 结尾」
+ *   的别名不当作 path,也不遮蔽其后真正的 path 属性(review 反馈)。
+ * - 只解 \" 与 \\ 两种转义——Windows 原生路径(C:\Users\...)里的反斜杠不是转义
+ *   前缀,全量 \\(.) 反转义会把路径毁成 C:Users...(review 反馈)。
+ * - UNC 前缀:开头**恰好两个**反斜杠视为原生 UNC 本体整体保留(\\server\share);
+ *   更长的开头连跑(如转义形态 \\\\server)与其余位置按转义对解码,转义 UNC 解出
+ *   恰好两个分隔符(review 反馈)。
+ * - 取出后不做 trim——文件名首尾空白是路径的一部分,悄悄改写会指向另一个文件。
+ */
+function extractCitationPath(attrs: string): string | undefined {
+  const raw = /(?:^|\s)path="((?:[^"\\]|\\.)*)"/.exec(attrs)?.[1];
+  if (raw === undefined) return undefined;
+  const nativeUnc = raw.startsWith('\\\\') && raw[2] !== '\\';
+  const head = nativeUnc ? '\\\\' : '';
+  const tail = (nativeUnc ? raw.slice(2) : raw).replace(/\\([\\"])/g, '$1');
+  return head + tail;
 }
 
 // 闭合扫描的两种「未找到」:UNFINISHED = 扫描到文本末尾仍未闭合(可能是尚未写完、
@@ -620,7 +629,10 @@ function findUnfinishedCitationOpen(text: string): number {
 /**
  * final 文本统一口径(流式 completed 与历史 rollout 导入共用):先剥「扫描到文本
  * 末尾仍未闭合」的确定截断残尾(它之后没有正文可吞),再做 citation 归一化。
- * 对已归一化文本幂等(无标记 → 原样返回)。
+ * 契约:只做 raw→final 的**单次**转换(两个调用点都满足)。无标记文本原样返回,
+ * 但展示形不承诺严格幂等——路径本身解码出完整标记字面量的极端文件名,二次处理
+ * 会把生成的 code span 内容再替换;去重指纹因此不复用展示形,走独立的不动点
+ * 规范形(见 localDb worker 的 canonicalizeCodexCitations)。
  */
 export function finalizeCodexCitationText(text: string): string {
   const openAt = findUnfinishedCitationOpen(text);

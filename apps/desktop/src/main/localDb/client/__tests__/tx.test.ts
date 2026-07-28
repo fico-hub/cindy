@@ -236,6 +236,46 @@ describe('db worker tx handlers', () => {
     });
   });
 
+  it('codex.importMessages dedupes marker-literal filenames (指纹不动点规范形)', async () => {
+    await withClient(async (client) => {
+      await seedSession(client, 's1');
+      // 极端文件名:路径解码后本身是完整标记字面量。展示形二次处理不幂等,指纹
+      // 用不动点规范形让原始行与展示形行收敛到同一形。
+      await client.exec(
+        'INSERT INTO messages (id, client_id, session_id, role, content, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+        [
+          'local-1',
+          'local-1',
+          's1',
+          'assistant',
+          JSON.stringify('保存 :codex-file-citation{path="/tmp/a:codex-file-citation{path=\\"/b\\"}.md"} 完成'),
+          1000,
+        ],
+      );
+
+      const result = await client.tx('codex.importMessages', {
+        sessionId: 's1',
+        importClientIdPrefix: 'codex-import:',
+        sdkSessionId: 'thread-1',
+        model: 'gpt-5',
+        rows: [
+          {
+            lineNo: 1,
+            role: 'assistant',
+            text: '保存 `/tmp/a:codex-file-citation{path="/b"}.md` 完成',
+            content: '保存 `/tmp/a:codex-file-citation{path="/b"}.md` 完成',
+            createdAt: 1001,
+          },
+        ],
+      });
+
+      expect(result).toEqual({ changed: 0 });
+      await expect(
+        client.query('SELECT client_id FROM messages WHERE session_id = ?', ['s1']),
+      ).resolves.toEqual([{ client_id: 'local-1' }]);
+    });
+  });
+
   it('codex.importMessages does not rewrite tombstoned imported messages', async () => {
     await withClient(async (client) => {
       await seedSession(client, 's1');

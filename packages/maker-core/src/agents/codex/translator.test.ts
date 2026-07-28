@@ -948,6 +948,24 @@ describe('codex file citation 归一化 (#785)', () => {
         ':codex-file-citation{path="\\\\server\\share\\out.docx" purpose="output"}',
       ),
     ).toBe('`\\\\server\\share\\out.docx`');
+    // 转义形态的 UNC(\\\\server\\share):按转义对解码,解出恰好两个分隔符(review 反馈)。
+    expect(
+      normalizeCodexFileCitations(
+        ':codex-file-citation{path="\\\\\\\\server\\\\share\\\\out.docx" purpose="output"}',
+      ),
+    ).toBe('`\\\\server\\share\\out.docx`');
+    // 属性名完整边界:display_path 不是 path,畸形标记(无真 path)整个剥掉;
+    // 有真 path 时不被前面的 *_path 别名遮蔽(review 反馈)。
+    expect(
+      normalizeCodexFileCitations(
+        'bad :codex-file-citation{display_path="/tmp/preview.docx"} end',
+      ),
+    ).toBe('bad  end');
+    expect(
+      normalizeCodexFileCitations(
+        ':codex-file-citation{display_path="/tmp/preview.docx" path="/tmp/real.docx"}',
+      ),
+    ).toBe('`/tmp/real.docx`');
     // 文件名首尾空白保留,不 trim(悄悄改写会指向另一个文件)。
     expect(
       normalizeCodexFileCitations(':codex-file-citation{path="/tmp/ab.md " purpose="output"}'),
