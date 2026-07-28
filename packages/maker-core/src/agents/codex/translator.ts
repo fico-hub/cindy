@@ -547,10 +547,11 @@ function inlineCodePath(path: string): string {
 export function normalizeCodexFileCitations(text: string): string {
   if (!text.includes(CODEX_FILE_CITATION_OPEN)) return text;
   return text.replace(CODEX_FILE_CITATION_RE, (_all, attrs: string) => {
-    // 引号串取值支持 \" / \\ 转义;取出后不做 trim——文件名首尾空白是路径的
-    // 一部分,悄悄改写会指向另一个文件(review 反馈)。
+    // 引号串取值只解 \" 与 \\ 两种转义——Windows 原生路径(C:\Users\...)里的
+    // 反斜杠不是转义前缀,全量 \\(.) 反转义会把路径毁成 C:Users...(review 反馈)。
+    // 取出后不做 trim——文件名首尾空白是路径的一部分,悄悄改写会指向另一个文件。
     const raw = /path="((?:[^"\\]|\\.)*)"/.exec(attrs)?.[1];
-    const path = raw === undefined ? undefined : raw.replace(/\\(.)/g, '$1');
+    const path = raw === undefined ? undefined : raw.replace(/\\([\\"])/g, '$1');
     return path ? inlineCodePath(path) : '';
   });
 }

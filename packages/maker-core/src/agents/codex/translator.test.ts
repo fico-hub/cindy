@@ -931,6 +931,17 @@ describe('codex file citation 归一化 (#785)', () => {
     expect(
       normalizeCodexFileCitations(':codex-file-citation{path="/tmp/a\\"b.md" purpose="output"}'),
     ).toBe('`/tmp/a"b.md`');
+    // Windows 原生路径:反斜杠不是转义前缀,原样保留(review 反馈——全量 \(.) 反
+    // 转义会把 C:\Users\Ada\out.docx 毁成 C:UsersAdaout.docx)。
+    expect(
+      normalizeCodexFileCitations(
+        ':codex-file-citation{path="C:\\Users\\Ada\\out.docx" purpose="output"}',
+      ),
+    ).toBe('`C:\\Users\\Ada\\out.docx`');
+    // 显式转义的 \\ 仍解为单个反斜杠。
+    expect(
+      normalizeCodexFileCitations(':codex-file-citation{path="C:\\\\tmp\\\\a.md" purpose="output"}'),
+    ).toBe('`C:\\tmp\\a.md`');
     // 文件名首尾空白保留,不 trim(悄悄改写会指向另一个文件)。
     expect(
       normalizeCodexFileCitations(':codex-file-citation{path="/tmp/ab.md " purpose="output"}'),
