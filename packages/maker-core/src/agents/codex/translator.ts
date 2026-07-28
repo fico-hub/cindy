@@ -55,7 +55,7 @@ export interface CodexRuntimeState {
   reasoningStartedAt: Map<string, number>;
   /** item.id → reasoning 已 emit 文本字符长度 (上次 join 后总长)。 */
   reasoningTextLen: Map<string, number>;
-  /** item.id → agentMessage 已 emit 文本字符长度。 */
+  /** item.id → agentMessage 已 emit 文本字符长度(citation 归一化后的空间,见 handleAgentMessage)。 */
   itemTextLen: Map<string, number>;
   /** 已经 emit 过 tool_use 的 item.id (避免 started + 第一次 updated 重复)。 */
   emittedToolUse: Set<string>;
@@ -521,27 +521,66 @@ interface ContextCompactionItem {
 // item.started / item.updated 出 delta (isFinal=false), item.completed 出 final 全文。
 // Phase 1 没订阅 item/agentMessage/delta, 增量靠 item.updated 的 text 全量字段算 diff。
 
+/**
+ * Codex 正文里的内部文件引用标记 `:codex-file-citation{path="..." ...}`——对用户
+ * 是不可读的内部语法,归一化成行内代码的文件路径。没有 path 属性的畸形标记整个
+ * 剥掉,不把内部语法漏给用户。
+ */
+const CODEX_FILE_CITATION_RE = /:codex-file-citation\{([^{}]*)\}/g;
+const CODEX_FILE_CITATION_OPEN = ':codex-file-citation{';
+
+export function normalizeCodexFileCitations(text: string): string {
+  if (!text.includes(CODEX_FILE_CITATION_OPEN)) return text;
+  return text.replace(CODEX_FILE_CITATION_RE, (_all, attrs: string) => {
+    const path = /path="([^"]*)"/.exec(attrs)?.[1]?.trim();
+    return path ? `\`${path}\`` : '';
+  });
+}
+
+/**
+ * 流式安全边界:全量文本尾部可能是一个尚未写完的 citation 标记(标记会被后续
+ * update 补全),归一化后的文本对这段尾巴不是 append-only。返回可安全发出的原文
+ * 前缀长度,未写完的尾巴按住等下一轮;completed 时全量补发,不丢内容。
+ */
+export function stableCitationBoundary(text: string): number {
+  const open = text.lastIndexOf(CODEX_FILE_CITATION_OPEN);
+  if (open !== -1 && text.indexOf('}', open + CODEX_FILE_CITATION_OPEN.length) === -1) {
+    return open;
+  }
+  const maxProbe = Math.min(text.length, CODEX_FILE_CITATION_OPEN.length - 1);
+  for (let k = maxProbe; k > 0; k -= 1) {
+    if (text.endsWith(CODEX_FILE_CITATION_OPEN.slice(0, k))) return text.length - k;
+  }
+  return text.length;
+}
+
 function handleAgentMessage(
   phase: ItemPhase,
   item: AgentMessageItem,
   queue: AsyncQueue<AgentEvent>,
   ctx: CodexTranslateContext,
 ): void {
-  const currentText = item.text ?? '';
+  const rawText = item.text ?? '';
+  // itemTextLen 记录的是**归一化后已发出**的长度:citation 替换会改变文本长度,
+  // diff 必须在归一化空间里做,不能混用原文长度。
+  const prevLen = ctx.rt.itemTextLen.get(item.id) ?? 0;
 
   if (phase === 'completed') {
     ctx.rt.itemTextLen.delete(item.id);
+    // 既有契约:completed 只出 final 全文、不补 delta(desktop codexTranslator.test
+    // 钉死 3 事件形状)。boundary 按住的尾段与「completed 才首次出现的文本」同一待遇:
+    // 不进 delta 流,由 final 全文兜底(main 落库以 final 为准)。
     queue.push({
       type: 'text',
-      data: { text: currentText, isFinal: true },
+      data: { text: normalizeCodexFileCitations(rawText), isFinal: true },
       source: 'codex',
     });
     return;
   }
 
-  const prevLen = ctx.rt.itemTextLen.get(item.id) ?? 0;
-  const delta = currentText.slice(prevLen);
-  ctx.rt.itemTextLen.set(item.id, currentText.length);
+  const emitted = normalizeCodexFileCitations(rawText.slice(0, stableCitationBoundary(rawText)));
+  const delta = emitted.slice(prevLen);
+  ctx.rt.itemTextLen.set(item.id, emitted.length);
   if (delta.length === 0) return;
   queue.push({
     type: 'text',

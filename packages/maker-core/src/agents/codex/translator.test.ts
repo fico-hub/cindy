@@ -902,3 +902,95 @@ describe('extractRolloutUpdatePlanFunctionCallEvent', () => {
     expect(parsed).toBeNull();
   });
 });
+
+describe('codex file citation 归一化 (#785)', () => {
+  it('normalizeCodexFileCitations 把标记换成行内代码路径,畸形标记整个剥掉', async () => {
+    const { normalizeCodexFileCitations } = await import('./translator.js');
+    expect(
+      normalizeCodexFileCitations(
+        '文档已生成::codex-file-citation{path="/tmp/报告.docx" purpose="output"},请查收。',
+      ),
+    ).toBe('文档已生成:`/tmp/报告.docx`,请查收。');
+    expect(normalizeCodexFileCitations('bad :codex-file-citation{purpose="output"} end')).toBe(
+      'bad  end',
+    );
+    expect(normalizeCodexFileCitations('no marker here')).toBe('no marker here');
+  });
+
+  it('stableCitationBoundary 按住未写完的标记尾巴', async () => {
+    const { stableCitationBoundary } = await import('./translator.js');
+    expect(stableCitationBoundary('plain text')).toBe('plain text'.length);
+    const partialOpen = 'abc :codex-file-citation{path="/x';
+    expect(stableCitationBoundary(partialOpen)).toBe(4);
+    const partialPrefix = 'abc :codex-fi';
+    expect(stableCitationBoundary(partialPrefix)).toBe(4);
+    const complete = 'abc :codex-file-citation{path="/x"}';
+    expect(stableCitationBoundary(complete)).toBe(complete.length);
+  });
+
+  it('agentMessage 流式:标记跨 update 分段到达,delta 流与 final 全文一致且无内部语法', async () => {
+    const { newCodexRuntimeState } = await import('./translator.js');
+    const rt = newCodexRuntimeState();
+    const q = createAsyncQueue<AgentEvent>();
+    const push = (phase: 'started' | 'updated' | 'completed', text: string): void => {
+      translateItemNotification(
+        phase,
+        {
+          threadId: 'thread-1',
+          turnId: 'turn-1',
+          item: { type: 'agentMessage', id: 'msg-1', text },
+        },
+        q,
+        makeCtx(rt),
+      );
+    };
+    push('started', '文件已保存:');
+    push('updated', '文件已保存::codex-file-cit');
+    push('updated', '文件已保存::codex-file-citation{path="/tmp/out');
+    push('updated', '文件已保存::codex-file-citation{path="/tmp/out.docx" purpose="output"} 完成');
+    push('completed', '文件已保存::codex-file-citation{path="/tmp/out.docx" purpose="output"} 完成。');
+
+    const events = await collect(q);
+    const finalText = '文件已保存:`/tmp/out.docx` 完成。';
+    const deltas = events
+      .filter((e) => e.type === 'text' && (e.data as { isFinal: boolean }).isFinal === false)
+      .map((e) => (e.data as { text: string }).text);
+    // 既有契约:completed 只出 final、不补 delta——completed 才首次出现的「。」不进
+    // delta 流,由 final 全文兜底。delta 累积必须是 final 的前缀且不含内部语法。
+    expect(deltas.join('')).toBe('文件已保存:`/tmp/out.docx` 完成');
+    expect(finalText.startsWith(deltas.join(''))).toBe(true);
+    const finals = events.filter(
+      (e) => e.type === 'text' && (e.data as { isFinal: boolean }).isFinal === true,
+    );
+    expect(finals).toHaveLength(1);
+    expect((finals[0].data as { text: string }).text).toBe(finalText);
+    for (const d of deltas) expect(d).not.toContain(':codex-file-citation{');
+  });
+
+  it('agentMessage 非流式(直接 completed):final 文本已归一化', async () => {
+    const { newCodexRuntimeState } = await import('./translator.js');
+    const rt = newCodexRuntimeState();
+    const q = createAsyncQueue<AgentEvent>();
+    translateItemNotification(
+      'completed',
+      {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        item: {
+          type: 'agentMessage',
+          id: 'msg-2',
+          text: 'done :codex-file-citation{path="/a/b.md" purpose="output"}',
+        },
+      },
+      q,
+      makeCtx(rt),
+    );
+    const events = await collect(q);
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        data: { text: 'done `/a/b.md`', isFinal: true },
+      }),
+    ]);
+  });
+});
