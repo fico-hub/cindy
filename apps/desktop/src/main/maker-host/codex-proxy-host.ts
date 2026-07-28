@@ -217,8 +217,20 @@ function isGoogleGeminiChatUpstream(upstream: string): boolean {
 const MOONSHOT_CHAT_HOSTS = new Set(['api.moonshot.cn', 'api.moonshot.ai']);
 /** 火山方舟(豆包)官方 DNS 边界:ark.<region>.volces.com(如 ark.cn-beijing.volces.com)。 */
 const VOLCENGINE_ARK_CHAT_HOST_RE = /^ark\.[a-z0-9-]+\.volces\.com$/;
-/** 豆包 Seed 系列(1.6 起)原生多模态,官方 Chat Completions 支持 image_url 图片输入。 */
-const DOUBAO_VISION_MODEL_RE = /^doubao-seed-/;
+/**
+ * 豆包 Seed 系列 model id 的版本前缀:doubao-seed-<major>-<minor>-…。
+ * 只放行 1.6 起的版本——Seed 品牌线从 1.6 开始原生多模态(官方 Chat Completions
+ * 支持 image_url);万一上游日后出现更低版本号的 seed 变体,不被顺带放行。
+ */
+const DOUBAO_SEED_VERSION_RE = /^doubao-seed-(\d+)-(\d+)(?:-|$)/;
+
+function isDoubaoVisionModel(model: string): boolean {
+  const m = DOUBAO_SEED_VERSION_RE.exec(model);
+  if (!m) return false;
+  const major = Number(m[1]);
+  const minor = Number(m[2]);
+  return major > 1 || (major === 1 && minor >= 6);
+}
 
 function rewriteChatBridgeModel(model: string, stripPrefix: string | undefined): string {
   return stripPrefix && model.startsWith(stripPrefix)
@@ -254,7 +266,7 @@ function isVerifiedImageChatRoute(upstream: string, realModel: string): boolean 
   if (url.protocol !== 'https:') return false;
   const host = url.hostname.toLowerCase();
   if (realModel === 'kimi-k3') return MOONSHOT_CHAT_HOSTS.has(host);
-  if (DOUBAO_VISION_MODEL_RE.test(realModel)) return VOLCENGINE_ARK_CHAT_HOST_RE.test(host);
+  if (isDoubaoVisionModel(realModel)) return VOLCENGINE_ARK_CHAT_HOST_RE.test(host);
   return false;
 }
 
