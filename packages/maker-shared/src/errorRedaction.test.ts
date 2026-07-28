@@ -112,6 +112,38 @@ describe('redactSensitiveText', () => {
     expect(output).not.toMatch(/abc123|def456|ghi789/);
   });
 
+  it('redacts gateway principals while keeping surrounding diagnostics', () => {
+    const output = redactSensitiveText(
+      '{"error":"ExceededBudget","principal":"aigw:v1:cindy:usr_a1b2c3","spend":12.34,"budget":10}',
+    );
+
+    expect(output).not.toContain('usr_a1b2c3');
+    expect(output).toContain('aigw:[REDACTED]');
+    expect(output).toContain('ExceededBudget');
+    expect(output).toContain('"spend":12.34');
+
+    const inline = redactSensitiveText('Request rejected (429): budget check failed for aigw:v1:cindy:usr_a1b2c3, retry later');
+    expect(inline).not.toContain('usr_a1b2c3');
+    expect(inline).toContain('aigw:[REDACTED], retry later');
+  });
+
+  it('recognizes gateway budget-exhaustion signals', () => {
+    expect(
+      extractNonSecretErrorSignals('Request rejected (429): ExceededBudget for aigw:v1:cindy:usr_a1b2c3'),
+    ).toEqual({ errorStatus: 429, usageLimit: true });
+    expect(extractNonSecretErrorSignals('{"code":"ExceededBudget"}')).toEqual({
+      usageLimit: true,
+    });
+    expect(extractNonSecretErrorSignals('upstream said budget_exceeded, status=429')).toEqual({
+      errorStatus: 429,
+      usageLimit: true,
+    });
+    // A 504 gateway timeout is not a quota signal and carries no supported status.
+    expect(
+      extractNonSecretErrorSignals('{"code":"origin_gateway_timeout","status":504}'),
+    ).toEqual({ usageLimit: false });
+  });
+
   it('keeps redaction idempotent for existing placeholders', () => {
     const output = 'access_token=[REDACTED] key=[REDACTED_KEY]';
 

@@ -29,6 +29,10 @@ export function redactSensitiveText(input: string): string {
     /([?&](?:api[-_]?key|access[-_]?token|refresh[-_]?token|token)=)[^&#\s]+/gi,
     '$1[REDACTED]',
   );
+  // Gateway principals (`aigw:...`) are stable per-user identifiers; quota and
+  // routing errors embed them verbatim. Strip the whole value so persisted or
+  // displayed errors cannot leak an internal user id.
+  output = output.replace(/\baigw:[^\s"'`,;)\]}]+/gi, 'aigw:[REDACTED]');
   return output;
 }
 
@@ -46,9 +50,9 @@ export function extractNonSecretErrorSignals(input: string): NonSecretErrorSigna
   const statusMatch =
     /(?:^|[\s,{;])["']?(?:status(?:[-_ ]?code)?|http(?:[-_ ]?status)?|code)["']?\s*(?:[:=]\s*)?["']?(401|429|529)["']?(?=$|[\s,;:}\]])/i.exec(
       input,
-    );
+    ) ?? /\brequest\s+rejected\s*\(\s*(401|429|529)\s*\)/i.exec(input);
   const usageLimit =
-    /(?:^|[\s,{;])(?:rate\s+limit(?:ed|s|ing)?|usage\s+limit(?:ed|s|ing)?|too\s+many\s+requests|quota(?:["']?\s*[:=]\s*["']?|\s+)(?:exhausted|exceeded)|(?:["']?(?:code|type)["']?\s*[:=]\s*["']?)?(?:rate_limit_exceeded|insufficient_quota))\b/i.test(
+    /(?:^|[\s,{;])(?:rate\s+limit(?:ed|s|ing)?|usage\s+limit(?:ed|s|ing)?|too\s+many\s+requests|quota(?:["']?\s*[:=]\s*["']?|\s+)(?:exhausted|exceeded)|(?:["']?(?:code|type)["']?\s*[:=]\s*["']?)?(?:rate_limit_exceeded|insufficient_quota|exceeded[-_ ]?budget|budget[-_ ]?exceeded))\b/i.test(
       input,
     );
 
