@@ -134,6 +134,14 @@ describe('redactSensitiveText', () => {
     expect(extractNonSecretErrorSignals('{"code":"ExceededBudget"}')).toEqual({
       usageLimit: true,
     });
+    // 网关结构化错误也常用 error / message 字段承载额度码(review 反馈:只认
+    // code|type 会把 {"error":"ExceededBudget"} 判成普通错误进 blocked)。
+    expect(extractNonSecretErrorSignals('{"error":"ExceededBudget","spend":12.3}')).toEqual({
+      usageLimit: true,
+    });
+    expect(extractNonSecretErrorSignals('{"message":"budget_exceeded"}')).toEqual({
+      usageLimit: true,
+    });
     expect(extractNonSecretErrorSignals('upstream said budget_exceeded, status=429')).toEqual({
       errorStatus: 429,
       usageLimit: true,
