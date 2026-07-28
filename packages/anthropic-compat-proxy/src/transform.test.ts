@@ -698,12 +698,10 @@ describe('stripNonAnthropicFields · glm-5.2 tool_result 图像降级 (#794)', (
     ],
   });
 
-  it.each(['glm-5.2', 'z-ai/glm-5.2'])(
+  it.each(['glm-5.2', 'z-ai/glm-5.2', 'glm-5.2[1m]', 'z-ai/glm-5.2[1m]'])(
     '%s:tool_result 图像替换为说明性占位文本,图像字节不外泄',
     (model) => {
-      const out = stripNonAnthropicFields(makeBody(model), {
-        headers: {},
-      } as never) as Record<string, unknown> | null;
+      const out = stripNonAnthropicFields(makeBody(model), ctx) as Record<string, unknown> | null;
       expect(out).not.toBeNull();
       const json = JSON.stringify(out);
       expect(json).not.toContain('AAAABBBB');
@@ -727,12 +725,12 @@ describe('stripNonAnthropicFields · glm-5.2 tool_result 图像降级 (#794)', (
         },
       ],
     };
-    expect(stripNonAnthropicFields(body, { headers: {} } as never)).toBeNull();
+    expect(stripNonAnthropicFields(body, ctx)).toBeNull();
   });
 
   it('未登记的 model 不受影响(字节透传)', () => {
     expect(
-      stripNonAnthropicFields(makeBody('claude-opus-5'), { headers: {} } as never),
+      stripNonAnthropicFields(makeBody('claude-opus-5'), ctx),
     ).toBeNull();
   });
 
@@ -741,6 +739,6 @@ describe('stripNonAnthropicFields · glm-5.2 tool_result 图像降级 (#794)', (
       model: 'glm-5.2',
       messages: [{ role: 'user', content: [imageBlock] }],
     };
-    expect(stripNonAnthropicFields(body, { headers: {} } as never)).toBeNull();
+    expect(stripNonAnthropicFields(body, ctx)).toBeNull();
   });
 });
