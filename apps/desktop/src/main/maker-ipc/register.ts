@@ -4585,14 +4585,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           }
           // working_dir 覆盖(#811):把新 session 落到指定项目目录,而不是恒继承
           // dispatcher 的目录。先于 worktree 预建校验——use_worktree 的 base 仓库
-          // 也从覆盖后的目录解析。
+          // 也从覆盖后的目录(校验器规范化后的形态)解析。
           let resolvedWorkDir = meta.workDir;
           if (workingDirOverride !== undefined) {
-            const invalid = await validateHandoffWorkingDir(workingDirOverride);
-            if (invalid) {
-              return { ok: false, errorCode: 'INVALID_ARGS', message: invalid };
+            const checked = await validateHandoffWorkingDir(workingDirOverride);
+            if (!checked.ok) {
+              return { ok: false, errorCode: 'INVALID_ARGS', message: checked.message };
             }
-            resolvedWorkDir = workingDirOverride;
+            resolvedWorkDir = checked.dir;
           }
           // useWorktree:为新 session 预建正规 session worktree(与 UI 新会话勾选
           // worktree 同类:worktreeStore 绑定 + 关闭时 auto-stash 清理),新 session 的
@@ -4610,7 +4610,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
                 createWorktree: worktreeManager.createWorktree,
                 createId: () => randomUUID(),
               },
-              dispatcherSessionId,
+              // working_dir 覆盖时不带 dispatcherSessionId:resolveHandoffBaseRepo
+              // 的「dispatcher 自身 worktree」捷径按路径包含判定——覆盖目录若指向
+              // dispatcher worktree 树内的**嵌套独立仓库**,捷径会跳过 detectCwd、
+              // 误用 dispatcher 的 baseRepo。去掉捷径后 detectCwd 按目录自身探测
+              // git 根;覆盖目录落在登记过的 worktree 内时,listAll 反查分支仍生效。
+              workingDirOverride !== undefined ? undefined : dispatcherSessionId,
               resolvedWorkDir,
             );
             if (!prep.ok) {

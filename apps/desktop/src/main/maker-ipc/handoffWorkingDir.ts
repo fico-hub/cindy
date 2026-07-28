@@ -9,19 +9,30 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-/** 校验通过返回 null;否则返回给调用方的错误文案(进 INVALID_ARGS.message)。 */
-export async function validateHandoffWorkingDir(dir: string): Promise<string | null> {
-  if (typeof dir !== 'string' || dir.trim().length === 0) {
-    return 'working_dir 不能为空';
+export type HandoffWorkingDirValidation =
+  | { ok: true; dir: string }
+  | { ok: false; message: string };
+
+/**
+ * 校验并规范化 working_dir 覆盖。通过时返回规范化后的目录(trim + resolve,
+ * 调用方必须使用它,不要再用原始输入);失败时 message 进 INVALID_ARGS。
+ */
+export async function validateHandoffWorkingDir(
+  rawDir: string,
+): Promise<HandoffWorkingDirValidation> {
+  const trimmed = typeof rawDir === 'string' ? rawDir.trim() : '';
+  if (trimmed.length === 0) {
+    return { ok: false, message: 'working_dir 不能为空' };
   }
-  if (!path.isAbsolute(dir)) {
-    return `working_dir 必须是绝对路径:${dir}`;
+  if (!path.isAbsolute(trimmed)) {
+    return { ok: false, message: `working_dir 必须是绝对路径:${trimmed}` };
   }
+  const dir = path.resolve(trimmed);
   try {
     const st = await fs.promises.stat(dir);
-    if (!st.isDirectory()) return `working_dir 不是目录:${dir}`;
+    if (!st.isDirectory()) return { ok: false, message: `working_dir 不是目录:${dir}` };
   } catch {
-    return `working_dir 不存在或不可访问:${dir}`;
+    return { ok: false, message: `working_dir 不存在或不可访问:${dir}` };
   }
-  return null;
+  return { ok: true, dir };
 }
