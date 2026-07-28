@@ -553,9 +553,16 @@ export function normalizeCodexFileCitations(text: string): string {
   return text.replace(CODEX_FILE_CITATION_RE, (_all, attrs: string) => {
     // 引号串取值只解 \" 与 \\ 两种转义——Windows 原生路径(C:\Users\...)里的
     // 反斜杠不是转义前缀,全量 \\(.) 反转义会把路径毁成 C:Users...(review 反馈)。
+    // UNC 路径(\\server\share\...)的开头双反斜杠是路径本体,不当作转义对(review
+    // 反馈);只有非开头的 \\ 才解为单个反斜杠。
     // 取出后不做 trim——文件名首尾空白是路径的一部分,悄悄改写会指向另一个文件。
     const raw = /path="((?:[^"\\]|\\.)*)"/.exec(attrs)?.[1];
-    const path = raw === undefined ? undefined : raw.replace(/\\([\\"])/g, '$1');
+    const path =
+      raw === undefined
+        ? undefined
+        : raw.replace(/\\([\\"])/g, (pair, ch: string, offset: number) =>
+            offset === 0 && ch === '\\' ? pair : ch,
+          );
     return path ? inlineCodePath(path) : '';
   });
 }

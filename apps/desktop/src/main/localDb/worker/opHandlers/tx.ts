@@ -1240,7 +1240,12 @@ function canonicalizeCodexCitations(text: string): string {
   const base = openAt === -1 ? text : text.slice(0, openAt);
   return base.replace(CODEX_CITATION_RE, (_all, attrs: string) => {
     const raw = /path="((?:[^"\\]|\\.)*)"/.exec(attrs)?.[1];
-    const path = raw === undefined ? undefined : raw.replace(/\\([\\"])/g, '$1');
+    const path =
+      raw === undefined
+        ? undefined
+        : raw.replace(/\\([\\"])/g, (pair, ch: string, offset: number) =>
+            offset === 0 && ch === '\\' ? pair : ch,
+          );
     if (!path) return '';
     const longestRun = path.match(/`+/g)?.reduce((max, run) => Math.max(max, run.length), 0) ?? 0;
     const fence = '`'.repeat(longestRun + 1);

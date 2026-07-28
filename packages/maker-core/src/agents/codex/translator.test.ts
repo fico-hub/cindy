@@ -942,6 +942,12 @@ describe('codex file citation 归一化 (#785)', () => {
     expect(
       normalizeCodexFileCitations(':codex-file-citation{path="C:\\\\tmp\\\\a.md" purpose="output"}'),
     ).toBe('`C:\\tmp\\a.md`');
+    // UNC 原生路径:开头的 \\ 是路径本体(网络共享前缀),不当作转义对(review 反馈)。
+    expect(
+      normalizeCodexFileCitations(
+        ':codex-file-citation{path="\\\\server\\share\\out.docx" purpose="output"}',
+      ),
+    ).toBe('`\\\\server\\share\\out.docx`');
     // 文件名首尾空白保留,不 trim(悄悄改写会指向另一个文件)。
     expect(
       normalizeCodexFileCitations(':codex-file-citation{path="/tmp/ab.md " purpose="output"}'),

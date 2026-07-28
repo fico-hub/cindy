@@ -1238,7 +1238,7 @@ function canonicalizeCodexCitations(text) {
   const base = openAt === -1 ? text : text.slice(0, openAt);
   return base.replace(CODEX_CITATION_RE, (_all, attrs) => {
     const m = /path="((?:[^"\\\\]|\\\\.)*)"/.exec(attrs);
-    const path = m ? m[1].replace(/\\\\([\\\\"])/g, '$1') : undefined;
+    const path = m ? m[1].replace(/\\\\([\\\\"])/g, (pair, ch, offset) => (offset === 0 && ch === '\\\\' ? pair : ch)) : undefined;
     if (!path) return '';
     const runs = path.match(/\`+/g);
     const longestRun = runs ? runs.reduce((max, run) => Math.max(max, run.length), 0) : 0;
