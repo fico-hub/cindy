@@ -27,7 +27,14 @@ export async function validateHandoffWorkingDir(
   if (!path.isAbsolute(trimmed)) {
     return { ok: false, message: `working_dir 必须是绝对路径:${trimmed}` };
   }
-  const dir = path.resolve(trimmed);
+  // realpath 消解软链(review 反馈):软链落在某个受管 worktree 树内、真身却指向
+  // 别的仓库时,后续 base repo 解析必须看真身;realpath 同时兜住存在性。
+  let dir: string;
+  try {
+    dir = await fs.promises.realpath(path.resolve(trimmed));
+  } catch {
+    return { ok: false, message: `working_dir 不存在或不可访问:${path.resolve(trimmed)}` };
+  }
   try {
     const st = await fs.promises.stat(dir);
     if (!st.isDirectory()) return { ok: false, message: `working_dir 不是目录:${dir}` };

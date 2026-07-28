@@ -10,6 +10,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { validateHandoffWorkingDir } from '../handoffWorkingDir.js';
 
 const dir = mkdtempSync(path.join(tmpdir(), 'cindy-handoff-wd-'));
+const realpathSyncDir = (await import('node:fs')).realpathSync(dir);
 const file = path.join(dir, 'plain.txt');
 writeFileSync(file, 'x');
 
@@ -19,13 +20,13 @@ afterAll(() => {
 
 describe('validateHandoffWorkingDir', () => {
   it('已存在目录(绝对路径)→ ok 且返回规范化路径', async () => {
-    expect(await validateHandoffWorkingDir(dir)).toEqual({ ok: true, dir: path.resolve(dir) });
+    expect(await validateHandoffWorkingDir(dir)).toEqual({ ok: true, dir: realpathSyncDir });
   });
 
   it('带前后空白的合法路径 → trim 后通过,返回规范化路径(review 反馈)', async () => {
     expect(await validateHandoffWorkingDir(`  ${dir}  `)).toEqual({
       ok: true,
-      dir: path.resolve(dir),
+      dir: realpathSyncDir,
     });
   });
 
@@ -45,6 +46,22 @@ describe('validateHandoffWorkingDir', () => {
     const r = await validateHandoffWorkingDir(file);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.message).toContain('不是目录');
+  });
+
+  it('软链目录 → 返回真身路径(review 反馈:base repo 解析看真身)', async () => {
+    const linkPath = path.join(dir, 'link-to-dir');
+    const target = path.join(dir, 'real-target');
+    const { mkdirSync, symlinkSync, realpathSync } = await import('node:fs');
+    mkdirSync(target);
+    try {
+      symlinkSync(target, linkPath, 'dir');
+    } catch {
+      return; // Windows 无特权时目录软链可能 EPERM,建不出夹具就跳过(守卫仍在)。
+    }
+    expect(await validateHandoffWorkingDir(linkPath)).toEqual({
+      ok: true,
+      dir: realpathSync(target),
+    });
   });
 
   it('空串 / 纯空白 → 报不能为空', async () => {
