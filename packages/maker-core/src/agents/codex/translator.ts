@@ -555,9 +555,15 @@ export function normalizeCodexFileCitations(text: string): string {
   });
 }
 
+// 闭合扫描的两种「未找到」:UNFINISHED = 扫描到文本末尾仍未闭合(可能是尚未写完、
+// 会被后续 update 补全的截断尾巴);POISONED = 属性区出现裸 `{`,正则永不匹配,该
+// 标记已确定畸形且追加文本也不会改变这一判定。
+const CITATION_UNFINISHED = -1;
+const CITATION_POISONED = -2;
+
 /**
  * 属性区闭合 `}` 的位置(与 CODEX_FILE_CITATION_RE 同一口径:双引号串内的花括号
- * 不算边界);找不到(未写完 / 引号未闭合 / 出现非法裸 `{`)→ -1。
+ * 不算边界);找不到时区分 CITATION_UNFINISHED 与 CITATION_POISONED。
  */
 function findCitationClose(text: string, attrsStart: number): number {
   let inQuote = false;
@@ -570,11 +576,28 @@ function findCitationClose(text: string, attrsStart: number): number {
     } else if (!inQuote && ch === '}') {
       return i;
     } else if (!inQuote && ch === '{') {
-      // 裸 { 让正则永不匹配 —— 当作未完成按住;completed 时原样透出,不误吞正文。
-      return -1;
+      return CITATION_POISONED;
     }
   }
-  return -1;
+  return CITATION_UNFINISHED;
+}
+
+/**
+ * 从左到右结构化扫描,返回第一个「扫描到文本末尾仍未闭合」的标记开头;没有 → -1。
+ * 完整标记整体跳过——路径引号串里出现的 OPEN 字面量属于已消费标记的内部,不会被
+ * 误认成新的开头(review 反馈:文件名本身含 `:codex-file-citation{` 时,按最后一个
+ * 裸字面量定位会带着错误的引号状态把完整标记判成未完成)。裸 `{` 的畸形标记(正则
+ * 永不匹配、追加文本也救不回来)原样透出:只跳过开头字面量继续扫,不吞它后面的正文。
+ */
+function findUnfinishedCitationOpen(text: string): number {
+  let from = 0;
+  for (;;) {
+    const open = text.indexOf(CODEX_FILE_CITATION_OPEN, from);
+    if (open === -1) return -1;
+    const close = findCitationClose(text, open + CODEX_FILE_CITATION_OPEN.length);
+    if (close === CITATION_UNFINISHED) return open;
+    from = close === CITATION_POISONED ? open + CODEX_FILE_CITATION_OPEN.length : close + 1;
+  }
 }
 
 /**
@@ -583,8 +606,8 @@ function findCitationClose(text: string, attrsStart: number): number {
  * 前缀长度,未写完的尾巴按住等下一轮;completed 时全量补发,不丢内容。
  */
 export function stableCitationBoundary(text: string): number {
-  const open = text.lastIndexOf(CODEX_FILE_CITATION_OPEN);
-  if (open !== -1 && findCitationClose(text, open + CODEX_FILE_CITATION_OPEN.length) === -1) {
+  const open = findUnfinishedCitationOpen(text);
+  if (open !== -1) {
     return open;
   }
   const maxProbe = Math.min(text.length, CODEX_FILE_CITATION_OPEN.length - 1);
@@ -612,14 +635,11 @@ function handleAgentMessage(
     // 不进 delta 流,由 final 全文兜底(main 落库层 onAssistantTextEvent 的 isFinal
     // 分支以更长 final 覆盖 delta 累积,不丢内容)。
     // 输出被截断在标记中间(有明确的 open、永远等不到 close)时,把残尾剥掉——
-    // 内部语法不该漏给用户;只剥「确定的未完成标记」,疑似前缀(不足完整 open
-    // 字面量)可能是真实正文,保留。
+    // 内部语法不该漏给用户;只剥「扫描到文本末尾仍未闭合」的确定截断残尾(它之后
+    // 没有正文可吞),疑似前缀(不足完整 open 字面量)可能是真实正文,保留。
     let finalRaw = rawText;
-    const openAt = finalRaw.lastIndexOf(CODEX_FILE_CITATION_OPEN);
-    if (
-      openAt !== -1 &&
-      findCitationClose(finalRaw, openAt + CODEX_FILE_CITATION_OPEN.length) === -1
-    ) {
+    const openAt = findUnfinishedCitationOpen(finalRaw);
+    if (openAt !== -1) {
       finalRaw = finalRaw.slice(0, openAt);
     }
     queue.push({

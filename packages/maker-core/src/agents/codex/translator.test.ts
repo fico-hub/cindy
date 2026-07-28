@@ -953,6 +953,56 @@ describe('codex file citation 归一化 (#785)', () => {
     expect(stableCitationBoundary(braceComplete)).toBe(braceComplete.length);
   });
 
+  it('路径本身含标记开头字面量:完整标记结构化消费,不被误认成新的未闭合开头', async () => {
+    const { normalizeCodexFileCitations, stableCitationBoundary } = await import('./translator.js');
+    // macOS/POSIX 文件名允许 `:` 与 `{`——路径里可以出现完整的 OPEN 字面量。
+    // 按「最后一个裸字面量」定位会从路径中间起扫、引号状态错位,把完整标记判成
+    // 未完成(review 反馈);结构化扫描把完整标记整体跳过。
+    const marker =
+      ':codex-file-citation{path="/tmp/a:codex-file-citation{b.md" purpose="output"}';
+    expect(stableCitationBoundary(`abc ${marker}`)).toBe(`abc ${marker}`.length);
+    expect(normalizeCodexFileCitations(`abc ${marker}`)).toBe(
+      'abc `/tmp/a:codex-file-citation{b.md`',
+    );
+    // 完整标记之后的真实截断尾巴仍要按住,且按住点在外层标记的真实开头。
+    const tail = ' 然后 :codex-file-citation{path="/x';
+    expect(stableCitationBoundary(`abc ${marker}${tail}`)).toBe(`abc ${marker} 然后 `.length);
+  });
+
+  it('completed:路径含 OPEN 字面量的完整标记不再被误剥,只剥真实截断尾巴', async () => {
+    const { newCodexRuntimeState } = await import('./translator.js');
+    const marker =
+      ':codex-file-citation{path="/tmp/a:codex-file-citation{b.md" purpose="output"}';
+    const rt = newCodexRuntimeState();
+    const q = createAsyncQueue<AgentEvent>();
+    translateItemNotification(
+      'completed',
+      {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        item: {
+          type: 'agentMessage',
+          id: 'msg-embed',
+          text: `保存到 ${marker} 之后 :codex-file-citation{path="/x`,
+        },
+      },
+      q,
+      makeCtx(rt),
+    );
+    const events = await collect(q);
+    expect((events[0].data as { text: string }).text).toBe(
+      '保存到 `/tmp/a:codex-file-citation{b.md` 之后 ',
+    );
+  });
+
+  it('裸 { 的畸形标记原样透出:不按住流式边界,也不吞它后面的正文', async () => {
+    const { stableCitationBoundary } = await import('./translator.js');
+    // 属性区出现裸 { 后正则永不匹配,追加文本也救不回来——不是「尚未写完」,按住
+    // 或剥除都会误吞后续正文,原样透出交给用户可见性兜底。
+    const poisoned = 'abc :codex-file-citation{oops{ 后面是正文';
+    expect(stableCitationBoundary(poisoned)).toBe(poisoned.length);
+  });
+
   it('agentMessage 流式:标记跨 update 分段到达,delta 流与 final 全文一致且无内部语法', async () => {
     const { newCodexRuntimeState } = await import('./translator.js');
     const rt = newCodexRuntimeState();
