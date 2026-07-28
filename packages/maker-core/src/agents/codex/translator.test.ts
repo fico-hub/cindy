@@ -992,6 +992,42 @@ describe('codex file citation 归一化 (#785)', () => {
     for (const d of deltas) expect(d).not.toContain(':codex-file-citation{');
   });
 
+  it('completed 文本截断在标记中间:确定的未完成标记从 final 剥掉,疑似前缀保留', async () => {
+    const { newCodexRuntimeState } = await import('./translator.js');
+    const rt = newCodexRuntimeState();
+    const q = createAsyncQueue<AgentEvent>();
+    translateItemNotification(
+      'completed',
+      {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        item: {
+          type: 'agentMessage',
+          id: 'msg-cut',
+          text: '文件在 :codex-file-citation{path="/tmp/x',
+        },
+      },
+      q,
+      makeCtx(rt),
+    );
+    const rt2 = newCodexRuntimeState();
+    const q2 = createAsyncQueue<AgentEvent>();
+    translateItemNotification(
+      'completed',
+      {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        item: { type: 'agentMessage', id: 'msg-prefix', text: '正文以 :codex 结尾' },
+      },
+      q2,
+      makeCtx(rt2),
+    );
+    const events = await collect(q);
+    expect((events[0].data as { text: string }).text).toBe('文件在 ');
+    const events2 = await collect(q2);
+    expect((events2[0].data as { text: string }).text).toBe('正文以 :codex 结尾');
+  });
+
   it('agentMessage 非流式(直接 completed):final 文本已归一化', async () => {
     const { newCodexRuntimeState } = await import('./translator.js');
     const rt = newCodexRuntimeState();

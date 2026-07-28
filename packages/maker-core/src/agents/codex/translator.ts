@@ -609,10 +609,22 @@ function handleAgentMessage(
     ctx.rt.itemTextLen.delete(item.id);
     // 既有契约:completed 只出 final 全文、不补 delta(desktop codexTranslator.test
     // 钉死 3 事件形状)。boundary 按住的尾段与「completed 才首次出现的文本」同一待遇:
-    // 不进 delta 流,由 final 全文兜底(main 落库以 final 为准)。
+    // 不进 delta 流,由 final 全文兜底(main 落库层 onAssistantTextEvent 的 isFinal
+    // 分支以更长 final 覆盖 delta 累积,不丢内容)。
+    // 输出被截断在标记中间(有明确的 open、永远等不到 close)时,把残尾剥掉——
+    // 内部语法不该漏给用户;只剥「确定的未完成标记」,疑似前缀(不足完整 open
+    // 字面量)可能是真实正文,保留。
+    let finalRaw = rawText;
+    const openAt = finalRaw.lastIndexOf(CODEX_FILE_CITATION_OPEN);
+    if (
+      openAt !== -1 &&
+      findCitationClose(finalRaw, openAt + CODEX_FILE_CITATION_OPEN.length) === -1
+    ) {
+      finalRaw = finalRaw.slice(0, openAt);
+    }
     queue.push({
       type: 'text',
-      data: { text: normalizeCodexFileCitations(rawText), isFinal: true },
+      data: { text: normalizeCodexFileCitations(finalRaw), isFinal: true },
       source: 'codex',
     });
     return;
