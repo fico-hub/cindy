@@ -975,6 +975,11 @@ describe('codex file citation 归一化 (#785)', () => {
     expect(
       normalizeCodexFileCitations(':codex-file-citation{path=" ab.md " purpose="output"}'),
     ).toBe('`  ab.md  `');
+    // 全空格路径:CommonMark 规定剥空格仅当「首尾是空格且**非全空格**」——全空格
+    // code span 原样保留,因此**不垫**才是无损的;垫了反而多出两个永远不被剥的空格。
+    expect(normalizeCodexFileCitations(':codex-file-citation{path="   " purpose="output"}')).toBe(
+      '`   `',
+    );
   });
 
   it('finalizeCodexCitationText:剥截断残尾 + 归一化,幂等(#785 导入口径)', async () => {
