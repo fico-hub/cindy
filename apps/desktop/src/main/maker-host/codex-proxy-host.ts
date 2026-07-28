@@ -215,6 +215,10 @@ function isGoogleGeminiChatUpstream(upstream: string): boolean {
 }
 
 const MOONSHOT_CHAT_HOSTS = new Set(['api.moonshot.cn', 'api.moonshot.ai']);
+/** 火山方舟(豆包)官方 DNS 边界:ark.<region>.volces.com(如 ark.cn-beijing.volces.com)。 */
+const VOLCENGINE_ARK_CHAT_HOST_RE = /^ark\.[a-z0-9-]+\.volces\.com$/;
+/** 豆包 Seed 系列(1.6 起)原生多模态,官方 Chat Completions 支持 image_url 图片输入。 */
+const DOUBAO_VISION_MODEL_RE = /^doubao-seed-/;
 
 function rewriteChatBridgeModel(model: string, stripPrefix: string | undefined): string {
   return stripPrefix && model.startsWith(stripPrefix)
@@ -223,28 +227,35 @@ function rewriteChatBridgeModel(model: string, stripPrefix: string | undefined):
 }
 
 /**
- * 图片桥接必须按已验证的上游能力显式开启。这里认官方 Moonshot DNS 边界 + Kimi K3
- * 上游 model，不认 provider id（预设创建后会生成用户自定义 id），也不对所有
- * openai-chat 供应商放开。未命中继续沿用 fail-closed 默认。
+ * 图片桥接必须按已验证的上游能力显式开启。这里认官方 DNS 边界 + 上游 model
+ * (Moonshot 的 Kimi K3、火山方舟的豆包 Seed 系列),不认 provider id(预设创建后
+ * 会生成用户自定义 id),也不对所有 openai-chat 供应商放开。未命中继续沿用
+ * fail-closed 默认——无图片能力的上游(如 DeepSeek)保持发送前显式报错,不静默吞图。
  */
 export function chatBridgeCapabilitiesForRoute(
   upstream: string,
   realModel: string,
   fallback: ChatBridgeCapabilities = CHAT_BRIDGE_DEFAULT_CAPABILITIES,
 ): ChatBridgeCapabilities {
-  if (realModel !== 'kimi-k3') return fallback;
-  try {
-    const url = new URL(upstream);
-    if (url.protocol !== 'https:' || !MOONSHOT_CHAT_HOSTS.has(url.hostname.toLowerCase())) {
-      return fallback;
-    }
-  } catch {
-    return fallback;
-  }
+  if (!isVerifiedImageChatRoute(upstream, realModel)) return fallback;
   return {
     ...fallback,
     imageInput: 'image_url',
   };
+}
+
+function isVerifiedImageChatRoute(upstream: string, realModel: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(upstream);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== 'https:') return false;
+  const host = url.hostname.toLowerCase();
+  if (realModel === 'kimi-k3') return MOONSHOT_CHAT_HOSTS.has(host);
+  if (DOUBAO_VISION_MODEL_RE.test(realModel)) return VOLCENGINE_ARK_CHAT_HOST_RE.test(host);
+  return false;
 }
 
 /**
