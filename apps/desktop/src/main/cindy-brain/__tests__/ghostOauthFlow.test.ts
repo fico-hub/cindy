@@ -599,6 +599,74 @@ describe('startGhostOauthFlow', () => {
     expect(defaultPathStatus).toBe(404);
   });
 
+  it('跨源 code 投递(#810):声明域的 OPTIONS 预检拿到 CORS/PNA 头,GET 投递带头成功;非法来源拿不到头;无 Origin 的 302 回调不变', async () => {
+    const fixedPort = await probeFreePort();
+    let browserWork: Promise<{
+      preflightAllowed: Response;
+      preflightEvil: Response;
+      delivery: Response;
+    }> | null = null;
+    const result = await startGhostOauthFlow({
+      config: { ...BASE_CONFIG, pkce: false, redirectPort: fixedPort },
+      fetchImpl: vi.fn(async () => jsonResponse({ access_token: 'at-cors' })) as unknown as typeof fetch,
+      openExternal: (url) => {
+        const state = new URL(url).searchParams.get('state') ?? '';
+        const cb = `http://127.0.0.1:${fixedPort}/callback`;
+        browserWork = (async () => {
+          // 声明域(authorizeUrl 的 origin)发预检:必须拿到 CORS + PNA 头。
+          const preflightAllowed = await fetch(cb, {
+            method: 'OPTIONS',
+            headers: { origin: 'https://auth.example.com' },
+          });
+          // 任意其它网站发预检:204 但不带 CORS 头(浏览器会拦下后续请求)。
+          const preflightEvil = await fetch(cb, {
+            method: 'OPTIONS',
+            headers: { origin: 'https://evil.example' },
+          });
+          // 声明域的页面 JS 跨源 GET 投递 code(xAI 新版流程形态)。
+          const delivery = await fetch(`${cb}?code=c-cors&state=${state}`, {
+            headers: { origin: 'https://auth.example.com' },
+          });
+          return { preflightAllowed, preflightEvil, delivery };
+        })();
+      },
+    });
+    expect(result).toMatchObject({ ok: true });
+    const { preflightAllowed, preflightEvil, delivery } = await browserWork!;
+
+    expect(preflightAllowed!.status).toBe(204);
+    expect(preflightAllowed!.headers.get('access-control-allow-origin')).toBe(
+      'https://auth.example.com',
+    );
+    expect(preflightAllowed!.headers.get('access-control-allow-private-network')).toBe('true');
+    expect(preflightAllowed!.headers.get('access-control-allow-methods')).toContain('OPTIONS');
+
+    expect(preflightEvil!.status).toBe(204);
+    expect(preflightEvil!.headers.get('access-control-allow-origin')).toBeNull();
+    expect(preflightEvil!.headers.get('access-control-allow-private-network')).toBeNull();
+
+    expect(delivery!.status).toBe(200);
+    expect(delivery!.headers.get('access-control-allow-origin')).toBe('https://auth.example.com');
+  });
+
+  it('跨源投递的 state 校验不放松:声明域带错 state 投递 → 400 且响应带 CORS 头', async () => {
+    const fixedPort = await probeFreePort();
+    let badDeliveryWork: Promise<Response> | null = null;
+    const result = await startGhostOauthFlow({
+      config: { ...BASE_CONFIG, pkce: false, redirectPort: fixedPort },
+      fetchImpl: vi.fn(async () => jsonResponse({ access_token: 'x' })) as unknown as typeof fetch,
+      openExternal: () => {
+        badDeliveryWork = fetch(`http://127.0.0.1:${fixedPort}/callback?code=c-bad&state=WRONG`, {
+          headers: { origin: 'https://auth.example.com' },
+        });
+      },
+    });
+    expect(result).toMatchObject({ ok: false, error: 'CALLBACK_INVALID' });
+    const badDelivery = await badDeliveryWork!;
+    expect(badDelivery.status).toBe(400);
+    expect(badDelivery.headers.get('access-control-allow-origin')).toBe('https://auth.example.com');
+  });
+
   it('publicRedirectUri 为 http → INVALID_CONFIG,不拉浏览器', async () => {
     const openExternal = vi.fn();
     await expect(

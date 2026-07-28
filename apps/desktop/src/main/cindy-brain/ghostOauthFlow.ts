@@ -102,6 +102,48 @@ const RESERVED_AUTHORIZE_PARAMS: ReadonlySet<string> = new Set(
   GHOST_OAUTH_RESERVED_AUTHORIZE_PARAMS,
 );
 
+// ── 跨源 code 投递(#810)─────────────────────────────────────────────────────
+// xAI 新版 consent 页(accounts.x.ai)授权完成后不再 302 重定向回 loopback,而是由
+// 页面 JS **跨源 fetch** 本回调地址投递 code;Chrome 对「公网 https 页面 → 127.0.0.1」
+// 要求回调服务器应答 CORS preflight 并返回 Private Network Access 头,否则投递被浏览
+// 器拦下,授权卡死在「复制 code」页。第一方 Grok 登录已修(grok-oauth-login.ts),这里
+// 把同一机制移植进通用引擎。
+//
+// 通用引擎不能绑死某个服务商:允许来源从该插件声明的 authorizeUrl / tokenUrl 的
+// origin 派生——只有「你声明要去授权的那个域」才允许跨源把 code 投回来,任意其它
+// 网站的预检拿不到 CORS 头。真实性校验仍靠 state(+PKCE),与 302 回调同一套。
+
+/** 从插件声明的 OAuth 端点派生跨源投递允许来源(仅 https origin)。 */
+export function ghostCallbackCorsAllowedOrigins(
+  config: Pick<GhostOauthClientConfig, 'authorizeUrl' | 'tokenUrl'>,
+): ReadonlySet<string> {
+  const origins = new Set<string>();
+  for (const raw of [config.authorizeUrl, config.tokenUrl]) {
+    try {
+      const url = new URL(raw);
+      if (url.protocol === 'https:') origins.add(url.origin);
+    } catch {
+      /* isSafeHttpsUrl 已在流程入口校验;这里防御性忽略 */
+    }
+  }
+  return origins;
+}
+
+/** origin 在允许集合内时返回回调响应应附带的 CORS/PNA 头;否则为空(不放行)。 */
+export function ghostCallbackCorsHeaders(
+  allowedOrigins: ReadonlySet<string>,
+  origin: string | undefined,
+): Record<string, string> {
+  if (!origin || !allowedOrigins.has(origin)) return {};
+  return {
+    'Access-Control-Allow-Origin': origin,
+    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Private-Network': 'true',
+    Vary: 'Origin',
+  };
+}
+
 /** 一次授权 / 刷新成功后的令牌包(交由 token manager 落库;本模块不持久化)。 */
 export interface GhostOauthTokenBundle {
   accessToken: string;
@@ -524,6 +566,7 @@ async function runGhostOauthFlow(
       settled = true;
       resolve(v);
     };
+    const corsAllowedOrigins = ghostCallbackCorsAllowedOrigins(config);
     server.on('request', (req, res) => {
       // 页面语言按浏览器 Accept-Language 就近命中(zh/ja/ko, 缺省英文)
       const lang = pickOAuthResultPageLang(
@@ -531,6 +574,18 @@ async function runGhostOauthFlow(
           ? req.headers['accept-language']
           : undefined,
       );
+      const cors = ghostCallbackCorsHeaders(
+        corsAllowedOrigins,
+        typeof req.headers.origin === 'string' ? req.headers.origin : undefined,
+      );
+      // CORS/PNA preflight 必须 204 放行且不触碰登录流状态 —— 它没有 code 参数,
+      // 落进下方缺 code 分支会直接终止整个登录(grok 侧 issue #491 的卡死教训)。
+      // 非允许来源的预检同样 204 但不带 CORS 头,浏览器会拦下后续请求。
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204, cors);
+        res.end();
+        return;
+      }
       try {
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
         if (url.pathname === '/favicon.ico') {
@@ -545,7 +600,7 @@ async function runGhostOauthFlow(
         }
         const err = url.searchParams.get('error');
         if (err) {
-          res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8', ...cors });
           res.end(errorHtml('provider-error', lang, brandName, err));
           finish({ kind: 'invalid', detail: `authorize error=${err}` });
           return;
@@ -553,12 +608,12 @@ async function runGhostOauthFlow(
         const code = url.searchParams.get('code');
         const gotState = url.searchParams.get('state');
         if (!code || !gotState || gotState !== state) {
-          res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8', ...cors });
           res.end(errorHtml('invalid-callback', lang, brandName));
           finish({ kind: 'invalid', detail: 'callback 参数缺失或 state 不匹配' });
           return;
         }
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', ...cors });
         res.end(successHtml(brandName, lang));
         finish({ kind: 'code', code });
       } catch (err2) {
