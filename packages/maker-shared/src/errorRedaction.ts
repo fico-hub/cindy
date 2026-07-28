@@ -31,8 +31,10 @@ export function redactSensitiveText(input: string): string {
   );
   // Gateway principals (`aigw:...`) are stable per-user identifiers; quota and
   // routing errors embed them verbatim. Strip the whole value so persisted or
-  // displayed errors cannot leak an internal user id.
-  output = output.replace(/\baigw:[^\s"'`,;)\]}]+/gi, 'aigw:[REDACTED]');
+  // displayed errors cannot leak an internal user id. The negative lookahead
+  // keeps this idempotent: without it a second pass matches `aigw:[REDACTED`
+  // (`]` is in the excluded set) and grows the placeholder to `[REDACTED]]`.
+  output = output.replace(/\baigw:(?!\[REDACTED\])[^\s"'`,;)\]}]+/gi, 'aigw:[REDACTED]');
   return output;
 }
 

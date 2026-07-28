@@ -127,6 +127,17 @@ describe('redactSensitiveText', () => {
     expect(inline).toContain('aigw:[REDACTED], retry later');
   });
 
+  it('keeps gateway principal redaction idempotent (review 反馈)', () => {
+    // 没有 negative lookahead 时第二遍会匹配 `aigw:[REDACTED`(`]` 在排除集里),
+    // 每跑一遍多长出一个 `]`;多路径重复调用 redactSensitiveText 是常态。
+    const once = redactSensitiveText('aigw:v1:cindy:usr_a1b2c3');
+    expect(once).toBe('aigw:[REDACTED]');
+    expect(redactSensitiveText(once)).toBe('aigw:[REDACTED]');
+    expect(redactSensitiveText(redactSensitiveText(once))).toBe('aigw:[REDACTED]');
+    const inJson = redactSensitiveText(redactSensitiveText('{"principal":"aigw:v1:cindy:usr_a1b2c3"}'));
+    expect(inJson).toContain('"aigw:[REDACTED]"');
+  });
+
   it('recognizes gateway budget-exhaustion signals', () => {
     expect(
       extractNonSecretErrorSignals('Request rejected (429): ExceededBudget for aigw:v1:cindy:usr_a1b2c3'),
