@@ -31,7 +31,7 @@
 import * as http from 'node:http';
 import * as crypto from 'node:crypto';
 
-import { GHOST_OAUTH_RESERVED_AUTHORIZE_PARAMS } from '../../shared/ghost.js';
+import { GHOST_OAUTH_RESERVED_AUTHORIZE_PARAMS, ghostNetworkHostMatches } from '../../shared/ghost.js';
 import {
   buildOAuthReturnAction,
   getGhostOAuthResultCopy,
@@ -95,6 +95,14 @@ export interface GhostOauthClientConfig {
    * 缺省的 /callback,如 slack 的 /slack-mcp/callback)。缺省 '/callback'。
    */
   callbackPath?: string;
+  /**
+   * 可选:该插件 manifest 的 network.hosts 白名单(装入确认框展示、用户同意
+   * 过的域名面;含最左通配)。跨源 code 投递的允许来源 = authorizeUrl/tokenUrl
+   * 的 origin + 本白名单命中的 https origin——xAI 这类「授权端点在 auth.x.ai、
+   * consent 页从 accounts.x.ai 投递」的服务商,把投递域声明进 hosts 即可,
+   * 不引入白名单之外的新信任面。
+   */
+  corsDeliveryHosts?: readonly string[];
 }
 
 /** extraAuthorizeParams 不允许顶掉的协议保留参数(清单校验拒装,这里防御性重验)。 */
@@ -110,13 +118,21 @@ const RESERVED_AUTHORIZE_PARAMS: ReadonlySet<string> = new Set(
 // 把同一机制移植进通用引擎。
 //
 // 通用引擎不能绑死某个服务商:允许来源从该插件声明的 authorizeUrl / tokenUrl 的
-// origin 派生——只有「你声明要去授权的那个域」才允许跨源把 code 投回来,任意其它
-// 网站的预检拿不到 CORS 头。真实性校验仍靠 state(+PKCE),与 302 回调同一套。
+// origin 派生,并叠加 manifest network.hosts 白名单命中的 https origin(装入确认框
+// 展示、用户同意过的域名面)——xAI 这类「授权端点在 auth.x.ai、consent 页从
+// accounts.x.ai 投递」的服务商,把投递域声明进 hosts 即被覆盖;任意其它网站的
+// 预检拿不到 CORS 头。真实性校验仍靠 state(+PKCE),与 302 回调同一套。
 
-/** 从插件声明的 OAuth 端点派生跨源投递允许来源(仅 https origin)。 */
-export function ghostCallbackCorsAllowedOrigins(
-  config: Pick<GhostOauthClientConfig, 'authorizeUrl' | 'tokenUrl'>,
-): ReadonlySet<string> {
+/** 跨源投递允许面(端点 origin 精确集合 + hosts 白名单模式)。 */
+export interface GhostCallbackCorsAllowlist {
+  origins: ReadonlySet<string>;
+  hostPatterns: readonly string[];
+}
+
+/** 从插件声明的 OAuth 端点与 hosts 白名单派生跨源投递允许面(仅 https origin)。 */
+export function ghostCallbackCorsAllowlist(
+  config: Pick<GhostOauthClientConfig, 'authorizeUrl' | 'tokenUrl' | 'corsDeliveryHosts'>,
+): GhostCallbackCorsAllowlist {
   const origins = new Set<string>();
   for (const raw of [config.authorizeUrl, config.tokenUrl]) {
     try {
@@ -126,15 +142,31 @@ export function ghostCallbackCorsAllowedOrigins(
       /* isSafeHttpsUrl 已在流程入口校验;这里防御性忽略 */
     }
   }
-  return origins;
+  return { origins, hostPatterns: config.corsDeliveryHosts ?? [] };
 }
 
-/** origin 在允许集合内时返回回调响应应附带的 CORS/PNA 头;否则为空(不放行)。 */
+function isAllowedDeliveryOrigin(
+  allowlist: GhostCallbackCorsAllowlist,
+  origin: string,
+): boolean {
+  if (allowlist.origins.has(origin)) return true;
+  let url: URL;
+  try {
+    url = new URL(origin);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== 'https:') return false;
+  const hostname = url.hostname.toLowerCase();
+  return allowlist.hostPatterns.some((pattern) => ghostNetworkHostMatches(pattern, hostname));
+}
+
+/** origin 在允许面内时返回回调响应应附带的 CORS/PNA 头;否则为空(不放行)。 */
 export function ghostCallbackCorsHeaders(
-  allowedOrigins: ReadonlySet<string>,
+  allowlist: GhostCallbackCorsAllowlist,
   origin: string | undefined,
 ): Record<string, string> {
-  if (!origin || !allowedOrigins.has(origin)) return {};
+  if (!origin || !isAllowedDeliveryOrigin(allowlist, origin)) return {};
   return {
     'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Methods': 'GET, OPTIONS',
@@ -566,7 +598,7 @@ async function runGhostOauthFlow(
       settled = true;
       resolve(v);
     };
-    const corsAllowedOrigins = ghostCallbackCorsAllowedOrigins(config);
+    const corsAllowlist = ghostCallbackCorsAllowlist(config);
     server.on('request', (req, res) => {
       // 页面语言按浏览器 Accept-Language 就近命中(zh/ja/ko, 缺省英文)
       const lang = pickOAuthResultPageLang(
@@ -575,7 +607,7 @@ async function runGhostOauthFlow(
           : undefined,
       );
       const cors = ghostCallbackCorsHeaders(
-        corsAllowedOrigins,
+        corsAllowlist,
         typeof req.headers.origin === 'string' ? req.headers.origin : undefined,
       );
       // CORS/PNA preflight 必须 204 放行且不触碰登录流状态 —— 它没有 code 参数,
@@ -598,6 +630,16 @@ async function runGhostOauthFlow(
           res.end('Not Found');
           return;
         }
+        // state 是回调真实性的唯一凭证,最先校验(与第一方 grok 监听器同口径):
+        // 跨源 fetch 投递时代表旧登录尝试的 consent 页可能带旧 state 持续重试,
+        // 这类请求一律 400 但**不结算**当前登录——陈旧 tab 的一次滞留重试不能
+        // 杀死新发起的登录;error / code 参数只在 state 匹配时才有意义。
+        const gotState = url.searchParams.get('state');
+        if (gotState !== state) {
+          res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8', ...cors });
+          res.end(errorHtml('invalid-callback', lang, brandName));
+          return;
+        }
         const err = url.searchParams.get('error');
         if (err) {
           res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8', ...cors });
@@ -606,11 +648,10 @@ async function runGhostOauthFlow(
           return;
         }
         const code = url.searchParams.get('code');
-        const gotState = url.searchParams.get('state');
-        if (!code || !gotState || gotState !== state) {
+        if (!code) {
           res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8', ...cors });
           res.end(errorHtml('invalid-callback', lang, brandName));
-          finish({ kind: 'invalid', detail: 'callback 参数缺失或 state 不匹配' });
+          finish({ kind: 'invalid', detail: 'callback 缺 code 参数' });
           return;
         }
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', ...cors });
@@ -618,7 +659,9 @@ async function runGhostOauthFlow(
         finish({ kind: 'code', code });
       } catch (err2) {
         try {
-          res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
+          // 跨源 fetch 场景缺 CORS 头会让浏览器把 500 响应整体拦下,页面侧
+          // 无从感知失败 —— 内部错误同样带头。
+          res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8', ...cors });
           res.end(errorHtml('internal', lang, brandName));
         } catch {
           /* 响应通道已坏,无事可做 */
