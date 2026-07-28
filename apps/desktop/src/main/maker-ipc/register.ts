@@ -306,6 +306,7 @@ import { refreshCodexMcpEnvironment } from './codexMcpRefresh.js';
 import { broadcastSchedulerChanged } from './schedule.js';
 import { validateExtraDirs } from './extraDirsValidator.js';
 import { prepareHandoffWorktree, shouldRecycleHandoffWorktreeOnFailure } from './handoffWorktree.js';
+import { validateHandoffWorkingDir } from './handoffWorkingDir.js';
 import { registerProjectPluginPolicyHandlers } from './projectPluginPolicyHandlers.js';
 import {
   restoreMissingManagedWorktreeForSession,
@@ -803,6 +804,8 @@ interface OrcaCollabService {
       title?: string;
       /** create 分支可选:true = 为新 session 预建独立 git worktree 并以其为 workingDir(jump 忽略)。 */
       useWorktree?: boolean;
+      /** create 分支可选:新 session 的工作目录覆盖(绝对路径,须已存在;jump 忽略)。#811 */
+      workingDir?: string;
       /** Host-owned create defaults for non-session callers such as scheduler script tasks. */
       createDefaults?: SendToSessionCreateDefaults;
     },
@@ -4515,6 +4518,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       dispatcherSessionId?: string;
       title?: string;
       useWorktree?: boolean;
+      /** create 分支可选:新 session 的工作目录覆盖(绝对路径,须已存在;jump 忽略)。#811 */
+      workingDir?: string;
       onAccepted?: () => void | Promise<void>;
       onAcceptedRollback?: () => void | Promise<void>;
       origin?: AgentInputQueuedMessage['origin'];
@@ -4531,6 +4536,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       dispatcherSessionId,
       title,
       useWorktree,
+      workingDir: workingDirOverride,
       onAccepted,
       onAcceptedRollback,
       origin,
@@ -4577,6 +4583,17 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               message: `dispatcher session ${dispatcherSessionId} not found`,
             };
           }
+          // working_dir 覆盖(#811):把新 session 落到指定项目目录,而不是恒继承
+          // dispatcher 的目录。先于 worktree 预建校验——use_worktree 的 base 仓库
+          // 也从覆盖后的目录解析。
+          let resolvedWorkDir = meta.workDir;
+          if (workingDirOverride !== undefined) {
+            const invalid = await validateHandoffWorkingDir(workingDirOverride);
+            if (invalid) {
+              return { ok: false, errorCode: 'INVALID_ARGS', message: invalid };
+            }
+            resolvedWorkDir = workingDirOverride;
+          }
           // useWorktree:为新 session 预建正规 session worktree(与 UI 新会话勾选
           // worktree 同类:worktreeStore 绑定 + 关闭时 auto-stash 清理),新 session 的
           // id 必须用预生成的那个(worktree 绑定已按它登记)。失败硬报 WORKTREE_UNAVAILABLE
@@ -4594,7 +4611,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
                 createId: () => randomUUID(),
               },
               dispatcherSessionId,
-              meta.workDir,
+              resolvedWorkDir,
             );
             if (!prep.ok) {
               return { ok: false, errorCode: 'WORKTREE_UNAVAILABLE', message: prep.message };
@@ -4608,7 +4625,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             .limit(1);
           inherited = {
             agentKind: meta.agentKind,
-            workingDir: meta.workDir,
+            workingDir: resolvedWorkDir,
             model: meta.model,
             effort: (row?.effort ?? undefined) as SendToSessionCreateDefaults['effort'],
             fastMode: !!row?.fastMode,
