@@ -1214,14 +1214,14 @@ function messageFingerprint(
   createdAt: number,
 ): MessageFingerprint {
   // 升级前落库的旧行仍带原始 `:codex-file-citation{...}` 标记,导入侧新文本已
-  // 归一化(标记换成了 code span);两侧都算出 citation 规范形作为**候选**指纹,
-  // 是否参与比较由 isLikelyLocalDuplicate 的标记门决定。只影响比较,不改落库内容。
+  // 归一化(标记换成 code span,截断残尾则被整段剥掉——此时是**不含任何标记/
+  // 反引号的纯文本**)。因此 assistant 一律算出规范形候选指纹,是否参与比较由
+  // isLikelyLocalDuplicate 的标记门决定(review 反馈:残尾行的规范形是纯文本,
+  // 导入侧若不给纯文本算规范形就永远配不上)。只影响比较,不改落库内容。
   const plain = normalizeFingerprintText(text);
   const hasMarker = role === 'assistant' && text.includes(CODEX_CITATION_OPEN);
   const canonical =
-    role === 'assistant' && (hasMarker || text.includes('`'))
-      ? normalizeFingerprintText(canonicalizeCodexCitations(text))
-      : undefined;
+    role === 'assistant' ? normalizeFingerprintText(canonicalizeCodexCitations(text)) : undefined;
   return { role, plain, ...(canonical !== undefined ? { canonical } : {}), hasMarker, createdAt };
 }
 
@@ -1258,7 +1258,8 @@ function decodeCitationPathForFingerprint(attrs: string): string {
 }
 
 function canonicalizeCodexCitations(text: string): string {
-  if (text.indexOf(CODEX_CITATION_OPEN) === -1 && text.indexOf('`') === -1) return text;
+  // 无早退:纯文本也要走末尾的空白折叠,否则「残尾行规范形(折叠过)」与「导入侧
+  // 纯文本规范形(未折叠)」会因内部空白差异配不上。
   // 截断残尾剥除(与展示口径一致:只剥「扫描到文本末尾仍未闭合」的标记)。
   let out = text;
   let from = 0;

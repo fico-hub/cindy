@@ -266,6 +266,41 @@ describe('db worker tx handlers', () => {
     });
   });
 
+  it('codex.importMessages dedupes unfinished-marker rows against finalized plain text', async () => {
+    await withClient(async (client) => {
+      await seedSession(client, 's1');
+      // 升级前落库的残尾行:生成被打断,正文停在未闭合标记。导入侧同一条回复
+      // finalize 后是**不含标记/反引号的纯文本**——纯文本也要有规范形候选指纹,
+      // 否则永远配不上残尾行的规范形(review 反馈)。
+      await client.exec(
+        'INSERT INTO messages (id, client_id, session_id, role, content, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+        [
+          'local-1',
+          'local-1',
+          's1',
+          'assistant',
+          JSON.stringify('Result :codex-file-citation{path="/tmp/x'),
+          1000,
+        ],
+      );
+
+      const result = await client.tx('codex.importMessages', {
+        sessionId: 's1',
+        importClientIdPrefix: 'codex-import:',
+        sdkSessionId: 'thread-1',
+        model: 'gpt-5',
+        rows: [
+          { lineNo: 1, role: 'assistant', text: 'Result', content: 'Result', createdAt: 1001 },
+        ],
+      });
+
+      expect(result).toEqual({ changed: 0 });
+      await expect(
+        client.query('SELECT client_id FROM messages WHERE session_id = ?', ['s1']),
+      ).resolves.toEqual([{ client_id: 'local-1' }]);
+    });
+  });
+
   it('codex.importMessages dedupes marker-literal filenames (指纹不动点规范形)', async () => {
     await withClient(async (client) => {
       await seedSession(client, 's1');

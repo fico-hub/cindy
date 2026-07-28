@@ -1212,7 +1212,7 @@ function isLikelyLocalDuplicate(existing, row) {
 function messageFingerprint(role, text, createdAt) {
   const plain = normalizeFingerprintText(text);
   const hasMarker = role === 'assistant' && text.includes(CODEX_CITATION_OPEN);
-  const canonical = role === 'assistant' && (hasMarker || text.includes('\`'))
+  const canonical = role === 'assistant'
     ? normalizeFingerprintText(canonicalizeCodexCitations(text))
     : undefined;
   const out = { role, plain, hasMarker, createdAt };
@@ -1246,7 +1246,6 @@ function decodeCitationPathForFingerprint(attrs) {
 }
 
 function canonicalizeCodexCitations(text) {
-  if (text.indexOf(CODEX_CITATION_OPEN) === -1 && text.indexOf('\`') === -1) return text;
   let out = text;
   let from = 0;
   for (;;) {
