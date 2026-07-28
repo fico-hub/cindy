@@ -1198,12 +1198,26 @@ function readExistingMessageFingerprints(readyDb, sessionId, importClientIdPrefi
 
 function isLikelyLocalDuplicate(existing, row) {
   const next = messageFingerprint(row.role, row.text, row.createdAt);
-  return existing.some((prev) => prev.role === next.role && prev.text === next.text && Math.abs(prev.createdAt - next.createdAt) <= LOCAL_DUPLICATE_WINDOW_MS);
+  // 普通消息原文精确比较;canon 有损比较只在「至少一侧含原始标记字面量」时启用
+  // (升级前旧标记行 vs 已归一化导入行),避免仅 Markdown 格式不同的正常回复被
+  // 误判成重复。口径同 opHandlers/tx.ts。
+  return existing.some((prev) => prev.role === next.role
+    && Math.abs(prev.createdAt - next.createdAt) <= LOCAL_DUPLICATE_WINDOW_MS
+    && (prev.plain === next.plain
+      || (prev.canonical !== undefined && next.canonical !== undefined
+        && (prev.hasMarker || next.hasMarker)
+        && prev.canonical === next.canonical)));
 }
 
 function messageFingerprint(role, text, createdAt) {
-  const canonical = role === 'assistant' ? canonicalizeCodexCitations(text) : text;
-  return { role, text: normalizeFingerprintText(canonical), createdAt };
+  const plain = normalizeFingerprintText(text);
+  const hasMarker = role === 'assistant' && text.includes(CODEX_CITATION_OPEN);
+  const canonical = role === 'assistant' && (hasMarker || text.includes('\`'))
+    ? normalizeFingerprintText(canonicalizeCodexCitations(text))
+    : undefined;
+  const out = { role, plain, hasMarker, createdAt };
+  if (canonical !== undefined) out.canonical = canonical;
+  return out;
 }
 
 // 与 opHandlers/tx.ts 的指纹规范形同构;SSoT 注释见该文件,口径变更需同步。

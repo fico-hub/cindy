@@ -236,6 +236,36 @@ describe('db worker tx handlers', () => {
     });
   });
 
+  it('codex.importMessages keeps distinct replies that differ only by Markdown formatting', async () => {
+    await withClient(async (client) => {
+      await seedSession(client, 's1');
+      // 仅 Markdown 格式不同的两条**不同**回复:canon 有损比较只在「至少一侧含
+      // 原始标记字面量」时启用,这里两侧都不含 → 原文精确比较,不得误判成重复
+      // (review 反馈:无条件去反引号会把 `Use \`foo\`` 与 `Use foo` 判成同一条)。
+      await client.exec(
+        'INSERT INTO messages (id, client_id, session_id, role, content, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+        ['local-1', 'local-1', 's1', 'assistant', JSON.stringify('Use `foo`'), 1000],
+      );
+
+      const result = await client.tx('codex.importMessages', {
+        sessionId: 's1',
+        importClientIdPrefix: 'codex-import:',
+        sdkSessionId: 'thread-1',
+        model: 'gpt-5',
+        rows: [
+          { lineNo: 1, role: 'assistant', text: 'Use foo', content: 'Use foo', createdAt: 1001 },
+        ],
+      });
+
+      expect(result).toEqual({ changed: 1 });
+      await expect(
+        client.query('SELECT client_id FROM messages WHERE session_id = ? ORDER BY client_id', [
+          's1',
+        ]),
+      ).resolves.toEqual([{ client_id: 'codex-import:1' }, { client_id: 'local-1' }]);
+    });
+  });
+
   it('codex.importMessages dedupes marker-literal filenames (指纹不动点规范形)', async () => {
     await withClient(async (client) => {
       await seedSession(client, 's1');

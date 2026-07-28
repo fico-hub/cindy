@@ -1149,7 +1149,16 @@ function readExistingImportedClientIds(
 
 interface MessageFingerprint {
   role: 'user' | 'assistant';
-  text: string;
+  /** 原文指纹(仅换行归一 + trim),普通消息只用它精确比较。 */
+  plain: string;
+  /**
+   * citation 规范形指纹(有损:标记→路径、去反引号、折叠空白)。只在 canon 比较
+   * 门放行时参与(见 isLikelyLocalDuplicate),避免「仅 Markdown 格式不同」的两条
+   * 正常回复被误判成重复(review 反馈)。
+   */
+  canonical?: string;
+  /** 原文是否含原始标记字面量——canon 比较的门:至少一侧为真才启用有损比较。 */
+  hasMarker: boolean;
   createdAt: number;
 }
 
@@ -1184,10 +1193,18 @@ function isLikelyLocalDuplicate(
   row: { role: 'user' | 'assistant'; text: string; createdAt: number },
 ): boolean {
   const next = messageFingerprint(row.role, row.text, row.createdAt);
-  return existing.some((prev) =>
-    prev.role === next.role &&
-    prev.text === next.text &&
-    Math.abs(prev.createdAt - next.createdAt) <= LOCAL_DUPLICATE_WINDOW_MS,
+  return existing.some(
+    (prev) =>
+      prev.role === next.role &&
+      Math.abs(prev.createdAt - next.createdAt) <= LOCAL_DUPLICATE_WINDOW_MS &&
+      // 普通消息:原文精确比较。canon 有损比较只在「至少一侧含原始标记字面量」时
+      // 启用——即升级前的旧标记行 vs 已归一化的导入行;两条都不含标记的正常回复
+      // (如 `Use \`foo\`` vs `Use foo`)绝不走有损比较(review 反馈)。
+      (prev.plain === next.plain ||
+        (prev.canonical !== undefined &&
+          next.canonical !== undefined &&
+          (prev.hasMarker || next.hasMarker) &&
+          prev.canonical === next.canonical)),
   );
 }
 
@@ -1196,11 +1213,16 @@ function messageFingerprint(
   text: string,
   createdAt: number,
 ): MessageFingerprint {
-  // assistant 指纹两侧统一过 citation 规范化:升级前落库的旧行仍带原始
-  // `:codex-file-citation{...}` 标记,导入侧新文本已归一化;不同构比较会把同一条
-  // 回复判成两条、重复插入(review 反馈)。规范化只影响比较,不改任何落库内容。
-  const canonical = role === 'assistant' ? canonicalizeCodexCitations(text) : text;
-  return { role, text: normalizeFingerprintText(canonical), createdAt };
+  // 升级前落库的旧行仍带原始 `:codex-file-citation{...}` 标记,导入侧新文本已
+  // 归一化(标记换成了 code span);两侧都算出 citation 规范形作为**候选**指纹,
+  // 是否参与比较由 isLikelyLocalDuplicate 的标记门决定。只影响比较,不改落库内容。
+  const plain = normalizeFingerprintText(text);
+  const hasMarker = role === 'assistant' && text.includes(CODEX_CITATION_OPEN);
+  const canonical =
+    role === 'assistant' && (hasMarker || text.includes('`'))
+      ? normalizeFingerprintText(canonicalizeCodexCitations(text))
+      : undefined;
+  return { role, plain, ...(canonical !== undefined ? { canonical } : {}), hasMarker, createdAt };
 }
 
 // 指纹专用规范形——与展示形(maker-core finalizeCodexCitationText)**刻意不同**:
