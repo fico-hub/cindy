@@ -199,7 +199,9 @@ describe('translateRequest', () => {
       ],
     };
     const out = translateRequest(req, { model: 'gpt-5.5' });
-    const item = out.input?.[0] as { type: string; output: string };
+    // 先断言长度再取元素:input 缺失时给出清晰断言失败而不是 TypeError。
+    expect(out.input).toHaveLength(1);
+    const item = out.input![0] as { type: string; output: string };
     expect(item.type).toBe('function_call_output');
     expect(item.output).toContain('screenshot below');
     // 占位文案要素:确认有图、说明送不到是路由限制、禁止臆测、给出改走 user 消息的出路。
