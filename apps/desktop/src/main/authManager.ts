@@ -513,8 +513,9 @@ function removeSafeIfUnchanged(key: string, expected: string): RemoveIfUnchanged
   } catch (err) {
     // 这一瞬别人已经删掉了 → 目标状态达成,算成功。
     if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return 'deleted';
-    // EPERM / EACCES / EBUSY 等:凭证仍在盘上。
-    log.warn(`failed to delete persisted secret ${key}: ${(err as Error).message}`);
+    // EPERM / EACCES / EBUSY 等:凭证仍在盘上。与读写路径同一 helper——只记
+    // code/name,fs 错误的 message 携带 userData 绝对路径,不进长期日志。
+    logSafeStorageIssueOnce('delete failed', key, err);
     return 'failed';
   }
 }
