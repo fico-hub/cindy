@@ -25,10 +25,14 @@
  *    并发场景另一进程可能恰好认领成功,同一 profile 会跑在两个身份上(review 反馈
  *    P1 第八轮)。
  *  - 覆写目录的**非认领启动**(裸 `XDT_USER_DATA_DIR`,或 `--isolated` 指向非纪元
- *    目录)进入观察模式:绝不认领,但目录已带标记时依标记运行——裸覆写指向已按
- *    CindyDev 认领的 `-dev2` 沙箱是受支持形态,若因缺隔离旗标就跳过标记、以默认
- *    身份打开,同一 profile 会被两种身份轮流打开互毁密文(review 反馈 P1 第十四轮)。
- *    观察模式下标记不可读/不可识别同样 abort,确证无标记才保持默认名。
+ *    目录)进入观察模式:绝不认领 CindyDev,但目录已带标记时依标记运行——裸覆写
+ *    指向已按 CindyDev 认领的 `-dev2` 沙箱是受支持形态,若因缺隔离旗标就跳过标记、
+ *    以默认身份打开,同一 profile 会被两种身份轮流打开互毁密文(review 反馈 P1
+ *    第十四轮)。标记不可读/不可识别同样 abort。
+ *  - 空 profile 的身份在**两种模式下都原子落定**:认领模式认领 CindyDev,观察模式
+ *    认领默认身份(标记词表 = 两个身份名),输家依胜者标记。观察模式若对空 profile
+ *    直接保持默认名而不落标记,与并发隔离启动的 CindyDev 认领无协调点,两个进程会
+ *    对同一 profile 以两种身份写密文(review 反馈 P1 第十五轮)。
  *  - 共享 userData 的 dev(无目录覆写)、packaged cn/global 一律不改名也不读标记;
  *    packaged 改名属存量凭证迁移(#871 候选 A)。
  *
@@ -38,7 +42,10 @@
 
 import { BRAND_IDENTITY } from '@cindy/maker-shared/brand-identity';
 
-/** 沙箱 profile 内的钥匙串身份标记文件名(userData 根下,纯文本存条目身份名)。 */
+/**
+ * 沙箱 profile 内的钥匙串身份标记文件名(userData 根下,纯文本存条目身份名;
+ * 词表 = 'CindyDev' | 默认身份名 'Cindy',其它内容一律视为身份不确定)。
+ */
 export const KEYCHAIN_IDENTITY_MARKER_FILE = 'keychain-identity';
 
 /** 该目录项是否属于身份标记机制自己的产物(最终标记 或 `<marker>.<pid>.tmp` 半成品)。 */
@@ -93,23 +100,27 @@ export type DevKeychainDecision =
 function interpretMarker(
   read: KeychainMarkerRead,
   devName: string,
+  defaultName: string,
   io: KeychainIdentityIo,
 ): DevKeychainDecision | null {
   if (read.kind === 'unreadable') {
     return { kind: 'abort', reason: '身份标记读取失败(非 ENOENT)' };
   }
   if (read.kind === 'present') {
-    if (read.value === devName) {
+    if (read.value === devName || read.value === defaultName) {
       // 接受观察到的标记前先把它的目录项持久化:写入者可能尚未完成自己的 fsync,
       // 不 flush 就以该身份写密文,断电后会出现「密文在、标记丢」(review 反馈
-      // P1 第十三轮)。flush 失败按身份不确定 → abort。
+      // P1 第十三轮)。flush 失败按身份不确定 → abort。默认身份标记同一规则——
+      // 不为它单独论证「丢了也收敛」,统一不变量更可靠。
       if (!io.flushProfileDir()) {
         return { kind: 'abort', reason: '身份标记持久化确认失败' };
       }
-      return { kind: 'rename', appName: devName };
+      return read.value === devName
+        ? { kind: 'rename', appName: devName }
+        : { kind: 'keep-default' };
     }
-    // 空串或不可识别的值:身份不确定。可能是损坏的 CindyDev 标记——静默回退默认
-    // 身份会用错钥匙覆盖既有密文(review 反馈 P1 第七轮),拒绝启动。
+    // 空串或不可识别的值:身份不确定。可能是损坏的标记——静默回退默认身份
+    // 会用错钥匙覆盖既有密文(review 反馈 P1 第七轮),拒绝启动。
     return { kind: 'abort', reason: `身份标记内容不可识别: ${JSON.stringify(read.value)}` };
   }
   return null; // absent → 由调用侧继续判定。
@@ -126,33 +137,35 @@ export function resolveDevKeychainDecision(input: {
   hasDirOverride: boolean;
   io: KeychainIdentityIo;
 }): DevKeychainDecision {
-  if (input.isPackaged) return { kind: 'keep-default' };
+  if (input.isPackaged || !input.hasDirOverride) return { kind: 'keep-default' };
   const devName = BRAND_IDENTITY.executableNameByRegion.dev;
+  const defaultName = BRAND_IDENTITY.executableName;
+  // 两种模式共用同一状态机,唯一差别是空 profile 时认领哪个身份:认领模式
+  // (--isolated + 纪元派生目录)认领 CindyDev,观察模式(裸覆写等非认领形态)
+  // 认领默认身份。观察模式对空 profile 若直接 keep-default 而不落标记,与并发
+  // 隔离启动的 CindyDev 认领之间没有任何协调点,两个进程会对同一 profile 以两种
+  // 身份写密文(review 反馈 P1 第十五轮)——空 profile 的身份必须原子落定,
+  // 输家一律依胜者标记。
+  const claimName = input.isolated ? devName : defaultName;
+  const decisionFor = (name: string): DevKeychainDecision =>
+    name === devName ? { kind: 'rename', appName: devName } : { kind: 'keep-default' };
 
-  if (!input.isolated) {
-    // 观察模式(review 反馈 P1 第十四轮):非认领启动打开覆写目录时,身份仍以目录里
-    // 已有的标记为准——裸覆写指向已认领的 -dev2 沙箱必须以 CindyDev 打开,否则同一
-    // profile 被两种身份轮流打开会互毁密文。绝不在此路径认领;确证无标记 → 默认名。
-    if (!input.hasDirOverride) return { kind: 'keep-default' };
-    const observed = interpretMarker(input.io.readMarker(), devName, input.io);
-    return observed ?? { kind: 'keep-default' };
-  }
-
-  const first = interpretMarker(input.io.readMarker(), devName, input.io);
+  const first = interpretMarker(input.io.readMarker(), devName, defaultName, input.io);
   if (first !== null) return first;
 
   if (input.io.profileHasData()) {
     // 无标记但有数据:复查标记,关掉「对手在首读后发布标记+数据」的并发窗口;
-    // 复查确证 absent 才是真旧沙箱。
-    const recheck = interpretMarker(input.io.readMarker(), devName, input.io);
+    // 复查确证 absent 才是真旧沙箱/外来目录,永久保持默认名且不落标记
+    // (存量密文绑定默认条目,零迁移只对新沙箱成立)。
+    const recheck = interpretMarker(input.io.readMarker(), devName, defaultName, input.io);
     return recheck ?? { kind: 'keep-default' };
   }
 
-  // 全新沙箱:原子认领。
-  const claim = input.io.claimMarker(devName);
-  if (claim === 'claimed') return { kind: 'rename', appName: devName };
+  // 空 profile:原子认领本模式的身份。
+  const claim = input.io.claimMarker(claimName);
+  if (claim === 'claimed') return decisionFor(claimName);
   if (claim === 'exists') {
-    const winner = interpretMarker(input.io.readMarker(), devName, input.io);
+    const winner = interpretMarker(input.io.readMarker(), devName, defaultName, input.io);
     // EEXIST 后复读确证 absent(对手发布后又消失)同样属身份不确定,拒绝启动。
     return winner ?? { kind: 'abort', reason: '认领竞态后身份标记消失' };
   }

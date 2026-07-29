@@ -7,8 +7,9 @@
  *  - 无标记且有真实数据(排除标记自身产物)→ 复查标记后判旧沙箱。
  *  - 无标记且为空 → 原子认领;输掉竞态以胜者完整标记为准;认领写失败(非 EEXIST)
  *    同样 abort——并发对手可能恰好认领成功,keep-default 会让同一 profile 双身份。
- *  - 覆写目录的非认领启动 = 观察模式:绝不认领,但有标记依标记(不可读/不可识别
- *    同样 abort)。
+ *  - 覆写目录的非认领启动 = 观察模式:绝不认领 CindyDev,有标记依标记(不可读/
+ *    不可识别同样 abort);空 profile 原子认领默认身份,输家依胜者标记——身份在
+ *    两种模式下都原子落定,并发启动不分叉。
  *  - packaged / 无目录覆写的 dev 一律默认名。
  */
 
@@ -148,7 +149,7 @@ describe('resolveDevKeychainDecision', () => {
   });
 });
 
-describe('覆写目录的非认领启动 = 观察模式(review 反馈 P1 第十四轮)', () => {
+describe('覆写目录的非认领启动 = 观察模式(review 反馈 P1 第十四/十五轮)', () => {
   // 裸 XDT_USER_DATA_DIR 指向已按 CindyDev 认领的 -dev2 沙箱是受支持形态:
   // 缺隔离旗标不能成为跳过标记、以默认身份打开同一 profile 的理由。
   const observe = { isPackaged: false, isolated: false, hasDirOverride: true };
@@ -175,12 +176,66 @@ describe('覆写目录的非认领启动 = 观察模式(review 反馈 P1 第十�
     }
   });
 
-  it('确证无标记 → 保持默认名,且绝不认领', () => {
+  it('空 profile → 原子认领默认身份,不与并发隔离启动分叉(review 反馈 P1 第十五轮)', () => {
+    // 若空 profile 直接 keep-default 而不落标记,并发隔离启动可在其后认领 CindyDev,
+    // 两个进程对同一 profile 以两种身份写密文。
     const claim = vi.fn<KeychainIdentityIo['claimMarker']>(() => 'claimed');
     expect(
       resolveDevKeychainDecision({ ...observe, io: io({ claimMarker: claim }) }),
     ).toEqual({ kind: 'keep-default' });
+    expect(claim).toHaveBeenCalledWith('Cindy');
+  });
+
+  it('认领输给并发隔离启动(EEXIST)→ 依胜者标记以 CindyDev 打开', () => {
+    const reads = vi
+      .fn<KeychainIdentityIo['readMarker']>()
+      .mockReturnValueOnce(ABSENT)
+      .mockReturnValueOnce(DEV);
+    expect(
+      resolveDevKeychainDecision({
+        ...observe,
+        io: io({ readMarker: reads, claimMarker: () => 'exists' }),
+      }),
+    ).toEqual({ kind: 'rename', appName: 'CindyDev' });
+  });
+
+  it('认领写失败(非 EEXIST)→ abort;有数据无标记的外来目录 → 默认名且不认领', () => {
+    expect(
+      resolveDevKeychainDecision({ ...observe, io: io({ claimMarker: () => 'error' }) }).kind,
+    ).toBe('abort');
+    const claim = vi.fn<KeychainIdentityIo['claimMarker']>(() => 'claimed');
+    expect(
+      resolveDevKeychainDecision({
+        ...observe,
+        io: io({ claimMarker: claim, profileHasData: () => true }),
+      }),
+    ).toEqual({ kind: 'keep-default' });
     expect(claim).not.toHaveBeenCalled();
+  });
+});
+
+describe('默认身份标记(词表第二项,review 反馈 P1 第十五轮)', () => {
+  it('隔离启动打开已按默认身份落定的 profile → 依标记保持默认名(先 flush 确认)', () => {
+    const flush = vi.fn<KeychainIdentityIo['flushProfileDir']>(() => true);
+    expect(
+      resolveDevKeychainDecision({
+        ...base,
+        io: io({ readMarker: () => ({ kind: 'present', value: 'Cindy' }), flushProfileDir: flush }),
+      }),
+    ).toEqual({ kind: 'keep-default' });
+    expect(flush).toHaveBeenCalled();
+  });
+
+  it('隔离启动接受默认身份标记但 flush 失败 → 同样 abort(统一不变量)', () => {
+    expect(
+      resolveDevKeychainDecision({
+        ...base,
+        io: io({
+          readMarker: () => ({ kind: 'present', value: 'Cindy' }),
+          flushProfileDir: () => false,
+        }),
+      }).kind,
+    ).toBe('abort');
   });
 });
 

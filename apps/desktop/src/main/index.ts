@@ -225,8 +225,8 @@ if (devFlags.userDataDirOverride) {
       `[cindy] FATAL: 沙箱钥匙串身份不确定(${keychainDecision.reason});` +
         `为避免用错误主密钥覆盖沙箱既有密文,拒绝启动。\n` +
         `  标记文件: ${keychainMarkerPath}\n` +
-        `  处置: 若确认该沙箱从未用过 CindyDev 身份,删除该标记文件后重启;` +
-        `否则修复其内容为 "CindyDev"。\n`,
+        `  处置: 若确认该沙箱从未用过 CindyDev 身份,删除该标记文件后重启` +
+        `(或将内容修复为 "Cindy");若沙箱曾以 CindyDev 运行,修复其内容为 "CindyDev"。\n`,
     );
     exit(1);
   }
