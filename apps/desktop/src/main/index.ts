@@ -125,11 +125,13 @@ if (devFlags.userDataDirOverride) {
   stderr.write(`[cindy] dev userData override → ${devFlags.userDataDirOverride}\n`);
   // 隔离 dev 独立钥匙串条目(#871 候选 B 收窄):userData 已在上一行显式 pin,
   // 改名只影响 safeStorage 服务名(`<app.name> Safe Storage`)与 dev-only 派生
-  // 路径(crashDumps 等),不改数据目录。共享 userData 的 dev 与 packaged 构建
-  // 刻意不改名——语义与边界见 devKeychainName.ts。
+  // 路径(crashDumps 等),不改数据目录。门 = devFlags.isolated(仅 --isolated /
+  // XDT_ISOLATED 表达的显式隔离意图):裸设 XDT_USER_DATA_DIR 属目录覆写、可能
+  // 指向共享中的既有 profile,与共享 userData 的 dev、packaged 构建一样刻意
+  // 不改名——语义与边界见 devKeychainName.ts。
   const devKeychainAppName = resolveDevKeychainAppName({
     isPackaged: app.isPackaged,
-    userDataDirOverride: devFlags.userDataDirOverride,
+    isolated: devFlags.isolated,
   });
   if (devKeychainAppName) {
     app.setName(devKeychainAppName);

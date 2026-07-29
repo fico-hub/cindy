@@ -335,15 +335,19 @@ let passiveLocalSignOut = false;
 const SAFE_STORAGE_DIR = () => path.join(app.getPath('userData'), 'safe-storage');
 
 // #871 可观测性:safeStorage 不可用 / 解密失败此前被静默折叠成 null,用户在系统
-// 钥匙串弹窗点「拒绝」后的降级完全不可诊断。每种原因只记一次(readSafe 在热路径
-// 上高频调用,不能每次都写日志);只记原因与 key 名,绝不记密文/明文。
+// 钥匙串弹窗点「拒绝」后的降级完全不可诊断。按「原因 × key」各记一次(readSafe 在
+// 热路径上高频调用,不能每次都写;只按原因去重会掩盖「单个凭证损坏 vs 整个后端
+// 不可用」的区分,review 反馈)。错误只记 code/name,不记 message——fs 错误的
+// message 携带 userData 绝对路径,不该进保留 30 天的日志;密文/明文更不落。
 const safeStorageIssueLogged = new Set<string>();
 function logSafeStorageIssueOnce(reason: string, key: string, err?: unknown): void {
-  if (safeStorageIssueLogged.has(reason)) return;
-  safeStorageIssueLogged.add(reason);
+  const issueKey = `${reason}:${key}`;
+  if (safeStorageIssueLogged.has(issueKey)) return;
+  safeStorageIssueLogged.add(issueKey);
+  const code = (err as NodeJS.ErrnoException | undefined)?.code;
   log.warn(`safeStorage ${reason}`, {
     key,
-    ...(err instanceof Error ? { error: err.message } : {}),
+    ...(err instanceof Error ? { error: code ?? err.name } : {}),
   });
 }
 
