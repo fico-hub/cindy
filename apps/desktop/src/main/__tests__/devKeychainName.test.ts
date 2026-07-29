@@ -13,18 +13,34 @@ import { describe, expect, it } from 'vitest';
 import { resolveDevKeychainAppName } from '../devKeychainName.js';
 
 describe('resolveDevKeychainAppName', () => {
-  it('显式隔离 dev(--isolated / XDT_ISOLATED)→ 独立条目名 CindyDev', () => {
-    expect(resolveDevKeychainAppName({ isPackaged: false, isolated: true })).toBe('CindyDev');
+  it('显式隔离 + 全新沙箱 → 独立条目名 CindyDev', () => {
+    expect(
+      resolveDevKeychainAppName({ isPackaged: false, isolated: true, userDataDirExists: false }),
+    ).toBe('CindyDev');
+  });
+
+  it('显式隔离但沙箱目录已存在(旧版本建过)→ 不改名(存量密文绑定旧条目主密钥)', () => {
+    // 既有隔离沙箱可能带着 'Cindy Safe Storage' 加密的 .enc(登录态、手填 key、
+    // OAuth/IM 凭证);换名不仅读不出,重存还会覆盖唯一可恢复的旧密文(review 反馈 P1)。
+    expect(
+      resolveDevKeychainAppName({ isPackaged: false, isolated: true, userDataDirExists: true }),
+    ).toBeNull();
   });
 
   it('共享 userData / 仅目录覆写(无隔离意图)的 dev → 不改名(密文绑定原条目主密钥)', () => {
     // 裸设 XDT_USER_DATA_DIR 时 devCliFlags 的 isolated 保持 false(目录覆写不表达
     // 隔离意图,可能指向共享中的既有 profile)——不得改名(review 反馈 P1)。
-    expect(resolveDevKeychainAppName({ isPackaged: false, isolated: false })).toBeNull();
+    expect(
+      resolveDevKeychainAppName({ isPackaged: false, isolated: false, userDataDirExists: false }),
+    ).toBeNull();
   });
 
   it('packaged 构建 → 一律不改名(存量凭证迁移须单独设计,#871 候选 A)', () => {
-    expect(resolveDevKeychainAppName({ isPackaged: true, isolated: false })).toBeNull();
-    expect(resolveDevKeychainAppName({ isPackaged: true, isolated: true })).toBeNull();
+    expect(
+      resolveDevKeychainAppName({ isPackaged: true, isolated: false, userDataDirExists: false }),
+    ).toBeNull();
+    expect(
+      resolveDevKeychainAppName({ isPackaged: true, isolated: true, userDataDirExists: false }),
+    ).toBeNull();
   });
 });

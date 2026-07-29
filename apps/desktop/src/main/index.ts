@@ -3,6 +3,7 @@ import fixPath from 'fix-path';
 import { app } from 'electron';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
+import fs from 'node:fs';
 import { setDefaultAutoSelectFamilyAttemptTimeout } from 'node:net';
 import { exit, stderr } from 'node:process';
 import { CURRENT_CINDY_REGION } from '../shared/brandRegion.js';
@@ -125,13 +126,15 @@ if (devFlags.userDataDirOverride) {
   stderr.write(`[cindy] dev userData override → ${devFlags.userDataDirOverride}\n`);
   // 隔离 dev 独立钥匙串条目(#871 候选 B 收窄):userData 已在上一行显式 pin,
   // 改名只影响 safeStorage 服务名(`<app.name> Safe Storage`)与 dev-only 派生
-  // 路径(crashDumps 等),不改数据目录。门 = devFlags.isolated(仅 --isolated /
-  // XDT_ISOLATED 表达的显式隔离意图):裸设 XDT_USER_DATA_DIR 属目录覆写、可能
-  // 指向共享中的既有 profile,与共享 userData 的 dev、packaged 构建一样刻意
-  // 不改名——语义与边界见 devKeychainName.ts。
+  // 路径(crashDumps 等),不改数据目录。双重门(语义与边界见 devKeychainName.ts):
+  //  - devFlags.isolated:仅 --isolated / XDT_ISOLATED 表达的显式隔离意图,裸设
+  //    XDT_USER_DATA_DIR 属目录覆写、可能指向共享中的既有 profile,不改名;
+  //  - 目录尚不存在(此刻在 ready 前,Chromium 还没建 profile):既有沙箱可能带着
+  //    旧条目主密钥加密的存量密文,只有全新沙箱才零迁移成本,可安全换名。
   const devKeychainAppName = resolveDevKeychainAppName({
     isPackaged: app.isPackaged,
     isolated: devFlags.isolated,
+    userDataDirExists: fs.existsSync(devFlags.userDataDirOverride),
   });
   if (devKeychainAppName) {
     app.setName(devKeychainAppName);

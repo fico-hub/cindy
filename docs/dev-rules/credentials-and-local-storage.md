@@ -29,10 +29,12 @@
 
 - macOS 上 Electron `safeStorage` 的钥匙串条目名由 `app.name` 派生
   （service = `<app.name> Safe Storage`）。当前语义（#871）：packaged cn / global 与
-  **共享 userData** 的 dev 共用 `Cindy Safe Storage`；**显式隔离**的 dev 实例
-  （`--isolated` / `XDT_ISOLATED=1`）使用独立的 `CindyDev Safe Storage`
-  （见 `apps/desktop/src/main/devKeychainName.ts`）。裸设 `XDT_USER_DATA_DIR` 只是
-  目录覆写、不表达隔离意图（devCliFlags 契约），保持默认条目名。
+  **共享 userData** 的 dev 共用 `Cindy Safe Storage`；**显式隔离且全新**的 dev 沙箱
+  （`--isolated` / `XDT_ISOLATED=1`，且 userData 目录尚不存在）使用独立的
+  `CindyDev Safe Storage`（见 `apps/desktop/src/main/devKeychainName.ts`）。旧版本
+  建过的既有隔离沙箱保持默认条目名（存量密文绑定旧条目主密钥，零迁移只对新沙箱
+  成立）；裸设 `XDT_USER_DATA_DIR` 只是目录覆写、不表达隔离意图（devCliFlags 契约），
+  同样保持默认条目名。
 - 钥匙串条目名与 userData profile 的存量密文一一绑定：**不得**在共享既有 profile 的
   进程里改 `app.name`——换名后新写入的密文对共用该 profile 的其它身份不可解，双向串坏。
   改动条目名属存量凭证迁移，按上方增量适用原则必须单独设计兼容/回滚/验证方案。
