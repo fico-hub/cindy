@@ -118,11 +118,6 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-/** 大小写不敏感地判断请求是否带某 header(且非空)。 */
-function hasHeader(headers: Readonly<Record<string, string>>, name: string): boolean {
-  return headerValue(headers, name) !== null;
-}
-
 /** 大小写不敏感取 header 值;缺失或空串 → null。 */
 function headerValue(headers: Readonly<Record<string, string>>, name: string): string | null {
   const lower = name.toLowerCase();

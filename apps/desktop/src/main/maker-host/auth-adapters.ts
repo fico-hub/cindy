@@ -53,6 +53,7 @@ import {
   terminateCodexLoginProcess,
 } from './codex-auth-state.js';
 import { CODEX_GATEWAY_ENV_KEY, CODEX_PROVIDER_OAUTH_PLACEHOLDER_KEY } from './codex-gateway-config.js';
+import { CLAUDE_PROVIDER_AUTH_PLACEHOLDER_KEY } from './claude-gateway-config.js';
 import {
   clearClaudeAiOAuth,
   hasClaudeAiOAuth,
@@ -92,9 +93,7 @@ const log = createLogger('auth-adapters');
  * 定义已下沉到 claude-gateway-config.ts(proxy-host 路由识别占位 key 需要它,而本
  * 文件 import 了 proxy-host,反向 import 会成环);这里 re-export 保持既有消费点。
  */
-import { CLAUDE_PROVIDER_AUTH_PLACEHOLDER_KEY } from './claude-gateway-config.js';
-
-export { CLAUDE_PROVIDER_AUTH_PLACEHOLDER_KEY };
+export { CLAUDE_PROVIDER_AUTH_PLACEHOLDER_KEY } from './claude-gateway-config.js';
 
 /** Codex CLI 的 HOME 目录, auth.json 放在根, sessions 子目录放会话 jsonl。 */
 function getCodexHome(): string {
