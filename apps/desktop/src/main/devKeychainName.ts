@@ -69,6 +69,14 @@ export interface KeychainIdentityIo {
    * isKeychainIdentityMarkerArtifact 排除标记文件与其 .tmp 半成品。
    */
   profileHasData(): boolean;
+  /**
+   * fsync profile 目录,把已观察到的标记目录项持久化。**任何**对观察到标记的接受
+   * (初读命中 / 有数据复查命中 / 认领竞态后读到胜者标记)都必须先经它确认——对手
+   * link 后可能尚未完成自己的 fsync,不 flush 就接受,断电会保住本进程随后写的密文
+   * 却丢掉标记(review 反馈 P1 第十三轮)。失败返回 false(仅 Windows 因平台性打不
+   * 开目录 fd 可返回 true 作 best-effort)。
+   */
+  flushProfileDir(): boolean;
 }
 
 export type DevKeychainDecision =
@@ -77,12 +85,24 @@ export type DevKeychainDecision =
   /** 身份不确定(标记不可读/内容不可识别):必须终止启动,不得用任一身份写入。 */
   | { kind: 'abort'; reason: string };
 
-function interpretMarker(read: KeychainMarkerRead, devName: string): DevKeychainDecision | null {
+function interpretMarker(
+  read: KeychainMarkerRead,
+  devName: string,
+  io: KeychainIdentityIo,
+): DevKeychainDecision | null {
   if (read.kind === 'unreadable') {
     return { kind: 'abort', reason: '身份标记读取失败(非 ENOENT)' };
   }
   if (read.kind === 'present') {
-    if (read.value === devName) return { kind: 'rename', appName: devName };
+    if (read.value === devName) {
+      // 接受观察到的标记前先把它的目录项持久化:写入者可能尚未完成自己的 fsync,
+      // 不 flush 就以该身份写密文,断电后会出现「密文在、标记丢」(review 反馈
+      // P1 第十三轮)。flush 失败按身份不确定 → abort。
+      if (!io.flushProfileDir()) {
+        return { kind: 'abort', reason: '身份标记持久化确认失败' };
+      }
+      return { kind: 'rename', appName: devName };
+    }
     // 空串或不可识别的值:身份不确定。可能是损坏的 CindyDev 标记——静默回退默认
     // 身份会用错钥匙覆盖既有密文(review 反馈 P1 第七轮),拒绝启动。
     return { kind: 'abort', reason: `身份标记内容不可识别: ${JSON.stringify(read.value)}` };
@@ -99,13 +119,13 @@ export function resolveDevKeychainDecision(input: {
   if (input.isPackaged || !input.isolated) return { kind: 'keep-default' };
   const devName = BRAND_IDENTITY.executableNameByRegion.dev;
 
-  const first = interpretMarker(input.io.readMarker(), devName);
+  const first = interpretMarker(input.io.readMarker(), devName, input.io);
   if (first !== null) return first;
 
   if (input.io.profileHasData()) {
     // 无标记但有数据:复查标记,关掉「对手在首读后发布标记+数据」的并发窗口;
     // 复查确证 absent 才是真旧沙箱。
-    const recheck = interpretMarker(input.io.readMarker(), devName);
+    const recheck = interpretMarker(input.io.readMarker(), devName, input.io);
     return recheck ?? { kind: 'keep-default' };
   }
 
@@ -113,7 +133,7 @@ export function resolveDevKeychainDecision(input: {
   const claim = input.io.claimMarker(devName);
   if (claim === 'claimed') return { kind: 'rename', appName: devName };
   if (claim === 'exists') {
-    const winner = interpretMarker(input.io.readMarker(), devName);
+    const winner = interpretMarker(input.io.readMarker(), devName, input.io);
     // EEXIST 后复读确证 absent(对手发布后又消失)同样属身份不确定,拒绝启动。
     return winner ?? { kind: 'abort', reason: '认领竞态后身份标记消失' };
   }

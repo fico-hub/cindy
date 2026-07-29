@@ -134,12 +134,29 @@ if (devFlags.userDataDirOverride) {
   // 标记不可读/内容不可识别 = 身份不确定 → 拒绝启动(静默回退默认身份会用错
   // 钥匙覆盖既有密文)。决策全逻辑与边界见 devKeychainName.ts。
   const keychainMarkerPath = path.join(devFlags.userDataDirOverride, KEYCHAIN_IDENTITY_MARKER_FILE);
+  // fsync profile 目录(claimMarker 与 io.flushProfileDir 共用同一实现)。
+  const flushProfileDirForClaim = (): boolean => {
+    try {
+      const dirFd = fs.openSync(devFlags.userDataDirOverride!, 'r');
+      try {
+        fs.fsyncSync(dirFd);
+      } finally {
+        fs.closeSync(dirFd);
+      }
+      return true;
+    } catch {
+      return process.platform === 'win32';
+    }
+  };
   const keychainDecision = resolveDevKeychainDecision({
     isPackaged: app.isPackaged,
     // CindyDev 身份只落在纪元派生目录:显式指向其它目录的隔离启动不标记,防同一
     // 目录被「--isolated + 覆写」与「裸覆写 / 旧 checkout」两种形态以两种身份打开。
     isolated: devFlags.isolated && devFlags.isolatedDirIsEpochDerived,
     io: {
+      // 把已观察到的标记目录项持久化;仅 Windows 因平台性打不开目录 fd 保持
+      // best-effort(NTFS 日志语义不同,身份分离主要服务 macOS 钥匙串)。
+      flushProfileDir: flushProfileDirForClaim,
       readMarker: () => {
         try {
           const value = fs.readFileSync(keychainMarkerPath, 'utf8').trim();
@@ -166,24 +183,8 @@ if (devFlags.userDataDirOverride) {
             fs.closeSync(fd);
           }
           // 目录项持久化——契约要求标记「完整且持久」后才允许选定 CindyDev。
-          // 认领成功与输掉竞态(EEXIST)两条路径都必须先 flush:输家若在胜者 fsync
-          // 完成前就接受对方标记并写入密文,断电可能保住密文、丢掉标记(review
-          // 反馈);由输家自己 flush 一次即可让 link 目录项持久化,不依赖胜者进度。
-          // flush 失败按认领失败处理(→ abort)。仅 Windows 例外:平台性打不开目录
-          // fd,保持 best-effort(NTFS 日志语义不同,身份分离主要服务 macOS 钥匙串)。
-          const flushProfileDir = (): boolean => {
-            try {
-              const dirFd = fs.openSync(devFlags.userDataDirOverride!, 'r');
-              try {
-                fs.fsyncSync(dirFd);
-              } finally {
-                fs.closeSync(dirFd);
-              }
-              return true;
-            } catch {
-              return process.platform === 'win32';
-            }
-          };
+          // 认领成功与输掉竞态(EEXIST)两条路径都必须先 flush(与 io.flushProfileDir
+          // 同一实现);读路径的接受由 resolver 经 io.flushProfileDir 确认。
           let linkOutcome: 'claimed' | 'exists';
           try {
             fs.linkSync(tmpPath, keychainMarkerPath);
@@ -198,7 +199,7 @@ if (devFlags.userDataDirOverride) {
               // 临时文件清理失败无害(pid 后缀不冲突)。
             }
           }
-          if (!flushProfileDir()) return 'error';
+          if (!flushProfileDirForClaim()) return 'error';
           return linkOutcome;
         } catch {
           return 'error';

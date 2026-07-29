@@ -27,6 +27,7 @@ function io(overrides: Partial<KeychainIdentityIo>): KeychainIdentityIo {
     readMarker: () => ABSENT,
     claimMarker: () => 'claimed',
     profileHasData: () => false,
+    flushProfileDir: () => true,
     ...overrides,
   };
 }
@@ -132,6 +133,47 @@ describe('resolveDevKeychainDecision', () => {
       resolveDevKeychainDecision({ isPackaged: true, isolated: true, io: io({ readMarker: reads }) }),
     ).toEqual({ kind: 'keep-default' });
     expect(reads).not.toHaveBeenCalled();
+  });
+});
+
+describe('接受观察到的标记前必须持久化确认(review 反馈 P1 第十三轮)', () => {
+  it('初读命中标记但 flush 失败 → abort,不得以未持久化的身份写入', () => {
+    const d = resolveDevKeychainDecision({
+      ...base,
+      io: io({ readMarker: () => DEV, flushProfileDir: () => false }),
+    });
+    expect(d.kind).toBe('abort');
+  });
+
+  it('有数据复查命中 / 认领竞态读到胜者标记,flush 失败同样 abort', () => {
+    const recheckReads = vi
+      .fn<KeychainIdentityIo['readMarker']>()
+      .mockReturnValueOnce(ABSENT)
+      .mockReturnValueOnce(DEV);
+    expect(
+      resolveDevKeychainDecision({
+        ...base,
+        io: io({
+          readMarker: recheckReads,
+          profileHasData: () => true,
+          flushProfileDir: () => false,
+        }),
+      }).kind,
+    ).toBe('abort');
+    const raceReads = vi
+      .fn<KeychainIdentityIo['readMarker']>()
+      .mockReturnValueOnce(ABSENT)
+      .mockReturnValueOnce(DEV);
+    expect(
+      resolveDevKeychainDecision({
+        ...base,
+        io: io({
+          readMarker: raceReads,
+          claimMarker: () => 'exists',
+          flushProfileDir: () => false,
+        }),
+      }).kind,
+    ).toBe('abort');
   });
 });
 
