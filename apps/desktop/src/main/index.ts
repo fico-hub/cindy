@@ -149,15 +149,24 @@ if (devFlags.userDataDirOverride) {
         }
       },
       claimMarker: (name) => {
-        // 原子发布完整标记:先写临时文件,再 hard link 独占落位——link 既是排他认领
-        // (EEXIST = 输掉竞态),又保证标记可见即完整。
+        // 原子发布完整标记:先写临时文件并 fsync,再 hard link 独占落位,最后 fsync
+        // 父目录——link 既是排他认领(EEXIST = 输掉竞态)又保证可见即完整;fsync 保证
+        // 标记先于后续任何 profile/凭证写入持久化,否则断电后「标记消失 + profile
+        // 非空」会被下次启动判成旧沙箱、用错钥匙覆盖 CindyDev 密文(review 反馈)。
         const tmpPath = `${keychainMarkerPath}.${process.pid}.tmp`;
         try {
           fs.mkdirSync(devFlags.userDataDirOverride!, { recursive: true });
-          fs.writeFileSync(tmpPath, `${name}\n`, 'utf8');
+          const fd = fs.openSync(tmpPath, 'w');
+          try {
+            fs.writeSync(fd, `${name}\n`, null, 'utf8');
+            fs.fsyncSync(fd);
+          } finally {
+            fs.closeSync(fd);
+          }
+          let linked = false;
           try {
             fs.linkSync(tmpPath, keychainMarkerPath);
-            return 'claimed';
+            linked = true;
           } catch (err) {
             return (err as NodeJS.ErrnoException)?.code === 'EEXIST' ? 'exists' : 'error';
           } finally {
@@ -167,6 +176,21 @@ if (devFlags.userDataDirOverride) {
               // 临时文件清理失败无害(pid 后缀不冲突)。
             }
           }
+          if (linked) {
+            // 目录项持久化。Windows 打不开目录 fd,best-effort:NTFS 日志语义不同,
+            // 且本机制主要服务 macOS 钥匙串条目命名。
+            try {
+              const dirFd = fs.openSync(devFlags.userDataDirOverride!, 'r');
+              try {
+                fs.fsyncSync(dirFd);
+              } finally {
+                fs.closeSync(dirFd);
+              }
+            } catch {
+              // best-effort,见上。
+            }
+          }
+          return 'claimed';
         } catch {
           return 'error';
         }

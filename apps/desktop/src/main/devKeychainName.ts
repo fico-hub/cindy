@@ -50,8 +50,11 @@ export type KeychainMarkerRead =
 export interface KeychainIdentityIo {
   readMarker(): KeychainMarkerRead;
   /**
-   * 原子独占发布**完整**标记(临时文件写完 + hard link 独占落位):标记一旦可见
-   * 内容即完整,不得出现可被对手读到的零长度文件。已存在 → 'exists',其它失败 → 'error'。
+   * 原子独占发布**完整且持久**的标记:临时文件写完 + fsync → hard link 独占落位
+   * → fsync 父目录(best-effort)。标记一旦可见内容即完整,不得出现零长度文件;
+   * fsync 保证标记先于后续 profile/凭证写入持久化——否则断电后「标记消失 +
+   * profile 非空」会被判成旧沙箱、用错钥匙覆盖既有密文(review 反馈 P1 第九轮)。
+   * 已存在 → 'exists',其它失败 → 'error'。
    */
   claimMarker(name: string): 'claimed' | 'exists' | 'error';
   /**
