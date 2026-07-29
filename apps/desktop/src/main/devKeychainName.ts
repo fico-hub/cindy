@@ -7,24 +7,21 @@
  * 首次使用都会触发系统钥匙串授权弹窗,dev 的 stock Electron cdhash 也会进入正式
  * 条目的 ACL(#871)。
  *
- * 收窄语义 —— 只隔离「显式声明隔离意图 **且是全新沙箱**」的 dev 实例:
- *  - 隔离意图 = `--isolated` / `XDT_ISOLATED=1`(devCliFlags 解析出的
- *    `isolated === true`)。仅设 `XDT_USER_DATA_DIR` 是**目录覆写,不表达隔离意图**
- *    (devCliFlags 契约:isolated 保持 false,目录可能指向一份既有共享 profile)
- *    ——不改名(review 反馈 P1:按覆写目录改名会破坏「共享 profile 必须沿用同一
- *    钥匙串条目」的不变量)。
- *  - 全新沙箱 = userData 目录不存在**或为空**(pre-ready 时 Chromium 还没写 profile;
- *    repo 自带的 restart-desktop-remote.mjs 会在启动前 mkdirSync 预创建**空**目录,
- *    只看「存在」会把标准隔离启动路径全判成旧沙箱,门形同虚设——review 反馈 P1)。
- *    有内容才算旧版本用过的沙箱,保持默认条目名:它的存量 `.enc` 密文(登录态、
- *    手填 provider/MCP key、OAuth/IM 凭证)绑定 `Cindy Safe Storage` 主密钥,换名
- *    不仅读不出,重存还会覆盖唯一可恢复的旧密文(review 反馈 P1)——零迁移只对
- *    从未写过数据的新沙箱成立。误判方向安全:把新沙箱看成旧的只是保持改动前行为。
- *  - **共享** userData 的 dev(直跑 `pnpm dev:desktop`)同样不改名:共享 profile 里的
- *    存量密文只能用原条目主密钥解;若换名,dev 新写入的密文正式版也解不了,双向串坏。
- *  - packaged cn/global 维持现状(共用 'Cindy' 条目):改名属存量凭证迁移,按
- *    `docs/dev-rules/credentials-and-local-storage.md` 必须单独设计兼容/回滚/验证
- *    方案(#871 候选 A),不在本模块范围内。
+ * 收窄语义 —— 只隔离显式声明隔离意图(`--isolated` / `XDT_ISOLATED=1`,即 devCliFlags
+ * 的 `isolated === true`)的 dev 沙箱,且身份一经选定**随 profile 持久化**:
+ *  - 沙箱身份由 profile 内的标记文件(KEYCHAIN_IDENTITY_MARKER_FILE)承载,首启选定
+ *    CindyDev 时由调用方**先成功写入标记再改名**;此后每次启动读标记粘住同一身份。
+ *    不能用「目录是否为空」当持续判据——首启写入数据后第二次启动目录必然非空,
+ *    身份会翻转回 Cindy,让首启写的密文全部报废(review 反馈 P1 第三轮)。
+ *  - 无标记且 profile 已有数据 = 本改动之前建的旧沙箱:存量 `.enc` 密文绑定
+ *    `Cindy Safe Storage` 主密钥,永久保持默认条目名(零迁移、零丢失)。
+ *  - 无标记且 profile 为空(或目录不存在;repo 的 restart-desktop-remote.mjs 会
+ *    预创建**空**目录)= 全新沙箱 → 选定 CindyDev。
+ *  - 标记值不是已知身份 → 保守不改名(误判方向安全:保持改动前行为)。
+ *  - 仅设 `XDT_USER_DATA_DIR`(目录覆写,无隔离意图)、共享 userData 的 dev、
+ *    packaged cn/global 一律不改名:共享 profile 的存量密文必须沿用同一条目主密钥;
+ *    packaged 改名属存量凭证迁移,须按 `credentials-and-local-storage.md` 单独设计
+ *    (#871 候选 A)。
  *
  * 调用方(main 入口)必须**先显式 pin 住 userData** 再 `app.setName()`:改名只该影响
  * safeStorage 服务名与 dev-only 的派生路径(crashDumps 等),不得改变数据目录。
@@ -32,19 +29,27 @@
 
 import { BRAND_IDENTITY } from '@cindy/maker-shared/brand-identity';
 
+/** 沙箱 profile 内的钥匙串身份标记文件名(userData 根下,纯文本存条目身份名)。 */
+export const KEYCHAIN_IDENTITY_MARKER_FILE = 'keychain-identity';
+
 export function resolveDevKeychainAppName(input: {
   isPackaged: boolean;
   /** devCliFlags 解析结果:仅 --isolated / XDT_ISOLATED 表达的显式隔离意图。 */
   isolated: boolean;
-  /**
-   * 沙箱 userData 目录是否已有内容(调用方在 pin userData 后、ready 前用 fs 判定;
-   * 不存在或为空 = 全新沙箱)。有内容 = 旧版本用过的沙箱,可能带着旧条目主密钥
-   * 加密的存量密文 → 不改名。
-   */
-  userDataProfileHasData: boolean;
+  /** 标记文件内容(trim 后);不存在/读失败 → null。 */
+  markerIdentity: string | null;
+  /** profile 目录是否已有内容(标记文件之外的判据只在无标记时使用)。 */
+  profileHasData: boolean;
 }): string | null {
   if (input.isPackaged) return null;
   if (!input.isolated) return null;
-  if (input.userDataProfileHasData) return null;
-  return BRAND_IDENTITY.executableNameByRegion.dev;
+  const devName = BRAND_IDENTITY.executableNameByRegion.dev;
+  // 已初始化为 CindyDev 的沙箱:身份跨重启粘住(标记为准,不再看目录内容)。
+  if (input.markerIdentity === devName) return devName;
+  // 未知标记值:保守不改名。
+  if (input.markerIdentity !== null) return null;
+  // 无标记且有数据 = 本改动之前建的旧沙箱,永久保持默认条目名。
+  if (input.profileHasData) return null;
+  // 全新沙箱:选定 CindyDev(调用方须先成功持久化标记再改名,防写失败后身份翻转)。
+  return devName;
 }

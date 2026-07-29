@@ -1,11 +1,12 @@
 /**
  * devKeychainName — 隔离 dev 实例的钥匙串条目隔离语义(#871 候选 B 收窄)。
  *
- * 关键不变量:只有「未打包 + 显式隔离意图(--isolated / XDT_ISOLATED)」才换名;
- * packaged 构建、共享 userData 的 dev、以及仅目录覆写(裸 XDT_USER_DATA_DIR,
- * 无隔离意图,可能指向共享中的既有 profile)一律保持默认名——共享 profile 的
- * 存量密文必须继续用同一把主密钥,换名会双向串坏(dev 读不了旧的,正式版读不了
- * dev 新写的)。
+ * 关键不变量:
+ *  - 身份由 profile 标记文件粘住:标记 = CindyDev 时无论目录内容如何都保持 CindyDev
+ *    (「目录为空」不能当持续判据——首启写数据后第二次启动会翻转身份、密文报废)。
+ *  - 无标记且有数据 = 本改动前的旧沙箱,永久保持默认名(存量密文绑定旧条目主密钥)。
+ *  - 无标记且为空 = 全新沙箱(含 wrapper 预创建的空目录)→ 选定 CindyDev。
+ *  - packaged / 非隔离(共享 userData、裸 XDT_USER_DATA_DIR 目录覆写)一律默认名。
  */
 
 import { describe, expect, it } from 'vitest';
@@ -13,36 +14,68 @@ import { describe, expect, it } from 'vitest';
 import { resolveDevKeychainAppName } from '../devKeychainName.js';
 
 describe('resolveDevKeychainAppName', () => {
-  it('显式隔离 + 全新沙箱(目录不存在或 wrapper 预创建的空目录)→ 独立条目名 CindyDev', () => {
+  it('全新沙箱(无标记、目录不存在或 wrapper 预创建的空目录)→ 选定 CindyDev', () => {
     expect(
-      resolveDevKeychainAppName({ isPackaged: false, isolated: true, userDataProfileHasData: false }),
+      resolveDevKeychainAppName({
+        isPackaged: false,
+        isolated: true,
+        markerIdentity: null,
+        profileHasData: false,
+      }),
     ).toBe('CindyDev');
   });
 
-  it('显式隔离但沙箱已有数据(旧版本用过)→ 不改名(存量密文绑定旧条目主密钥)', () => {
-    // 既有隔离沙箱可能带着 'Cindy Safe Storage' 加密的 .enc(登录态、手填 key、
-    // OAuth/IM 凭证);换名不仅读不出,重存还会覆盖唯一可恢复的旧密文(review 反馈 P1)。
-    // 判据是「有内容」而非「目录存在」:restart-desktop-remote.mjs 启动前会预创建
-    // **空**目录,只看存在会把标准隔离启动路径全判成旧沙箱(review 反馈 P1)。
+  it('已初始化沙箱(标记 = CindyDev)→ 跨重启粘住,不看目录内容', () => {
+    // 首启写入数据后第二次启动目录必然非空——身份必须由标记而非目录内容决定
+    // (review 反馈 P1:身份翻转会让首启写入的密文全部报废)。
     expect(
-      resolveDevKeychainAppName({ isPackaged: false, isolated: true, userDataProfileHasData: true }),
+      resolveDevKeychainAppName({
+        isPackaged: false,
+        isolated: true,
+        markerIdentity: 'CindyDev',
+        profileHasData: true,
+      }),
+    ).toBe('CindyDev');
+  });
+
+  it('旧沙箱(无标记但已有数据)→ 永久保持默认名(存量密文绑定旧条目主密钥)', () => {
+    expect(
+      resolveDevKeychainAppName({
+        isPackaged: false,
+        isolated: true,
+        markerIdentity: null,
+        profileHasData: true,
+      }),
     ).toBeNull();
   });
 
-  it('共享 userData / 仅目录覆写(无隔离意图)的 dev → 不改名(密文绑定原条目主密钥)', () => {
-    // 裸设 XDT_USER_DATA_DIR 时 devCliFlags 的 isolated 保持 false(目录覆写不表达
-    // 隔离意图,可能指向共享中的既有 profile)——不得改名(review 反馈 P1)。
+  it('未知标记值 → 保守不改名(误判方向安全)', () => {
     expect(
-      resolveDevKeychainAppName({ isPackaged: false, isolated: false, userDataProfileHasData: false }),
+      resolveDevKeychainAppName({
+        isPackaged: false,
+        isolated: true,
+        markerIdentity: 'SomethingElse',
+        profileHasData: false,
+      }),
     ).toBeNull();
   });
 
-  it('packaged 构建 → 一律不改名(存量凭证迁移须单独设计,#871 候选 A)', () => {
+  it('非隔离 dev(共享 userData / 裸目录覆写)与 packaged → 一律不改名', () => {
     expect(
-      resolveDevKeychainAppName({ isPackaged: true, isolated: false, userDataProfileHasData: false }),
+      resolveDevKeychainAppName({
+        isPackaged: false,
+        isolated: false,
+        markerIdentity: null,
+        profileHasData: false,
+      }),
     ).toBeNull();
     expect(
-      resolveDevKeychainAppName({ isPackaged: true, isolated: true, userDataProfileHasData: false }),
+      resolveDevKeychainAppName({
+        isPackaged: true,
+        isolated: true,
+        markerIdentity: 'CindyDev',
+        profileHasData: false,
+      }),
     ).toBeNull();
   });
 });
