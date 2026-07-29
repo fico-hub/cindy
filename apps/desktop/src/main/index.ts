@@ -83,6 +83,7 @@ import {
   resolveDevCliFlags,
   shouldEnforcePassiveMigrationCompatibility,
 } from './devCliFlags.js';
+import { resolveDevKeychainAppName } from './devKeychainName.js';
 
 const devFlags = resolveDevCliFlags({
   argv: process.argv,
@@ -122,6 +123,18 @@ if (devFlags.userDataDirOverride) {
   process.env.XDT_USER_DATA_DIR = devFlags.userDataDirOverride;
   app.setPath('userData', devFlags.userDataDirOverride);
   stderr.write(`[cindy] dev userData override → ${devFlags.userDataDirOverride}\n`);
+  // 隔离 dev 独立钥匙串条目(#871 候选 B 收窄):userData 已在上一行显式 pin,
+  // 改名只影响 safeStorage 服务名(`<app.name> Safe Storage`)与 dev-only 派生
+  // 路径(crashDumps 等),不改数据目录。共享 userData 的 dev 与 packaged 构建
+  // 刻意不改名——语义与边界见 devKeychainName.ts。
+  const devKeychainAppName = resolveDevKeychainAppName({
+    isPackaged: app.isPackaged,
+    userDataDirOverride: devFlags.userDataDirOverride,
+  });
+  if (devKeychainAppName) {
+    app.setName(devKeychainAppName);
+    stderr.write(`[cindy] dev keychain isolation → app.name=${devKeychainAppName}\n`);
+  }
 }
 if (devFlags.invalidIsolationName !== null) {
   // 名字不合法(字符集 / 长度)→ 已按默认沙箱处理(回落到不隔离会混进正式版

@@ -25,6 +25,22 @@
 - 测试只使用明显无效的假凭证，不读取或复制开发者真实的 `HOME`、Agent home、
   Electron userData 或系统凭证目录。
 
+## macOS safeStorage 钥匙串条目
+
+- macOS 上 Electron `safeStorage` 的钥匙串条目名由 `app.name` 派生
+  （service = `<app.name> Safe Storage`）。当前语义（#871）：packaged cn / global 与
+  **共享 userData** 的 dev 共用 `Cindy Safe Storage`；**隔离** dev 实例
+  （`--isolated` / `XDT_USER_DATA_DIR`）使用独立的 `CindyDev Safe Storage`
+  （见 `apps/desktop/src/main/devKeychainName.ts`）。
+- 钥匙串条目名与 userData profile 的存量密文一一绑定：**不得**在共享既有 profile 的
+  进程里改 `app.name`——换名后新写入的密文对共用该 profile 的其它身份不可解，双向串坏。
+  改动条目名属存量凭证迁移，按上方增量适用原则必须单独设计兼容/回滚/验证方案。
+- 同机装过 cn 与 global 双版的机器上，后启动的版本首次访问 `safeStorage` 会触发系统
+  钥匙串授权弹窗，属 macOS 按预期征求同意；应引导用户点「始终允许」。点「拒绝」后
+  加解密降级失败，authManager 的 safeStorage helpers 会按原因落一次 warn 日志。
+- 不要在启动路径主动调用 `safeStorage.isEncryptionAvailable()` 做探测——macOS 上探测
+  本身可能触发钥匙串授权弹窗，把弹窗时机提前到与用户动作无关的启动期。
+
 ## 路径与生命周期
 
 | 数据性质 | 正确位置 |

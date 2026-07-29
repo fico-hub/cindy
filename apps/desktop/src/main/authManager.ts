@@ -334,14 +334,31 @@ let passiveLocalSignOut = false;
 
 const SAFE_STORAGE_DIR = () => path.join(app.getPath('userData'), 'safe-storage');
 
+// #871 可观测性:safeStorage 不可用 / 解密失败此前被静默折叠成 null,用户在系统
+// 钥匙串弹窗点「拒绝」后的降级完全不可诊断。每种原因只记一次(readSafe 在热路径
+// 上高频调用,不能每次都写日志);只记原因与 key 名,绝不记密文/明文。
+const safeStorageIssueLogged = new Set<string>();
+function logSafeStorageIssueOnce(reason: string, key: string, err?: unknown): void {
+  if (safeStorageIssueLogged.has(reason)) return;
+  safeStorageIssueLogged.add(reason);
+  log.warn(`safeStorage ${reason}`, {
+    key,
+    ...(err instanceof Error ? { error: err.message } : {}),
+  });
+}
+
 function readSafe(key: string): string | null {
   try {
-    if (!safeStorage.isEncryptionAvailable()) return null;
+    if (!safeStorage.isEncryptionAvailable()) {
+      logSafeStorageIssueOnce('encryption unavailable (read)', key);
+      return null;
+    }
     const filepath = path.join(SAFE_STORAGE_DIR(), `${key}.enc`);
     if (!fs.existsSync(filepath)) return null;
     const content = fs.readFileSync(filepath, 'utf-8');
     return safeStorage.decryptString(Buffer.from(content, 'base64'));
-  } catch {
+  } catch (err) {
+    logSafeStorageIssueOnce('decrypt failed', key, err);
     return null;
   }
 }
@@ -370,7 +387,10 @@ function isPersistedSecretAbsent(key: string): boolean {
 
 function writeSafe(key: string, value: string): boolean {
   try {
-    if (!safeStorage.isEncryptionAvailable()) return false;
+    if (!safeStorage.isEncryptionAvailable()) {
+      logSafeStorageIssueOnce('encryption unavailable (write)', key);
+      return false;
+    }
     const dir = SAFE_STORAGE_DIR();
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
@@ -379,7 +399,8 @@ function writeSafe(key: string, value: string): boolean {
       'utf-8',
     );
     return true;
-  } catch {
+  } catch (err) {
+    logSafeStorageIssueOnce('encrypt/persist failed', key, err);
     return false;
   }
 }
