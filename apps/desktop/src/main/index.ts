@@ -150,9 +150,11 @@ if (devFlags.userDataDirOverride) {
   };
   const keychainDecision = resolveDevKeychainDecision({
     isPackaged: app.isPackaged,
-    // CindyDev 身份只落在纪元派生目录:显式指向其它目录的隔离启动不标记,防同一
-    // 目录被「--isolated + 覆写」与「裸覆写 / 旧 checkout」两种形态以两种身份打开。
+    // CindyDev 身份只在「显式隔离 + 纪元派生目录」下认领;其余覆写形态(裸覆写 /
+    // 指向非纪元目录的隔离启动)走观察模式——不认领,但目录已带标记时依标记运行,
+    // 防同一目录被不同启动形态以两种身份轮流打开(review 反馈 P1 第十二/十四轮)。
     isolated: devFlags.isolated && devFlags.isolatedDirIsEpochDerived,
+    hasDirOverride: true,
     io: {
       // 把已观察到的标记目录项持久化;仅 Windows 因平台性打不开目录 fd 保持
       // best-effort(NTFS 日志语义不同,身份分离主要服务 macOS 钥匙串)。
@@ -220,7 +222,7 @@ if (devFlags.userDataDirOverride) {
   });
   if (keychainDecision.kind === 'abort') {
     stderr.write(
-      `[cindy] FATAL: 隔离沙箱钥匙串身份不确定(${keychainDecision.reason});` +
+      `[cindy] FATAL: 沙箱钥匙串身份不确定(${keychainDecision.reason});` +
         `为避免用错误主密钥覆盖沙箱既有密文,拒绝启动。\n` +
         `  标记文件: ${keychainMarkerPath}\n` +
         `  处置: 若确认该沙箱从未用过 CindyDev 身份,删除该标记文件后重启;` +

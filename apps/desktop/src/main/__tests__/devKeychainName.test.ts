@@ -7,7 +7,9 @@
  *  - 无标记且有真实数据(排除标记自身产物)→ 复查标记后判旧沙箱。
  *  - 无标记且为空 → 原子认领;输掉竞态以胜者完整标记为准;认领写失败(非 EEXIST)
  *    同样 abort——并发对手可能恰好认领成功,keep-default 会让同一 profile 双身份。
- *  - packaged / 非隔离一律默认名。
+ *  - 覆写目录的非认领启动 = 观察模式:绝不认领,但有标记依标记(不可读/不可识别
+ *    同样 abort)。
+ *  - packaged / 无目录覆写的 dev 一律默认名。
  */
 
 import { describe, expect, it, vi } from 'vitest';
@@ -32,7 +34,7 @@ function io(overrides: Partial<KeychainIdentityIo>): KeychainIdentityIo {
   };
 }
 
-const base = { isPackaged: false, isolated: true };
+const base = { isPackaged: false, isolated: true, hasDirOverride: true };
 
 describe('resolveDevKeychainDecision', () => {
   it('有标记 = CindyDev → 跨重启粘住,不看目录内容', () => {
@@ -124,15 +126,61 @@ describe('resolveDevKeychainDecision', () => {
     ).toEqual({ kind: 'keep-default' });
   });
 
-  it('非隔离 dev 与 packaged → 一律默认名,不做任何 IO', () => {
+  it('无目录覆写的 dev 与 packaged → 一律默认名,不做任何 IO', () => {
     const reads = vi.fn<KeychainIdentityIo['readMarker']>(() => DEV);
     expect(
-      resolveDevKeychainDecision({ isPackaged: false, isolated: false, io: io({ readMarker: reads }) }),
+      resolveDevKeychainDecision({
+        isPackaged: false,
+        isolated: false,
+        hasDirOverride: false,
+        io: io({ readMarker: reads }),
+      }),
     ).toEqual({ kind: 'keep-default' });
     expect(
-      resolveDevKeychainDecision({ isPackaged: true, isolated: true, io: io({ readMarker: reads }) }),
+      resolveDevKeychainDecision({
+        isPackaged: true,
+        isolated: true,
+        hasDirOverride: true,
+        io: io({ readMarker: reads }),
+      }),
     ).toEqual({ kind: 'keep-default' });
     expect(reads).not.toHaveBeenCalled();
+  });
+});
+
+describe('覆写目录的非认领启动 = 观察模式(review 反馈 P1 第十四轮)', () => {
+  // 裸 XDT_USER_DATA_DIR 指向已按 CindyDev 认领的 -dev2 沙箱是受支持形态:
+  // 缺隔离旗标不能成为跳过标记、以默认身份打开同一 profile 的理由。
+  const observe = { isPackaged: false, isolated: false, hasDirOverride: true };
+
+  it('目录已带 CindyDev 标记 → 依标记以 CindyDev 打开(先 flush 确认)', () => {
+    const flush = vi.fn<KeychainIdentityIo['flushProfileDir']>(() => true);
+    expect(
+      resolveDevKeychainDecision({
+        ...observe,
+        io: io({ readMarker: () => DEV, flushProfileDir: flush }),
+      }),
+    ).toEqual({ kind: 'rename', appName: 'CindyDev' });
+    expect(flush).toHaveBeenCalled();
+  });
+
+  it('标记存在但 flush 失败 / 不可读 / 内容不可识别 → 同样 abort', () => {
+    const cases: Array<Partial<KeychainIdentityIo>> = [
+      { readMarker: () => DEV, flushProfileDir: () => false },
+      { readMarker: () => ({ kind: 'unreadable' }) },
+      { readMarker: () => ({ kind: 'present', value: 'SomethingElse' }) },
+    ];
+    for (const overrides of cases) {
+      expect(resolveDevKeychainDecision({ ...observe, io: io(overrides) }).kind).toBe('abort');
+    }
+  });
+
+  it('确证无标记 → 保持默认名,且绝不认领', () => {
+    const claim = vi.fn<KeychainIdentityIo['claimMarker']>(() => 'claimed');
+    expect(
+      resolveDevKeychainDecision({ ...observe, io: io({ claimMarker: claim }) }),
+    ).toEqual({ kind: 'keep-default' });
+    expect(claim).not.toHaveBeenCalled();
   });
 });
 

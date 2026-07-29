@@ -24,8 +24,13 @@
  *    认领写失败(非 EEXIST 的瞬时错)同样 abort——「保持默认名」只在单进程下自洽,
  *    并发场景另一进程可能恰好认领成功,同一 profile 会跑在两个身份上(review 反馈
  *    P1 第八轮)。
- *  - 仅设 `XDT_USER_DATA_DIR`(目录覆写,无隔离意图)、共享 userData 的 dev、
- *    packaged cn/global 一律不改名;packaged 改名属存量凭证迁移(#871 候选 A)。
+ *  - 覆写目录的**非认领启动**(裸 `XDT_USER_DATA_DIR`,或 `--isolated` 指向非纪元
+ *    目录)进入观察模式:绝不认领,但目录已带标记时依标记运行——裸覆写指向已按
+ *    CindyDev 认领的 `-dev2` 沙箱是受支持形态,若因缺隔离旗标就跳过标记、以默认
+ *    身份打开,同一 profile 会被两种身份轮流打开互毁密文(review 反馈 P1 第十四轮)。
+ *    观察模式下标记不可读/不可识别同样 abort,确证无标记才保持默认名。
+ *  - 共享 userData 的 dev(无目录覆写)、packaged cn/global 一律不改名也不读标记;
+ *    packaged 改名属存量凭证迁移(#871 候选 A)。
  *
  * 调用方(main 入口)必须**先显式 pin 住 userData** 再 `app.setName()`,并在收到
  * abort 决策时终止启动。
@@ -112,12 +117,26 @@ function interpretMarker(
 
 export function resolveDevKeychainDecision(input: {
   isPackaged: boolean;
-  /** devCliFlags 解析结果:仅 --isolated / XDT_ISOLATED 表达的显式隔离意图。 */
+  /**
+   * 是否走认领路径 = 显式隔离意图(--isolated / XDT_ISOLATED)**且**目录为纪元
+   * 派生路径的合取(调用方传 devFlags.isolated && devFlags.isolatedDirIsEpochDerived)。
+   */
   isolated: boolean;
+  /** 是否存在目录覆写(XDT_USER_DATA_DIR / --isolated 派生)。false 时不做任何 IO。 */
+  hasDirOverride: boolean;
   io: KeychainIdentityIo;
 }): DevKeychainDecision {
-  if (input.isPackaged || !input.isolated) return { kind: 'keep-default' };
+  if (input.isPackaged) return { kind: 'keep-default' };
   const devName = BRAND_IDENTITY.executableNameByRegion.dev;
+
+  if (!input.isolated) {
+    // 观察模式(review 反馈 P1 第十四轮):非认领启动打开覆写目录时,身份仍以目录里
+    // 已有的标记为准——裸覆写指向已认领的 -dev2 沙箱必须以 CindyDev 打开,否则同一
+    // profile 被两种身份轮流打开会互毁密文。绝不在此路径认领;确证无标记 → 默认名。
+    if (!input.hasDirOverride) return { kind: 'keep-default' };
+    const observed = interpretMarker(input.io.readMarker(), devName, input.io);
+    return observed ?? { kind: 'keep-default' };
+  }
 
   const first = interpretMarker(input.io.readMarker(), devName, input.io);
   if (first !== null) return first;
