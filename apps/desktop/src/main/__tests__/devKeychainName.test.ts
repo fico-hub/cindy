@@ -5,7 +5,8 @@
  *  - 有标记按标记粘住;标记不可读/内容不可识别 = 身份不确定 → abort(静默回退
  *    默认身份会用错钥匙覆盖既有密文)。absent 仅代表确证 ENOENT。
  *  - 无标记且有真实数据(排除标记自身产物)→ 复查标记后判旧沙箱。
- *  - 无标记且为空 → 原子认领;输掉竞态以胜者完整标记为准;认领写失败保持默认名。
+ *  - 无标记且为空 → 原子认领;输掉竞态以胜者完整标记为准;认领写失败(非 EEXIST)
+ *    同样 abort——并发对手可能恰好认领成功,keep-default 会让同一 profile 双身份。
  *  - packaged / 非隔离一律默认名。
  */
 
@@ -98,10 +99,9 @@ describe('resolveDevKeychainDecision', () => {
     }
   });
 
-  it('认领写失败 → 保持默认名(profile 仍为空,跨重启自洽)', () => {
-    expect(
-      resolveDevKeychainDecision({ ...base, io: io({ claimMarker: () => 'error' }) }),
-    ).toEqual({ kind: 'keep-default' });
+  it('认领写失败(非 EEXIST)→ abort(并发对手可能已认领成功,keep-default 会双身份)', () => {
+    const d = resolveDevKeychainDecision({ ...base, io: io({ claimMarker: () => 'error' }) });
+    expect(d.kind).toBe('abort');
   });
 
   it('无标记且有数据:复查到对手标记 → 与对手一致(并发首启不分叉)', () => {

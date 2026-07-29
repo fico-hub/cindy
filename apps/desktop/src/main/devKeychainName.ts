@@ -17,8 +17,9 @@
  *  - 无标记(确证 ENOENT)且 profile 已有真实数据(排除标记自身产物)→ 复查标记
  *    后判旧沙箱,永久保持默认条目名(存量密文绑定 `Cindy Safe Storage`)。
  *  - 无标记且 profile 为空 = 全新沙箱 → 原子认领;输掉竞态以胜者完整标记为准;
- *    认领写失败 → 保持默认名(此时 profile 仍为空、我们尚未写入任何密文,后续
- *    自然沉淀为「旧沙箱」形态,跨重启自洽)。
+ *    认领写失败(非 EEXIST 的瞬时错)同样 abort——「保持默认名」只在单进程下自洽,
+ *    并发场景另一进程可能恰好认领成功,同一 profile 会跑在两个身份上(review 反馈
+ *    P1 第八轮)。
  *  - 仅设 `XDT_USER_DATA_DIR`(目录覆写,无隔离意图)、共享 userData 的 dev、
  *    packaged cn/global 一律不改名;packaged 改名属存量凭证迁移(#871 候选 A)。
  *
@@ -106,6 +107,7 @@ export function resolveDevKeychainDecision(input: {
     // EEXIST 后复读确证 absent(对手发布后又消失)同样属身份不确定,拒绝启动。
     return winner ?? { kind: 'abort', reason: '认领竞态后身份标记消失' };
   }
-  // 认领写失败:profile 仍为空、尚未写过任何密文,保持默认名跨重启自洽。
-  return { kind: 'keep-default' };
+  // 认领写失败(非 EEXIST 的瞬时错):身份不确定——并发对手可能恰好认领成功,
+  // 「保持默认名」会让同一 profile 跑在两个身份上,统一按 abort 处理。
+  return { kind: 'abort', reason: '身份标记认领失败(非竞态)' };
 }
