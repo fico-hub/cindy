@@ -177,8 +177,11 @@ if (devFlags.userDataDirOverride) {
             }
           }
           if (linked) {
-            // 目录项持久化。Windows 打不开目录 fd,best-effort:NTFS 日志语义不同,
-            // 且本机制主要服务 macOS 钥匙串条目命名。
+            // 目录项持久化——契约要求标记「完整且持久」后才允许选定 CindyDev。
+            // flush 失败按认领失败处理(→ abort):此刻 link 已落位,下次启动要么读到
+            // 完整标记(CindyDev)、要么标记随断电消失且本进程未写过任何数据(空
+            // profile 重新认领),两个方向都自洽。仅 Windows 例外:平台性打不开目录
+            // fd,保持 best-effort(NTFS 日志语义不同,身份分离主要服务 macOS 钥匙串)。
             try {
               const dirFd = fs.openSync(devFlags.userDataDirOverride!, 'r');
               try {
@@ -187,7 +190,7 @@ if (devFlags.userDataDirOverride) {
                 fs.closeSync(dirFd);
               }
             } catch {
-              // best-effort,见上。
+              if (process.platform !== 'win32') return 'error';
             }
           }
           return 'claimed';
