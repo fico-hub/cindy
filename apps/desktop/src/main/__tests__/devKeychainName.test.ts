@@ -64,6 +64,18 @@ describe('resolveDevKeychainAppName', () => {
     ).toBeNull();
   });
 
+  it('输掉竞态但复读不到有效标记(如历史空标记)→ 不改名,退默认名不分叉', () => {
+    // claimMarker 契约要求标记可见即完整(临时文件 + hard link 发布);万一 profile
+    // 里存在历史空标记,readMarker 视同无标记 → 保守退默认名,与「有数据判旧沙箱」
+    // 方向一致,不与任何对手分叉。
+    expect(
+      resolveDevKeychainAppName({
+        ...base,
+        io: io({ claimMarker: () => 'exists', readMarker: () => null }),
+      }),
+    ).toBeNull();
+  });
+
   it('无标记且有数据:复查到对手写入的标记 → 与对手一致,不分叉(并发首启)', () => {
     // review 反馈 P1 第四轮:A 首读标记为空后,B 写入标记+数据;A 看到目录非空,
     // 必须复查标记而不是直接判旧沙箱。

@@ -141,12 +141,27 @@ if (devFlags.userDataDirOverride) {
         }
       },
       claimMarker: (name) => {
+        // 原子发布完整标记:先写临时文件,再 hard link 独占落位——link 既是排他认领
+        // (EEXIST = 输掉竞态),又保证标记可见即完整;`wx` 直写会先暴露零长度文件,
+        // 并发对手读到空标记会与胜者分叉(review 反馈)。
+        const tmpPath = `${keychainMarkerPath}.${process.pid}.tmp`;
         try {
           fs.mkdirSync(devFlags.userDataDirOverride!, { recursive: true });
-          fs.writeFileSync(keychainMarkerPath, `${name}\n`, { encoding: 'utf8', flag: 'wx' });
-          return 'claimed';
-        } catch (err) {
-          return (err as NodeJS.ErrnoException)?.code === 'EEXIST' ? 'exists' : 'error';
+          fs.writeFileSync(tmpPath, `${name}\n`, 'utf8');
+          try {
+            fs.linkSync(tmpPath, keychainMarkerPath);
+            return 'claimed';
+          } catch (err) {
+            return (err as NodeJS.ErrnoException)?.code === 'EEXIST' ? 'exists' : 'error';
+          } finally {
+            try {
+              fs.unlinkSync(tmpPath);
+            } catch {
+              // 临时文件清理失败无害(pid 后缀不冲突,留在 profile 里可被再次覆盖)。
+            }
+          }
+        } catch {
+          return 'error';
         }
       },
       profileHasData: () => {

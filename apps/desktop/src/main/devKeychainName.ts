@@ -17,9 +17,12 @@
  *    读标记之后写入了标记+数据,此时以标记为准,不与对手分叉(review 反馈 P1 第四轮)。
  *    复查仍无标记 = 本改动之前建的旧沙箱,永久保持默认条目名(存量密文绑定
  *    `Cindy Safe Storage` 主密钥,零迁移、零丢失)。
- *  - 无标记且 profile 为空 = 全新沙箱 → 用 O_EXCL(`wx`)**原子认领**标记:认领成功
- *    才改名;输掉竞态(已存在)则以胜者写入的标记为准;写失败不改名(保持旧行为,
- *    防「改了名但标记没落盘」的翻转窗口)。
+ *  - 无标记且 profile 为空 = 全新沙箱 → **原子认领**标记(临时文件写完整内容 +
+ *    hard link 独占发布,标记可见即完整,对手绝不会读到半成品):认领成功才改名;
+ *    输掉竞态(已存在)则以胜者发布的标记为准;写失败不改名(保持旧行为,防
+ *    「改了名但标记没落盘」的翻转窗口)。历史上若存在空标记文件,readMarker 视同
+ *    无标记 → 有数据路径判旧沙箱、认领路径 EEXIST 后复读为 null 不改名,两个方向
+ *    都退到默认名,不分叉。
  *  - 标记值不是已知身份 → 保守不改名(误判方向安全:保持改动前行为)。
  *  - 仅设 `XDT_USER_DATA_DIR`(目录覆写,无隔离意图)、共享 userData 的 dev、
  *    packaged cn/global 一律不改名:共享 profile 的存量密文必须沿用同一条目主密钥;
@@ -39,7 +42,11 @@ export const KEYCHAIN_IDENTITY_MARKER_FILE = 'keychain-identity';
 export interface KeychainIdentityIo {
   /** 标记内容(trim 后);不存在/读失败 → null。 */
   readMarker(): string | null;
-  /** O_EXCL(`wx`)原子独占创建标记;已存在 → 'exists',其它失败 → 'error'。 */
+  /**
+   * 原子独占发布**完整**标记:实现必须保证标记文件一旦可见内容即完整(临时文件
+   * 写完 + hard link 独占发布),不得出现可被对手读到的零长度标记(`wx` 直写会先
+   * 暴露空文件,review 反馈 P1 第五轮)。已存在 → 'exists',其它失败 → 'error'。
+   */
   claimMarker(name: string): 'claimed' | 'exists' | 'error';
   /** profile 目录是否已有内容(读失败按 true,方向安全)。 */
   profileHasData(): boolean;
