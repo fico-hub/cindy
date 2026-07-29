@@ -13,11 +13,13 @@
  *    (devCliFlags 契约:isolated 保持 false,目录可能指向一份既有共享 profile)
  *    ——不改名(review 反馈 P1:按覆写目录改名会破坏「共享 profile 必须沿用同一
  *    钥匙串条目」的不变量)。
- *  - 全新沙箱 = userData 目录尚不存在(pre-ready 时 Chromium 还没建 profile 目录,
- *    存在即说明是旧版本建过的沙箱)。**既有**隔离沙箱保持默认条目名:它的存量
- *    `.enc` 密文(登录态、手填 provider/MCP key、OAuth/IM 凭证)绑定
- *    `Cindy Safe Storage` 主密钥,换名不仅读不出,重存还会覆盖唯一可恢复的旧密文
- *    (review 反馈 P1)——零迁移只对从未写过数据的新沙箱成立。
+ *  - 全新沙箱 = userData 目录不存在**或为空**(pre-ready 时 Chromium 还没写 profile;
+ *    repo 自带的 restart-desktop-remote.mjs 会在启动前 mkdirSync 预创建**空**目录,
+ *    只看「存在」会把标准隔离启动路径全判成旧沙箱,门形同虚设——review 反馈 P1)。
+ *    有内容才算旧版本用过的沙箱,保持默认条目名:它的存量 `.enc` 密文(登录态、
+ *    手填 provider/MCP key、OAuth/IM 凭证)绑定 `Cindy Safe Storage` 主密钥,换名
+ *    不仅读不出,重存还会覆盖唯一可恢复的旧密文(review 反馈 P1)——零迁移只对
+ *    从未写过数据的新沙箱成立。误判方向安全:把新沙箱看成旧的只是保持改动前行为。
  *  - **共享** userData 的 dev(直跑 `pnpm dev:desktop`)同样不改名:共享 profile 里的
  *    存量密文只能用原条目主密钥解;若换名,dev 新写入的密文正式版也解不了,双向串坏。
  *  - packaged cn/global 维持现状(共用 'Cindy' 条目):改名属存量凭证迁移,按
@@ -35,13 +37,14 @@ export function resolveDevKeychainAppName(input: {
   /** devCliFlags 解析结果:仅 --isolated / XDT_ISOLATED 表达的显式隔离意图。 */
   isolated: boolean;
   /**
-   * 沙箱 userData 目录是否已存在(调用方在 pin userData 后、ready 前用 fs 判定)。
-   * 已存在 = 旧版本建过的沙箱,可能带着旧条目主密钥加密的存量密文 → 不改名。
+   * 沙箱 userData 目录是否已有内容(调用方在 pin userData 后、ready 前用 fs 判定;
+   * 不存在或为空 = 全新沙箱)。有内容 = 旧版本用过的沙箱,可能带着旧条目主密钥
+   * 加密的存量密文 → 不改名。
    */
-  userDataDirExists: boolean;
+  userDataProfileHasData: boolean;
 }): string | null {
   if (input.isPackaged) return null;
   if (!input.isolated) return null;
-  if (input.userDataDirExists) return null;
+  if (input.userDataProfileHasData) return null;
   return BRAND_IDENTITY.executableNameByRegion.dev;
 }

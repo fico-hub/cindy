@@ -13,17 +13,19 @@ import { describe, expect, it } from 'vitest';
 import { resolveDevKeychainAppName } from '../devKeychainName.js';
 
 describe('resolveDevKeychainAppName', () => {
-  it('显式隔离 + 全新沙箱 → 独立条目名 CindyDev', () => {
+  it('显式隔离 + 全新沙箱(目录不存在或 wrapper 预创建的空目录)→ 独立条目名 CindyDev', () => {
     expect(
-      resolveDevKeychainAppName({ isPackaged: false, isolated: true, userDataDirExists: false }),
+      resolveDevKeychainAppName({ isPackaged: false, isolated: true, userDataProfileHasData: false }),
     ).toBe('CindyDev');
   });
 
-  it('显式隔离但沙箱目录已存在(旧版本建过)→ 不改名(存量密文绑定旧条目主密钥)', () => {
+  it('显式隔离但沙箱已有数据(旧版本用过)→ 不改名(存量密文绑定旧条目主密钥)', () => {
     // 既有隔离沙箱可能带着 'Cindy Safe Storage' 加密的 .enc(登录态、手填 key、
     // OAuth/IM 凭证);换名不仅读不出,重存还会覆盖唯一可恢复的旧密文(review 反馈 P1)。
+    // 判据是「有内容」而非「目录存在」:restart-desktop-remote.mjs 启动前会预创建
+    // **空**目录,只看存在会把标准隔离启动路径全判成旧沙箱(review 反馈 P1)。
     expect(
-      resolveDevKeychainAppName({ isPackaged: false, isolated: true, userDataDirExists: true }),
+      resolveDevKeychainAppName({ isPackaged: false, isolated: true, userDataProfileHasData: true }),
     ).toBeNull();
   });
 
@@ -31,16 +33,16 @@ describe('resolveDevKeychainAppName', () => {
     // 裸设 XDT_USER_DATA_DIR 时 devCliFlags 的 isolated 保持 false(目录覆写不表达
     // 隔离意图,可能指向共享中的既有 profile)——不得改名(review 反馈 P1)。
     expect(
-      resolveDevKeychainAppName({ isPackaged: false, isolated: false, userDataDirExists: false }),
+      resolveDevKeychainAppName({ isPackaged: false, isolated: false, userDataProfileHasData: false }),
     ).toBeNull();
   });
 
   it('packaged 构建 → 一律不改名(存量凭证迁移须单独设计,#871 候选 A)', () => {
     expect(
-      resolveDevKeychainAppName({ isPackaged: true, isolated: false, userDataDirExists: false }),
+      resolveDevKeychainAppName({ isPackaged: true, isolated: false, userDataProfileHasData: false }),
     ).toBeNull();
     expect(
-      resolveDevKeychainAppName({ isPackaged: true, isolated: true, userDataDirExists: false }),
+      resolveDevKeychainAppName({ isPackaged: true, isolated: true, userDataProfileHasData: false }),
     ).toBeNull();
   });
 });

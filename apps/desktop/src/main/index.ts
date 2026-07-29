@@ -129,12 +129,21 @@ if (devFlags.userDataDirOverride) {
   // 路径(crashDumps 等),不改数据目录。双重门(语义与边界见 devKeychainName.ts):
   //  - devFlags.isolated:仅 --isolated / XDT_ISOLATED 表达的显式隔离意图,裸设
   //    XDT_USER_DATA_DIR 属目录覆写、可能指向共享中的既有 profile,不改名;
-  //  - 目录尚不存在(此刻在 ready 前,Chromium 还没建 profile):既有沙箱可能带着
-  //    旧条目主密钥加密的存量密文,只有全新沙箱才零迁移成本,可安全换名。
+  //  - 目录不存在或为空(此刻在 ready 前,Chromium 还没写 profile;repo 的
+  //    restart-desktop-remote.mjs 会预创建**空**目录,只看存在会误伤标准隔离启动
+  //    路径):既有沙箱可能带着旧条目主密钥加密的存量密文,只有从未写过数据的
+  //    新沙箱才零迁移成本,可安全换名。readdir 失败(如权限)按「有数据」处理,
+  //    误判方向安全——只是保持改动前行为。
   const devKeychainAppName = resolveDevKeychainAppName({
     isPackaged: app.isPackaged,
     isolated: devFlags.isolated,
-    userDataDirExists: fs.existsSync(devFlags.userDataDirOverride),
+    userDataProfileHasData: ((): boolean => {
+      try {
+        return fs.readdirSync(devFlags.userDataDirOverride).length > 0;
+      } catch (err) {
+        return (err as NodeJS.ErrnoException)?.code !== 'ENOENT';
+      }
+    })(),
   });
   if (devKeychainAppName) {
     app.setName(devKeychainAppName);
