@@ -187,18 +187,47 @@ if (devFlags.userDataDirOverride) {
           // 目录项持久化——契约要求标记「完整且持久」后才允许选定 CindyDev。
           // 认领成功与输掉竞态(EEXIST)两条路径都必须先 flush(与 io.flushProfileDir
           // 同一实现);读路径的接受由 resolver 经 io.flushProfileDir 确认。
-          let linkOutcome: 'claimed' | 'exists';
+          let linkOutcome: 'claimed' | 'exists' | null;
           try {
             fs.linkSync(tmpPath, keychainMarkerPath);
             linkOutcome = 'claimed';
           } catch (err) {
-            if ((err as NodeJS.ErrnoException)?.code !== 'EEXIST') return 'error';
-            linkOutcome = 'exists';
+            // 非 EEXIST 不立即判 error:覆写目录可能落在不支持硬链接的文件系统上
+            // (exFAT 卷 / 部分 SMB 共享,link 报 EPERM/ENOTSUP 等),这些路径此前
+            // 可正常启动,不能因发布机制升级而拒启(review 反馈 P1 第十六轮)。
+            linkOutcome = (err as NodeJS.ErrnoException)?.code === 'EEXIST' ? 'exists' : null;
           } finally {
             try {
               fs.unlinkSync(tmpPath);
             } catch {
               // 临时文件清理失败无害(pid 后缀不冲突)。
+            }
+          }
+          if (linkOutcome === null) {
+            // 回退发布:O_EXCL 独占创建。排他性(防双身份的协调点)仍由文件系统
+            // 原子原语保证;仅此路径牺牲「可见即完整」——读侧三态 + 内容不可识别
+            // 即 abort 本就把不完整标记按 fail-safe 处理,方向安全。写入中途失败
+            // 尽力撤销(标记归我们独占创建,他人不可能已认领),避免残留空标记把
+            // 后续启动全部挡在 abort 上。
+            try {
+              const exclFd = fs.openSync(keychainMarkerPath, 'wx');
+              try {
+                fs.writeSync(exclFd, `${name}\n`, null, 'utf8');
+                fs.fsyncSync(exclFd);
+              } catch (writeErr) {
+                try {
+                  fs.unlinkSync(keychainMarkerPath);
+                } catch {
+                  // 撤销失败:残留标记会让后续启动 abort 并给出处置指引,仍是安全方向。
+                }
+                throw writeErr;
+              } finally {
+                fs.closeSync(exclFd);
+              }
+              linkOutcome = 'claimed';
+            } catch (err) {
+              if ((err as NodeJS.ErrnoException)?.code !== 'EEXIST') return 'error';
+              linkOutcome = 'exists';
             }
           }
           if (!flushProfileDirForClaim()) return 'error';
