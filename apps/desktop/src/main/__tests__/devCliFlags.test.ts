@@ -27,6 +27,7 @@ describe('resolveDevCliFlags', () => {
       schedulerPassive: false,
       isolated: false,
       userDataDirOverride: null,
+      isolatedDirIsEpochDerived: false,
       needsIsolatedDeviceId: false,
       isolationName: null,
       invalidIsolationName: null,
@@ -49,6 +50,28 @@ describe('resolveDevCliFlags', () => {
         false,
       );
     }
+  });
+
+  it('CindyDev 纪元判定:派生路径与 env 传入同一路径命中,自定义目录不命中', () => {
+    // 标准 restart 脚本流程经 env 传入与派生一字不差的路径 → 命中;用户显式指向
+    // 其它目录 → 不命中(不标记 CindyDev,防多启动形态双身份互踩)。
+    const derived = resolveDevCliFlags({ ...base, argv: [...base.argv, '--isolated'] });
+    expect(derived.isolatedDirIsEpochDerived).toBe(true);
+    const viaEnvSame = resolveDevCliFlags({
+      ...base,
+      envIsolated: '1',
+      envUserDataDir: '/AppData/xdt-maker-dev2',
+    });
+    expect(viaEnvSame.isolatedDirIsEpochDerived).toBe(true);
+    const custom = resolveDevCliFlags({
+      ...base,
+      argv: [...base.argv, '--isolated'],
+      envUserDataDir: '/tmp/my-own-dir',
+    });
+    expect(custom.isolated).toBe(true);
+    expect(custom.isolatedDirIsEpochDerived).toBe(false);
+    const notIsolated = resolveDevCliFlags({ ...base, envUserDataDir: '/AppData/xdt-maker-dev2' });
+    expect(notIsolated.isolatedDirIsEpochDerived).toBe(false);
   });
 
   it('--isolated 默认沙箱:目录 <userData>-dev2,要求派生设备标识,无名字', () => {
@@ -185,6 +208,7 @@ describe('resolveDevCliFlags', () => {
       schedulerPassive: false,
       isolated: false,
       userDataDirOverride: null,
+      isolatedDirIsEpochDerived: false,
       needsIsolatedDeviceId: false,
       isolationName: null,
       invalidIsolationName: null,

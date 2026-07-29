@@ -136,7 +136,9 @@ if (devFlags.userDataDirOverride) {
   const keychainMarkerPath = path.join(devFlags.userDataDirOverride, KEYCHAIN_IDENTITY_MARKER_FILE);
   const keychainDecision = resolveDevKeychainDecision({
     isPackaged: app.isPackaged,
-    isolated: devFlags.isolated,
+    // CindyDev 身份只落在纪元派生目录:显式指向其它目录的隔离启动不标记,防同一
+    // 目录被「--isolated + 覆写」与「裸覆写 / 旧 checkout」两种形态以两种身份打开。
+    isolated: devFlags.isolated && devFlags.isolatedDirIsEpochDerived,
     io: {
       readMarker: () => {
         try {
@@ -163,25 +165,13 @@ if (devFlags.userDataDirOverride) {
           } finally {
             fs.closeSync(fd);
           }
-          let linked = false;
-          try {
-            fs.linkSync(tmpPath, keychainMarkerPath);
-            linked = true;
-          } catch (err) {
-            return (err as NodeJS.ErrnoException)?.code === 'EEXIST' ? 'exists' : 'error';
-          } finally {
-            try {
-              fs.unlinkSync(tmpPath);
-            } catch {
-              // 临时文件清理失败无害(pid 后缀不冲突)。
-            }
-          }
-          if (linked) {
-            // 目录项持久化——契约要求标记「完整且持久」后才允许选定 CindyDev。
-            // flush 失败按认领失败处理(→ abort):此刻 link 已落位,下次启动要么读到
-            // 完整标记(CindyDev)、要么标记随断电消失且本进程未写过任何数据(空
-            // profile 重新认领),两个方向都自洽。仅 Windows 例外:平台性打不开目录
-            // fd,保持 best-effort(NTFS 日志语义不同,身份分离主要服务 macOS 钥匙串)。
+          // 目录项持久化——契约要求标记「完整且持久」后才允许选定 CindyDev。
+          // 认领成功与输掉竞态(EEXIST)两条路径都必须先 flush:输家若在胜者 fsync
+          // 完成前就接受对方标记并写入密文,断电可能保住密文、丢掉标记(review
+          // 反馈);由输家自己 flush 一次即可让 link 目录项持久化,不依赖胜者进度。
+          // flush 失败按认领失败处理(→ abort)。仅 Windows 例外:平台性打不开目录
+          // fd,保持 best-effort(NTFS 日志语义不同,身份分离主要服务 macOS 钥匙串)。
+          const flushProfileDir = (): boolean => {
             try {
               const dirFd = fs.openSync(devFlags.userDataDirOverride!, 'r');
               try {
@@ -189,11 +179,27 @@ if (devFlags.userDataDirOverride) {
               } finally {
                 fs.closeSync(dirFd);
               }
+              return true;
             } catch {
-              if (process.platform !== 'win32') return 'error';
+              return process.platform === 'win32';
+            }
+          };
+          let linkOutcome: 'claimed' | 'exists';
+          try {
+            fs.linkSync(tmpPath, keychainMarkerPath);
+            linkOutcome = 'claimed';
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException)?.code !== 'EEXIST') return 'error';
+            linkOutcome = 'exists';
+          } finally {
+            try {
+              fs.unlinkSync(tmpPath);
+            } catch {
+              // 临时文件清理失败无害(pid 后缀不冲突)。
             }
           }
-          return 'claimed';
+          if (!flushProfileDir()) return 'error';
+          return linkOutcome;
         } catch {
           return 'error';
         }

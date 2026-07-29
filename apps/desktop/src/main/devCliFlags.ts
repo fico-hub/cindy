@@ -57,6 +57,12 @@ export interface DevCliFlags {
    */
   userDataDirOverride: string | null;
   /**
+   * 生效目录是否等于纪元派生路径(<userData>-dev2[-<名字>];含 restart 脚本经 env
+   * 传入同一路径的标准流程)。CindyDev 钥匙串身份只允许落在纪元目录上——显式指向
+   * 其它目录的隔离启动不标记,防同一目录被多种启动形态以两种身份打开。
+   */
+  isolatedDirIsEpochDerived: boolean;
+  /**
    * 隔离模式且未显式给 XDT_DEVICE_ID_OVERRIDE 时为 true:调用方应派生独立
    * deviceId(dev-[<名字>-]<机器指纹>)。为什么必须派生:服务端 refresh token 按
    * (user, device) 一对一存,沙箱实例若沿用物理机指纹登录,会覆盖正式版的
@@ -136,6 +142,7 @@ export function resolveDevCliFlags(input: DevCliFlagsInput): DevCliFlags {
       schedulerPassive: false,
       isolated: false,
       userDataDirOverride: null,
+      isolatedDirIsEpochDerived: false,
       needsIsolatedDeviceId: false,
       isolationName: null,
       invalidIsolationName: null,
@@ -169,18 +176,26 @@ export function resolveDevCliFlags(input: DevCliFlagsInput): DevCliFlags {
   }
 
   const envDir = input.envUserDataDir?.trim() ? input.envUserDataDir : undefined;
+  // 目录纪元 v2(-dev2):#871 起隔离沙箱使用独立的 CindyDev 钥匙串身份;旧
+  // `-dev[-<名字>]` 目录属 Cindy 身份纪元,**留给旧 checkout 继续用**——同名目录
+  // 被新旧 checkout 轮流以两种钥匙串身份打开会互毁密文(#912 review),换目录做
+  // 物理隔离,新旧 checkout 各开各的沙箱。
+  const epochDerivedDir = `${input.defaultUserDataDir}-dev2${isolationName ? `-${isolationName}` : ''}`;
   let userDataDirOverride: string | null = envDir ?? null;
   if (isolated && !envDir) {
-    // 目录纪元 v2(-dev2):#871 起隔离沙箱使用独立的 CindyDev 钥匙串身份;旧
-    // `-dev[-<名字>]` 目录属 Cindy 身份纪元,**留给旧 checkout 继续用**——同名目录
-    // 被新旧 checkout 轮流以两种钥匙串身份打开会互毁密文(#912 review),换目录做
-    // 物理隔离,新旧 checkout 各开各的沙箱。
-    userDataDirOverride = `${input.defaultUserDataDir}-dev2${isolationName ? `-${isolationName}` : ''}`;
+    userDataDirOverride = epochDerivedDir;
   }
+  // CindyDev 身份只允许落在纪元派生目录上:restart 脚本经 env 传入的标准路径与
+  // 本地派生一字不差,同样命中;用户显式指向**任意其它目录**(可能是共享中的既有
+  // profile,或会被无隔离/旧 checkout 启动形态打开的目录)则不标记——否则同一目录
+  // 在「--isolated + 显式覆写」与「裸覆写 / 旧 checkout」两种受支持启动形态之间
+  // 会被两种钥匙串身份轮流打开(#912 review P1 第十二轮)。
+  const isolatedDirIsEpochDerived = isolated && userDataDirOverride === epochDerivedDir;
   return {
     schedulerPassive: input.argv.includes('--passive') || input.envSchedulerPassive === '1',
     isolated,
     userDataDirOverride,
+    isolatedDirIsEpochDerived,
     needsIsolatedDeviceId: isolated && !input.envDeviceIdOverride?.trim(),
     isolationName,
     invalidIsolationName,

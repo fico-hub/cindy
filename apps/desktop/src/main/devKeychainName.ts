@@ -7,7 +7,11 @@
  * 首次使用都会触发系统钥匙串授权弹窗,dev 的 stock Electron cdhash 也会进入正式
  * 条目的 ACL(#871)。
  *
- * 收窄语义 —— 只隔离显式声明隔离意图(`--isolated` / `XDT_ISOLATED=1`)的 dev 沙箱:
+ * 收窄语义 —— 只隔离「显式声明隔离意图(`--isolated` / `XDT_ISOLATED=1`)**且目录为
+ * 纪元派生路径**(<userData>-dev2[-<名字>],由 devCliFlags.isolatedDirIsEpochDerived
+ * 判定;调用方把两者的合取作为本函数的 isolated 入参)」的 dev 沙箱——显式指向其它
+ * 目录的隔离启动不标记,防同一目录被「--isolated + 覆写」与「裸覆写 / 旧 checkout」
+ * 等受支持启动形态以两种钥匙串身份轮流打开(review 反馈 P1 第十二轮):
  *  - 身份由 profile 根的标记文件承载,首启用「临时文件写完整内容 + hard link 独占
  *    落位」原子认领(可见即完整);此后每次启动按标记粘住,不看目录内容。
  *  - 标记读取三态:present / absent(仅 ENOENT)/ unreadable(其它 IO 错)。
@@ -51,8 +55,10 @@ export interface KeychainIdentityIo {
   readMarker(): KeychainMarkerRead;
   /**
    * 原子独占发布**完整且持久**的标记:临时文件写完 + fsync → hard link 独占落位
-   * → fsync 父目录(失败按 'error' 处理;仅 Windows 因平台性打不开目录 fd 例外为
-   * best-effort,review 反馈 P1 第十轮)。标记一旦可见内容即完整,不得出现零长度文件;
+   * → fsync 父目录。**'claimed' 与 'exists' 两种返回前都必须完成目录持久化**——
+   * 输家不 flush 就接受对方标记,断电可能保住输家写的密文、丢掉标记(review 反馈
+   * P1 第十二轮);flush 失败按 'error'(仅 Windows 因平台性打不开目录 fd 例外为
+   * best-effort)。标记一旦可见内容即完整,不得出现零长度文件;
    * fsync 保证标记先于后续 profile/凭证写入持久化——否则断电后「标记消失 +
    * profile 非空」会被判成旧沙箱、用错钥匙覆盖既有密文(review 反馈 P1 第九轮)。
    * 已存在 → 'exists',其它失败 → 'error'。
