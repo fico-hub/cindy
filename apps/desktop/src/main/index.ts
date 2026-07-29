@@ -84,7 +84,11 @@ import {
   resolveDevCliFlags,
   shouldEnforcePassiveMigrationCompatibility,
 } from './devCliFlags.js';
-import { KEYCHAIN_IDENTITY_MARKER_FILE, resolveDevKeychainAppName } from './devKeychainName.js';
+import {
+  KEYCHAIN_IDENTITY_MARKER_FILE,
+  isKeychainIdentityMarkerArtifact,
+  resolveDevKeychainAppName,
+} from './devKeychainName.js';
 
 const devFlags = resolveDevCliFlags({
   argv: process.argv,
@@ -166,7 +170,11 @@ if (devFlags.userDataDirOverride) {
       },
       profileHasData: () => {
         try {
-          return fs.readdirSync(devFlags.userDataDirOverride!).length > 0;
+          // 排除标记文件与其 .tmp 半成品:并发首启时对手的 tmp 先于 link 落位可见,
+          // 把它当数据会让输家误判旧沙箱、与胜者身份分叉(review 反馈)。
+          return fs
+            .readdirSync(devFlags.userDataDirOverride!)
+            .some((entry) => !isKeychainIdentityMarkerArtifact(entry));
         } catch (err) {
           // 读失败(非 ENOENT)按「有数据」处理:误判方向安全,保持改动前行为。
           return (err as NodeJS.ErrnoException)?.code !== 'ENOENT';

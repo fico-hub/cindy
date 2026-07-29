@@ -10,7 +10,11 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { resolveDevKeychainAppName, type KeychainIdentityIo } from '../devKeychainName.js';
+import {
+  isKeychainIdentityMarkerArtifact,
+  resolveDevKeychainAppName,
+  type KeychainIdentityIo,
+} from '../devKeychainName.js';
 
 function io(overrides: Partial<KeychainIdentityIo>): KeychainIdentityIo {
   return {
@@ -106,5 +110,18 @@ describe('resolveDevKeychainAppName', () => {
       resolveDevKeychainAppName({ isPackaged: true, isolated: true, io: io({ readMarker: reads }) }),
     ).toBeNull();
     expect(reads).not.toHaveBeenCalled();
+  });
+});
+
+describe('isKeychainIdentityMarkerArtifact', () => {
+  it('标记文件与 .tmp 半成品是机制自身产物,不构成「旧沙箱证据」', () => {
+    // 并发首启时对手的 tmp 半成品先于 hard link 落位可见;profileHasData 若把它当
+    // 真实数据,输家会误判旧沙箱、与胜者身份分叉(review 反馈 P1 第六轮)。
+    expect(isKeychainIdentityMarkerArtifact('keychain-identity')).toBe(true);
+    expect(isKeychainIdentityMarkerArtifact('keychain-identity.12345.tmp')).toBe(true);
+    // 真实数据不得被误排除。
+    expect(isKeychainIdentityMarkerArtifact('cindy-user1.db')).toBe(false);
+    expect(isKeychainIdentityMarkerArtifact('safe-storage')).toBe(false);
+    expect(isKeychainIdentityMarkerArtifact('keychain-identity-notes.txt')).toBe(false);
   });
 });

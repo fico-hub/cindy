@@ -38,6 +38,19 @@ import { BRAND_IDENTITY } from '@cindy/maker-shared/brand-identity';
 /** 沙箱 profile 内的钥匙串身份标记文件名(userData 根下,纯文本存条目身份名)。 */
 export const KEYCHAIN_IDENTITY_MARKER_FILE = 'keychain-identity';
 
+/**
+ * 该目录项是否属于身份标记机制自己的产物(最终标记 或 `<marker>.<pid>.tmp` 半成品)。
+ * `profileHasData` 判定「profile 是否有真实数据」时必须排除它们:并发首启时对手的
+ * tmp 半成品先于 hard link 落位可见,把它当数据会让输家误判旧沙箱、与胜者分叉
+ * (review 反馈 P1 第六轮)。
+ */
+export function isKeychainIdentityMarkerArtifact(entryName: string): boolean {
+  if (entryName === KEYCHAIN_IDENTITY_MARKER_FILE) return true;
+  return (
+    entryName.startsWith(`${KEYCHAIN_IDENTITY_MARKER_FILE}.`) && entryName.endsWith('.tmp')
+  );
+}
+
 /** 标记文件与 profile 的 IO 面(注入以便单测竞态时序)。 */
 export interface KeychainIdentityIo {
   /** 标记内容(trim 后);不存在/读失败 → null。 */
@@ -48,7 +61,11 @@ export interface KeychainIdentityIo {
    * 暴露空文件,review 反馈 P1 第五轮)。已存在 → 'exists',其它失败 → 'error'。
    */
   claimMarker(name: string): 'claimed' | 'exists' | 'error';
-  /** profile 目录是否已有内容(读失败按 true,方向安全)。 */
+  /**
+   * profile 目录是否已有**真实数据**(读失败按 true,方向安全)。实现必须用
+   * isKeychainIdentityMarkerArtifact 排除标记文件与其 .tmp 半成品——它们是本机制
+   * 自己的产物,不构成「旧沙箱证据」。
+   */
   profileHasData(): boolean;
 }
 
