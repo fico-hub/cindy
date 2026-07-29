@@ -126,47 +126,42 @@ if (devFlags.userDataDirOverride) {
   stderr.write(`[cindy] dev userData override → ${devFlags.userDataDirOverride}\n`);
   // 隔离 dev 独立钥匙串条目(#871 候选 B 收窄):userData 已在上一行显式 pin,
   // 改名只影响 safeStorage 服务名(`<app.name> Safe Storage`)与 dev-only 派生
-  // 路径(crashDumps 等),不改数据目录。身份由 profile 内标记文件粘住(首启选定、
-  // 跨重启不变;「目录是否为空」只在无标记时用来区分旧沙箱与新沙箱——它不能当
-  // 持续判据,否则首启写数据后第二次启动身份翻转、密文报废)。语义与边界见
-  // devKeychainName.ts。
+  // 路径(crashDumps 等),不改数据目录。身份由 profile 标记文件粘住并 O_EXCL
+  // 原子认领(并发首启不分叉);决策全逻辑与边界见 devKeychainName.ts。
   const keychainMarkerPath = path.join(devFlags.userDataDirOverride, KEYCHAIN_IDENTITY_MARKER_FILE);
-  const keychainMarkerIdentity = ((): string | null => {
-    try {
-      return fs.readFileSync(keychainMarkerPath, 'utf8').trim() || null;
-    } catch {
-      return null;
-    }
-  })();
   const devKeychainAppName = resolveDevKeychainAppName({
     isPackaged: app.isPackaged,
     isolated: devFlags.isolated,
-    markerIdentity: keychainMarkerIdentity,
-    profileHasData: ((): boolean => {
-      try {
-        return fs.readdirSync(devFlags.userDataDirOverride).length > 0;
-      } catch (err) {
-        return (err as NodeJS.ErrnoException)?.code !== 'ENOENT';
-      }
-    })(),
+    io: {
+      readMarker: () => {
+        try {
+          return fs.readFileSync(keychainMarkerPath, 'utf8').trim() || null;
+        } catch {
+          return null;
+        }
+      },
+      claimMarker: (name) => {
+        try {
+          fs.mkdirSync(devFlags.userDataDirOverride!, { recursive: true });
+          fs.writeFileSync(keychainMarkerPath, `${name}\n`, { encoding: 'utf8', flag: 'wx' });
+          return 'claimed';
+        } catch (err) {
+          return (err as NodeJS.ErrnoException)?.code === 'EEXIST' ? 'exists' : 'error';
+        }
+      },
+      profileHasData: () => {
+        try {
+          return fs.readdirSync(devFlags.userDataDirOverride!).length > 0;
+        } catch (err) {
+          // 读失败(非 ENOENT)按「有数据」处理:误判方向安全,保持改动前行为。
+          return (err as NodeJS.ErrnoException)?.code !== 'ENOENT';
+        }
+      },
+    },
   });
   if (devKeychainAppName) {
-    // 首启:先成功持久化身份标记再改名——写失败就不改名(保持旧行为),否则下次
-    // 启动读不到标记、身份翻转,首启写入的密文全部报废。
-    let markerPersisted = keychainMarkerIdentity === devKeychainAppName;
-    if (!markerPersisted) {
-      try {
-        fs.mkdirSync(devFlags.userDataDirOverride, { recursive: true });
-        fs.writeFileSync(keychainMarkerPath, `${devKeychainAppName}\n`, 'utf8');
-        markerPersisted = true;
-      } catch {
-        stderr.write('[cindy] WARN: dev keychain identity marker write failed; keeping default keychain name\n');
-      }
-    }
-    if (markerPersisted) {
-      app.setName(devKeychainAppName);
-      stderr.write(`[cindy] dev keychain isolation → app.name=${devKeychainAppName}\n`);
-    }
+    app.setName(devKeychainAppName);
+    stderr.write(`[cindy] dev keychain isolation → app.name=${devKeychainAppName}\n`);
   }
 }
 if (devFlags.invalidIsolationName !== null) {

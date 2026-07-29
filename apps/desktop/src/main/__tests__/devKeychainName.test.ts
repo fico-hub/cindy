@@ -2,80 +2,97 @@
  * devKeychainName — 隔离 dev 实例的钥匙串条目隔离语义(#871 候选 B 收窄)。
  *
  * 关键不变量:
- *  - 身份由 profile 标记文件粘住:标记 = CindyDev 时无论目录内容如何都保持 CindyDev
- *    (「目录为空」不能当持续判据——首启写数据后第二次启动会翻转身份、密文报废)。
- *  - 无标记且有数据 = 本改动前的旧沙箱,永久保持默认名(存量密文绑定旧条目主密钥)。
- *  - 无标记且为空 = 全新沙箱(含 wrapper 预创建的空目录)→ 选定 CindyDev。
- *  - packaged / 非隔离(共享 userData、裸 XDT_USER_DATA_DIR 目录覆写)一律默认名。
+ *  - 身份由 profile 标记文件粘住:有标记按标记,不看目录内容(否则第二次启动翻转)。
+ *  - 无标记且有数据 → 复查标记后才判旧沙箱(并发首启对手可能在首读后写入标记+数据)。
+ *  - 无标记且为空 → O_EXCL 原子认领;输掉竞态以胜者标记为准;写失败不改名。
+ *  - packaged / 非隔离一律默认名。
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
-import { resolveDevKeychainAppName } from '../devKeychainName.js';
+import { resolveDevKeychainAppName, type KeychainIdentityIo } from '../devKeychainName.js';
+
+function io(overrides: Partial<KeychainIdentityIo>): KeychainIdentityIo {
+  return {
+    readMarker: () => null,
+    claimMarker: () => 'claimed',
+    profileHasData: () => false,
+    ...overrides,
+  };
+}
+
+const base = { isPackaged: false, isolated: true };
 
 describe('resolveDevKeychainAppName', () => {
-  it('全新沙箱(无标记、目录不存在或 wrapper 预创建的空目录)→ 选定 CindyDev', () => {
+  it('有标记 = CindyDev → 跨重启粘住,不看目录内容', () => {
     expect(
       resolveDevKeychainAppName({
-        isPackaged: false,
-        isolated: true,
-        markerIdentity: null,
-        profileHasData: false,
+        ...base,
+        io: io({ readMarker: () => 'CindyDev', profileHasData: () => true }),
       }),
     ).toBe('CindyDev');
   });
 
-  it('已初始化沙箱(标记 = CindyDev)→ 跨重启粘住,不看目录内容', () => {
-    // 首启写入数据后第二次启动目录必然非空——身份必须由标记而非目录内容决定
-    // (review 反馈 P1:身份翻转会让首启写入的密文全部报废)。
+  it('未知标记值 → 保守不改名', () => {
+    expect(
+      resolveDevKeychainAppName({ ...base, io: io({ readMarker: () => 'SomethingElse' }) }),
+    ).toBeNull();
+  });
+
+  it('全新沙箱 → 原子认领成功后改名', () => {
+    const claim = vi.fn<KeychainIdentityIo['claimMarker']>(() => 'claimed');
+    expect(resolveDevKeychainAppName({ ...base, io: io({ claimMarker: claim }) })).toBe('CindyDev');
+    expect(claim).toHaveBeenCalledWith('CindyDev');
+  });
+
+  it('全新沙箱认领输掉竞态(EEXIST)→ 以胜者写入的标记为准', () => {
+    const reads = vi
+      .fn<KeychainIdentityIo['readMarker']>()
+      .mockReturnValueOnce(null) // 首读:无标记
+      .mockReturnValueOnce('CindyDev'); // 认领失败后复读:胜者已写
     expect(
       resolveDevKeychainAppName({
-        isPackaged: false,
-        isolated: true,
-        markerIdentity: 'CindyDev',
-        profileHasData: true,
+        ...base,
+        io: io({ readMarker: reads, claimMarker: () => 'exists' }),
       }),
     ).toBe('CindyDev');
   });
 
-  it('旧沙箱(无标记但已有数据)→ 永久保持默认名(存量密文绑定旧条目主密钥)', () => {
+  it('认领写失败 → 不改名(防「改了名但标记没落盘」的翻转窗口)', () => {
     expect(
-      resolveDevKeychainAppName({
-        isPackaged: false,
-        isolated: true,
-        markerIdentity: null,
-        profileHasData: true,
-      }),
+      resolveDevKeychainAppName({ ...base, io: io({ claimMarker: () => 'error' }) }),
     ).toBeNull();
   });
 
-  it('未知标记值 → 保守不改名(误判方向安全)', () => {
+  it('无标记且有数据:复查到对手写入的标记 → 与对手一致,不分叉(并发首启)', () => {
+    // review 反馈 P1 第四轮:A 首读标记为空后,B 写入标记+数据;A 看到目录非空,
+    // 必须复查标记而不是直接判旧沙箱。
+    const reads = vi
+      .fn<KeychainIdentityIo['readMarker']>()
+      .mockReturnValueOnce(null)
+      .mockReturnValueOnce('CindyDev');
     expect(
       resolveDevKeychainAppName({
-        isPackaged: false,
-        isolated: true,
-        markerIdentity: 'SomethingElse',
-        profileHasData: false,
+        ...base,
+        io: io({ readMarker: reads, profileHasData: () => true }),
       }),
+    ).toBe('CindyDev');
+  });
+
+  it('无标记且有数据,复查仍无标记 = 真旧沙箱 → 永久默认名', () => {
+    expect(
+      resolveDevKeychainAppName({ ...base, io: io({ profileHasData: () => true }) }),
     ).toBeNull();
   });
 
-  it('非隔离 dev(共享 userData / 裸目录覆写)与 packaged → 一律不改名', () => {
+  it('非隔离 dev 与 packaged → 一律不改名,不做任何 IO', () => {
+    const reads = vi.fn<KeychainIdentityIo['readMarker']>(() => 'CindyDev');
     expect(
-      resolveDevKeychainAppName({
-        isPackaged: false,
-        isolated: false,
-        markerIdentity: null,
-        profileHasData: false,
-      }),
+      resolveDevKeychainAppName({ isPackaged: false, isolated: false, io: io({ readMarker: reads }) }),
     ).toBeNull();
     expect(
-      resolveDevKeychainAppName({
-        isPackaged: true,
-        isolated: true,
-        markerIdentity: 'CindyDev',
-        profileHasData: false,
-      }),
+      resolveDevKeychainAppName({ isPackaged: true, isolated: true, io: io({ readMarker: reads }) }),
     ).toBeNull();
+    expect(reads).not.toHaveBeenCalled();
   });
 });
