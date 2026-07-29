@@ -7,30 +7,23 @@
  * 首次使用都会触发系统钥匙串授权弹窗,dev 的 stock Electron cdhash 也会进入正式
  * 条目的 ACL(#871)。
  *
- * 收窄语义 —— 只隔离显式声明隔离意图(`--isolated` / `XDT_ISOLATED=1`,即 devCliFlags
- * 的 `isolated === true`)的 dev 沙箱,且身份一经选定**随 profile 持久化并原子认领**:
- *  - 身份由 profile 根的标记文件(KEYCHAIN_IDENTITY_MARKER_FILE)承载:有标记按标记,
- *    跨重启粘住,不看目录内容(「目录为空」当持续判据会在第二次启动翻转身份,
- *    review 反馈 P1 第三轮)。
- *  - 无标记且 profile 已有数据:**再读一次标记**后才判旧沙箱——并发首启(如
- *    `--isolated --passive` 双进程、或单例锁尚未生效时)对手进程可能在本进程首次
- *    读标记之后写入了标记+数据,此时以标记为准,不与对手分叉(review 反馈 P1 第四轮)。
- *    复查仍无标记 = 本改动之前建的旧沙箱,永久保持默认条目名(存量密文绑定
- *    `Cindy Safe Storage` 主密钥,零迁移、零丢失)。
- *  - 无标记且 profile 为空 = 全新沙箱 → **原子认领**标记(临时文件写完整内容 +
- *    hard link 独占发布,标记可见即完整,对手绝不会读到半成品):认领成功才改名;
- *    输掉竞态(已存在)则以胜者发布的标记为准;写失败不改名(保持旧行为,防
- *    「改了名但标记没落盘」的翻转窗口)。历史上若存在空标记文件,readMarker 视同
- *    无标记 → 有数据路径判旧沙箱、认领路径 EEXIST 后复读为 null 不改名,两个方向
- *    都退到默认名,不分叉。
- *  - 标记值不是已知身份 → 保守不改名(误判方向安全:保持改动前行为)。
+ * 收窄语义 —— 只隔离显式声明隔离意图(`--isolated` / `XDT_ISOLATED=1`)的 dev 沙箱:
+ *  - 身份由 profile 根的标记文件承载,首启用「临时文件写完整内容 + hard link 独占
+ *    落位」原子认领(可见即完整);此后每次启动按标记粘住,不看目录内容。
+ *  - 标记读取三态:present / absent(仅 ENOENT)/ unreadable(其它 IO 错)。
+ *    **不确定即拒绝启动**(review 反馈 P1 第七轮):标记暂不可读、内容为空或不可
+ *    识别时,沙箱可能已有按 CindyDev 主密钥加密的存量密文,静默回退默认身份会用
+ *    错钥匙覆盖它们——dev-only 场景响亮失败并给出处置指引,优于任何猜测。
+ *  - 无标记(确证 ENOENT)且 profile 已有真实数据(排除标记自身产物)→ 复查标记
+ *    后判旧沙箱,永久保持默认条目名(存量密文绑定 `Cindy Safe Storage`)。
+ *  - 无标记且 profile 为空 = 全新沙箱 → 原子认领;输掉竞态以胜者完整标记为准;
+ *    认领写失败 → 保持默认名(此时 profile 仍为空、我们尚未写入任何密文,后续
+ *    自然沉淀为「旧沙箱」形态,跨重启自洽)。
  *  - 仅设 `XDT_USER_DATA_DIR`(目录覆写,无隔离意图)、共享 userData 的 dev、
- *    packaged cn/global 一律不改名:共享 profile 的存量密文必须沿用同一条目主密钥;
- *    packaged 改名属存量凭证迁移,须按 `credentials-and-local-storage.md` 单独设计
- *    (#871 候选 A)。
+ *    packaged cn/global 一律不改名;packaged 改名属存量凭证迁移(#871 候选 A)。
  *
- * 调用方(main 入口)必须**先显式 pin 住 userData** 再 `app.setName()`:改名只该影响
- * safeStorage 服务名与 dev-only 的派生路径(crashDumps 等),不得改变数据目录。
+ * 调用方(main 入口)必须**先显式 pin 住 userData** 再 `app.setName()`,并在收到
+ * abort 决策时终止启动。
  */
 
 import { BRAND_IDENTITY } from '@cindy/maker-shared/brand-identity';
@@ -38,12 +31,7 @@ import { BRAND_IDENTITY } from '@cindy/maker-shared/brand-identity';
 /** 沙箱 profile 内的钥匙串身份标记文件名(userData 根下,纯文本存条目身份名)。 */
 export const KEYCHAIN_IDENTITY_MARKER_FILE = 'keychain-identity';
 
-/**
- * 该目录项是否属于身份标记机制自己的产物(最终标记 或 `<marker>.<pid>.tmp` 半成品)。
- * `profileHasData` 判定「profile 是否有真实数据」时必须排除它们:并发首启时对手的
- * tmp 半成品先于 hard link 落位可见,把它当数据会让输家误判旧沙箱、与胜者分叉
- * (review 反馈 P1 第六轮)。
- */
+/** 该目录项是否属于身份标记机制自己的产物(最终标记 或 `<marker>.<pid>.tmp` 半成品)。 */
 export function isKeychainIdentityMarkerArtifact(entryName: string): boolean {
   if (entryName === KEYCHAIN_IDENTITY_MARKER_FILE) return true;
   return (
@@ -51,50 +39,73 @@ export function isKeychainIdentityMarkerArtifact(entryName: string): boolean {
   );
 }
 
+/** 标记读取三态:absent 仅代表确证的 ENOENT;其它 IO 错一律 unreadable。 */
+export type KeychainMarkerRead =
+  | { kind: 'present'; value: string }
+  | { kind: 'absent' }
+  | { kind: 'unreadable' };
+
 /** 标记文件与 profile 的 IO 面(注入以便单测竞态时序)。 */
 export interface KeychainIdentityIo {
-  /** 标记内容(trim 后);不存在/读失败 → null。 */
-  readMarker(): string | null;
+  readMarker(): KeychainMarkerRead;
   /**
-   * 原子独占发布**完整**标记:实现必须保证标记文件一旦可见内容即完整(临时文件
-   * 写完 + hard link 独占发布),不得出现可被对手读到的零长度标记(`wx` 直写会先
-   * 暴露空文件,review 反馈 P1 第五轮)。已存在 → 'exists',其它失败 → 'error'。
+   * 原子独占发布**完整**标记(临时文件写完 + hard link 独占落位):标记一旦可见
+   * 内容即完整,不得出现可被对手读到的零长度文件。已存在 → 'exists',其它失败 → 'error'。
    */
   claimMarker(name: string): 'claimed' | 'exists' | 'error';
   /**
    * profile 目录是否已有**真实数据**(读失败按 true,方向安全)。实现必须用
-   * isKeychainIdentityMarkerArtifact 排除标记文件与其 .tmp 半成品——它们是本机制
-   * 自己的产物,不构成「旧沙箱证据」。
+   * isKeychainIdentityMarkerArtifact 排除标记文件与其 .tmp 半成品。
    */
   profileHasData(): boolean;
 }
 
-export function resolveDevKeychainAppName(input: {
+export type DevKeychainDecision =
+  | { kind: 'rename'; appName: string }
+  | { kind: 'keep-default' }
+  /** 身份不确定(标记不可读/内容不可识别):必须终止启动,不得用任一身份写入。 */
+  | { kind: 'abort'; reason: string };
+
+function interpretMarker(read: KeychainMarkerRead, devName: string): DevKeychainDecision | null {
+  if (read.kind === 'unreadable') {
+    return { kind: 'abort', reason: '身份标记读取失败(非 ENOENT)' };
+  }
+  if (read.kind === 'present') {
+    if (read.value === devName) return { kind: 'rename', appName: devName };
+    // 空串或不可识别的值:身份不确定。可能是损坏的 CindyDev 标记——静默回退默认
+    // 身份会用错钥匙覆盖既有密文(review 反馈 P1 第七轮),拒绝启动。
+    return { kind: 'abort', reason: `身份标记内容不可识别: ${JSON.stringify(read.value)}` };
+  }
+  return null; // absent → 由调用侧继续判定。
+}
+
+export function resolveDevKeychainDecision(input: {
   isPackaged: boolean;
   /** devCliFlags 解析结果:仅 --isolated / XDT_ISOLATED 表达的显式隔离意图。 */
   isolated: boolean;
   io: KeychainIdentityIo;
-}): string | null {
-  if (input.isPackaged) return null;
-  if (!input.isolated) return null;
+}): DevKeychainDecision {
+  if (input.isPackaged || !input.isolated) return { kind: 'keep-default' };
   const devName = BRAND_IDENTITY.executableNameByRegion.dev;
 
-  const marker = input.io.readMarker();
-  if (marker !== null) return marker === devName ? devName : null;
+  const first = interpretMarker(input.io.readMarker(), devName);
+  if (first !== null) return first;
 
   if (input.io.profileHasData()) {
-    // 无标记但有数据:复查标记,关掉「对手进程在首次读标记后写入标记+数据」的
-    // 并发窗口;复查仍无标记才是真旧沙箱。
-    const recheck = input.io.readMarker();
-    return recheck === devName ? devName : null;
+    // 无标记但有数据:复查标记,关掉「对手在首读后发布标记+数据」的并发窗口;
+    // 复查确证 absent 才是真旧沙箱。
+    const recheck = interpretMarker(input.io.readMarker(), devName);
+    return recheck ?? { kind: 'keep-default' };
   }
 
   // 全新沙箱:原子认领。
   const claim = input.io.claimMarker(devName);
-  if (claim === 'claimed') return devName;
+  if (claim === 'claimed') return { kind: 'rename', appName: devName };
   if (claim === 'exists') {
-    const winner = input.io.readMarker();
-    return winner === devName ? devName : null;
+    const winner = interpretMarker(input.io.readMarker(), devName);
+    // EEXIST 后复读确证 absent(对手发布后又消失)同样属身份不确定,拒绝启动。
+    return winner ?? { kind: 'abort', reason: '认领竞态后身份标记消失' };
   }
-  return null; // 写失败:不改名,保持旧行为。
+  // 认领写失败:profile 仍为空、尚未写过任何密文,保持默认名跨重启自洽。
+  return { kind: 'keep-default' };
 }

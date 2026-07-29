@@ -2,9 +2,10 @@
  * devKeychainName — 隔离 dev 实例的钥匙串条目隔离语义(#871 候选 B 收窄)。
  *
  * 关键不变量:
- *  - 身份由 profile 标记文件粘住:有标记按标记,不看目录内容(否则第二次启动翻转)。
- *  - 无标记且有数据 → 复查标记后才判旧沙箱(并发首启对手可能在首读后写入标记+数据)。
- *  - 无标记且为空 → O_EXCL 原子认领;输掉竞态以胜者标记为准;写失败不改名。
+ *  - 有标记按标记粘住;标记不可读/内容不可识别 = 身份不确定 → abort(静默回退
+ *    默认身份会用错钥匙覆盖既有密文)。absent 仅代表确证 ENOENT。
+ *  - 无标记且有真实数据(排除标记自身产物)→ 复查标记后判旧沙箱。
+ *  - 无标记且为空 → 原子认领;输掉竞态以胜者完整标记为准;认领写失败保持默认名。
  *  - packaged / 非隔离一律默认名。
  */
 
@@ -12,13 +13,17 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   isKeychainIdentityMarkerArtifact,
-  resolveDevKeychainAppName,
+  resolveDevKeychainDecision,
   type KeychainIdentityIo,
+  type KeychainMarkerRead,
 } from '../devKeychainName.js';
+
+const ABSENT: KeychainMarkerRead = { kind: 'absent' };
+const DEV: KeychainMarkerRead = { kind: 'present', value: 'CindyDev' };
 
 function io(overrides: Partial<KeychainIdentityIo>): KeychainIdentityIo {
   return {
-    readMarker: () => null,
+    readMarker: () => ABSENT,
     claimMarker: () => 'claimed',
     profileHasData: () => false,
     ...overrides,
@@ -27,99 +32,113 @@ function io(overrides: Partial<KeychainIdentityIo>): KeychainIdentityIo {
 
 const base = { isPackaged: false, isolated: true };
 
-describe('resolveDevKeychainAppName', () => {
+describe('resolveDevKeychainDecision', () => {
   it('有标记 = CindyDev → 跨重启粘住,不看目录内容', () => {
     expect(
-      resolveDevKeychainAppName({
+      resolveDevKeychainDecision({
         ...base,
-        io: io({ readMarker: () => 'CindyDev', profileHasData: () => true }),
+        io: io({ readMarker: () => DEV, profileHasData: () => true }),
       }),
-    ).toBe('CindyDev');
+    ).toEqual({ kind: 'rename', appName: 'CindyDev' });
   });
 
-  it('未知标记值 → 保守不改名', () => {
-    expect(
-      resolveDevKeychainAppName({ ...base, io: io({ readMarker: () => 'SomethingElse' }) }),
-    ).toBeNull();
+  it('标记不可读(非 ENOENT)→ abort,不得静默回退默认身份(review 反馈 P1 第七轮)', () => {
+    // 沙箱可能已有按 CindyDev 主密钥加密的密文;暂时读不出标记时用默认身份写入
+    // 会用错钥匙覆盖它们。
+    const d = resolveDevKeychainDecision({
+      ...base,
+      io: io({ readMarker: () => ({ kind: 'unreadable' }) }),
+    });
+    expect(d.kind).toBe('abort');
+  });
+
+  it('标记内容为空或不可识别 → abort(身份不确定)', () => {
+    for (const value of ['', 'SomethingElse']) {
+      const d = resolveDevKeychainDecision({
+        ...base,
+        io: io({ readMarker: () => ({ kind: 'present', value }) }),
+      });
+      expect(d.kind, JSON.stringify(value)).toBe('abort');
+    }
   });
 
   it('全新沙箱 → 原子认领成功后改名', () => {
     const claim = vi.fn<KeychainIdentityIo['claimMarker']>(() => 'claimed');
-    expect(resolveDevKeychainAppName({ ...base, io: io({ claimMarker: claim }) })).toBe('CindyDev');
+    expect(resolveDevKeychainDecision({ ...base, io: io({ claimMarker: claim }) })).toEqual({
+      kind: 'rename',
+      appName: 'CindyDev',
+    });
     expect(claim).toHaveBeenCalledWith('CindyDev');
   });
 
-  it('全新沙箱认领输掉竞态(EEXIST)→ 以胜者写入的标记为准', () => {
+  it('认领输掉竞态(EEXIST)→ 以胜者完整标记为准', () => {
     const reads = vi
       .fn<KeychainIdentityIo['readMarker']>()
-      .mockReturnValueOnce(null) // 首读:无标记
-      .mockReturnValueOnce('CindyDev'); // 认领失败后复读:胜者已写
+      .mockReturnValueOnce(ABSENT)
+      .mockReturnValueOnce(DEV);
     expect(
-      resolveDevKeychainAppName({
+      resolveDevKeychainDecision({
         ...base,
         io: io({ readMarker: reads, claimMarker: () => 'exists' }),
       }),
-    ).toBe('CindyDev');
+    ).toEqual({ kind: 'rename', appName: 'CindyDev' });
   });
 
-  it('认领写失败 → 不改名(防「改了名但标记没落盘」的翻转窗口)', () => {
-    expect(
-      resolveDevKeychainAppName({ ...base, io: io({ claimMarker: () => 'error' }) }),
-    ).toBeNull();
-  });
-
-  it('输掉竞态但复读不到有效标记(如历史空标记)→ 不改名,退默认名不分叉', () => {
-    // claimMarker 契约要求标记可见即完整(临时文件 + hard link 发布);万一 profile
-    // 里存在历史空标记,readMarker 视同无标记 → 保守退默认名,与「有数据判旧沙箱」
-    // 方向一致,不与任何对手分叉。
-    expect(
-      resolveDevKeychainAppName({
+  it('认领竞态后标记消失/不可读 → abort(身份不确定)', () => {
+    for (const second of [ABSENT, { kind: 'unreadable' } as const]) {
+      const reads = vi
+        .fn<KeychainIdentityIo['readMarker']>()
+        .mockReturnValueOnce(ABSENT)
+        .mockReturnValueOnce(second);
+      const d = resolveDevKeychainDecision({
         ...base,
-        io: io({ claimMarker: () => 'exists', readMarker: () => null }),
-      }),
-    ).toBeNull();
+        io: io({ readMarker: reads, claimMarker: () => 'exists' }),
+      });
+      expect(d.kind, second.kind).toBe('abort');
+    }
   });
 
-  it('无标记且有数据:复查到对手写入的标记 → 与对手一致,不分叉(并发首启)', () => {
-    // review 反馈 P1 第四轮:A 首读标记为空后,B 写入标记+数据;A 看到目录非空,
-    // 必须复查标记而不是直接判旧沙箱。
+  it('认领写失败 → 保持默认名(profile 仍为空,跨重启自洽)', () => {
+    expect(
+      resolveDevKeychainDecision({ ...base, io: io({ claimMarker: () => 'error' }) }),
+    ).toEqual({ kind: 'keep-default' });
+  });
+
+  it('无标记且有数据:复查到对手标记 → 与对手一致(并发首启不分叉)', () => {
     const reads = vi
       .fn<KeychainIdentityIo['readMarker']>()
-      .mockReturnValueOnce(null)
-      .mockReturnValueOnce('CindyDev');
+      .mockReturnValueOnce(ABSENT)
+      .mockReturnValueOnce(DEV);
     expect(
-      resolveDevKeychainAppName({
+      resolveDevKeychainDecision({
         ...base,
         io: io({ readMarker: reads, profileHasData: () => true }),
       }),
-    ).toBe('CindyDev');
+    ).toEqual({ kind: 'rename', appName: 'CindyDev' });
   });
 
-  it('无标记且有数据,复查仍无标记 = 真旧沙箱 → 永久默认名', () => {
+  it('无标记且有数据,复查确证 absent = 真旧沙箱 → 永久默认名', () => {
     expect(
-      resolveDevKeychainAppName({ ...base, io: io({ profileHasData: () => true }) }),
-    ).toBeNull();
+      resolveDevKeychainDecision({ ...base, io: io({ profileHasData: () => true }) }),
+    ).toEqual({ kind: 'keep-default' });
   });
 
-  it('非隔离 dev 与 packaged → 一律不改名,不做任何 IO', () => {
-    const reads = vi.fn<KeychainIdentityIo['readMarker']>(() => 'CindyDev');
+  it('非隔离 dev 与 packaged → 一律默认名,不做任何 IO', () => {
+    const reads = vi.fn<KeychainIdentityIo['readMarker']>(() => DEV);
     expect(
-      resolveDevKeychainAppName({ isPackaged: false, isolated: false, io: io({ readMarker: reads }) }),
-    ).toBeNull();
+      resolveDevKeychainDecision({ isPackaged: false, isolated: false, io: io({ readMarker: reads }) }),
+    ).toEqual({ kind: 'keep-default' });
     expect(
-      resolveDevKeychainAppName({ isPackaged: true, isolated: true, io: io({ readMarker: reads }) }),
-    ).toBeNull();
+      resolveDevKeychainDecision({ isPackaged: true, isolated: true, io: io({ readMarker: reads }) }),
+    ).toEqual({ kind: 'keep-default' });
     expect(reads).not.toHaveBeenCalled();
   });
 });
 
 describe('isKeychainIdentityMarkerArtifact', () => {
   it('标记文件与 .tmp 半成品是机制自身产物,不构成「旧沙箱证据」', () => {
-    // 并发首启时对手的 tmp 半成品先于 hard link 落位可见;profileHasData 若把它当
-    // 真实数据,输家会误判旧沙箱、与胜者身份分叉(review 反馈 P1 第六轮)。
     expect(isKeychainIdentityMarkerArtifact('keychain-identity')).toBe(true);
     expect(isKeychainIdentityMarkerArtifact('keychain-identity.12345.tmp')).toBe(true);
-    // 真实数据不得被误排除。
     expect(isKeychainIdentityMarkerArtifact('cindy-user1.db')).toBe(false);
     expect(isKeychainIdentityMarkerArtifact('safe-storage')).toBe(false);
     expect(isKeychainIdentityMarkerArtifact('keychain-identity-notes.txt')).toBe(false);

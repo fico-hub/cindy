@@ -87,7 +87,7 @@ import {
 import {
   KEYCHAIN_IDENTITY_MARKER_FILE,
   isKeychainIdentityMarkerArtifact,
-  resolveDevKeychainAppName,
+  resolveDevKeychainDecision,
 } from './devKeychainName.js';
 
 const devFlags = resolveDevCliFlags({
@@ -130,24 +130,27 @@ if (devFlags.userDataDirOverride) {
   stderr.write(`[cindy] dev userData override → ${devFlags.userDataDirOverride}\n`);
   // 隔离 dev 独立钥匙串条目(#871 候选 B 收窄):userData 已在上一行显式 pin,
   // 改名只影响 safeStorage 服务名(`<app.name> Safe Storage`)与 dev-only 派生
-  // 路径(crashDumps 等),不改数据目录。身份由 profile 标记文件粘住并 O_EXCL
-  // 原子认领(并发首启不分叉);决策全逻辑与边界见 devKeychainName.ts。
+  // 路径(crashDumps 等),不改数据目录。身份由 profile 标记文件粘住并原子认领;
+  // 标记不可读/内容不可识别 = 身份不确定 → 拒绝启动(静默回退默认身份会用错
+  // 钥匙覆盖既有密文)。决策全逻辑与边界见 devKeychainName.ts。
   const keychainMarkerPath = path.join(devFlags.userDataDirOverride, KEYCHAIN_IDENTITY_MARKER_FILE);
-  const devKeychainAppName = resolveDevKeychainAppName({
+  const keychainDecision = resolveDevKeychainDecision({
     isPackaged: app.isPackaged,
     isolated: devFlags.isolated,
     io: {
       readMarker: () => {
         try {
-          return fs.readFileSync(keychainMarkerPath, 'utf8').trim() || null;
-        } catch {
-          return null;
+          const value = fs.readFileSync(keychainMarkerPath, 'utf8').trim();
+          return { kind: 'present', value };
+        } catch (err) {
+          return (err as NodeJS.ErrnoException)?.code === 'ENOENT'
+            ? { kind: 'absent' }
+            : { kind: 'unreadable' };
         }
       },
       claimMarker: (name) => {
         // 原子发布完整标记:先写临时文件,再 hard link 独占落位——link 既是排他认领
-        // (EEXIST = 输掉竞态),又保证标记可见即完整;`wx` 直写会先暴露零长度文件,
-        // 并发对手读到空标记会与胜者分叉(review 反馈)。
+        // (EEXIST = 输掉竞态),又保证标记可见即完整。
         const tmpPath = `${keychainMarkerPath}.${process.pid}.tmp`;
         try {
           fs.mkdirSync(devFlags.userDataDirOverride!, { recursive: true });
@@ -161,7 +164,7 @@ if (devFlags.userDataDirOverride) {
             try {
               fs.unlinkSync(tmpPath);
             } catch {
-              // 临时文件清理失败无害(pid 后缀不冲突,留在 profile 里可被再次覆盖)。
+              // 临时文件清理失败无害(pid 后缀不冲突)。
             }
           }
         } catch {
@@ -170,8 +173,7 @@ if (devFlags.userDataDirOverride) {
       },
       profileHasData: () => {
         try {
-          // 排除标记文件与其 .tmp 半成品:并发首启时对手的 tmp 先于 link 落位可见,
-          // 把它当数据会让输家误判旧沙箱、与胜者身份分叉(review 反馈)。
+          // 排除标记文件与其 .tmp 半成品:它们是本机制自身产物,不构成旧沙箱证据。
           return fs
             .readdirSync(devFlags.userDataDirOverride!)
             .some((entry) => !isKeychainIdentityMarkerArtifact(entry));
@@ -182,9 +184,19 @@ if (devFlags.userDataDirOverride) {
       },
     },
   });
-  if (devKeychainAppName) {
-    app.setName(devKeychainAppName);
-    stderr.write(`[cindy] dev keychain isolation → app.name=${devKeychainAppName}\n`);
+  if (keychainDecision.kind === 'abort') {
+    stderr.write(
+      `[cindy] FATAL: 隔离沙箱钥匙串身份不确定(${keychainDecision.reason});` +
+        `为避免用错误主密钥覆盖沙箱既有密文,拒绝启动。\n` +
+        `  标记文件: ${keychainMarkerPath}\n` +
+        `  处置: 若确认该沙箱从未用过 CindyDev 身份,删除该标记文件后重启;` +
+        `否则修复其内容为 "CindyDev"。\n`,
+    );
+    exit(1);
+  }
+  if (keychainDecision.kind === 'rename') {
+    app.setName(keychainDecision.appName);
+    stderr.write(`[cindy] dev keychain isolation → app.name=${keychainDecision.appName}\n`);
   }
 }
 if (devFlags.invalidIsolationName !== null) {
