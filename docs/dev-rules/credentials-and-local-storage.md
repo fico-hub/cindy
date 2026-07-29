@@ -33,7 +33,9 @@
   （`--isolated` / `XDT_ISOLATED=1`）在首启（profile 为空）时选定独立的
   `CindyDev Safe Storage`，并把身份写入 profile 根的 `keychain-identity` 标记文件、
   跨重启粘住（见 `apps/desktop/src/main/devKeychainName.ts`；身份不能用「目录是否
-  为空」做持续判据）。无标记且已有数据的旧沙箱永久保持默认条目名（存量密文绑定旧
+  为空」做持续判据）。隔离沙箱默认目录随之升纪元为 `<userData>-dev2[-<名字>]`：旧
+  `-dev` 目录属 `Cindy` 身份纪元、留给旧 checkout，同名目录被两种身份轮流打开会互毁
+  密文。无标记且已有数据的旧沙箱永久保持默认条目名（存量密文绑定旧
   条目主密钥，零迁移只对新沙箱成立）；裸设 `XDT_USER_DATA_DIR` 只是目录覆写、不表达
   隔离意图（devCliFlags 契约），同样保持默认条目名。
 - 钥匙串条目名与 userData profile 的存量密文一一绑定：**不得**在共享既有 profile 的

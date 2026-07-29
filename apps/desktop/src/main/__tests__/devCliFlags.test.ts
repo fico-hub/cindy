@@ -51,17 +51,17 @@ describe('resolveDevCliFlags', () => {
     }
   });
 
-  it('--isolated 默认沙箱:目录 <userData>-dev,要求派生设备标识,无名字', () => {
+  it('--isolated 默认沙箱:目录 <userData>-dev2,要求派生设备标识,无名字', () => {
     const flags = resolveDevCliFlags({ ...base, argv: [...base.argv, '--isolated'] });
-    expect(flags.userDataDirOverride).toBe('/AppData/xdt-maker-dev');
+    expect(flags.userDataDirOverride).toBe('/AppData/xdt-maker-dev2');
     expect(flags.isolated).toBe(true);
     expect(flags.needsIsolatedDeviceId).toBe(true);
     expect(flags.isolationName).toBeNull();
   });
 
-  it('--isolated=<名字> 命名沙箱:目录 <userData>-dev-<名字>,带出名字', () => {
+  it('--isolated=<名字> 命名沙箱:目录 <userData>-dev2-<名字>,带出名字', () => {
     const flags = resolveDevCliFlags({ ...base, argv: [...base.argv, '--isolated=feature-a'] });
-    expect(flags.userDataDirOverride).toBe('/AppData/xdt-maker-dev-feature-a');
+    expect(flags.userDataDirOverride).toBe('/AppData/xdt-maker-dev2-feature-a');
     expect(flags.needsIsolatedDeviceId).toBe(true);
     expect(flags.isolationName).toBe('feature-a');
     expect(flags.invalidIsolationName).toBeNull();
@@ -69,7 +69,7 @@ describe('resolveDevCliFlags', () => {
 
   it('--isolated=<非法名字> 回落默认沙箱并带出非法名(不回落到不隔离)', () => {
     const bad = resolveDevCliFlags({ ...base, argv: [...base.argv, '--isolated=我的沙箱'] });
-    expect(bad.userDataDirOverride).toBe('/AppData/xdt-maker-dev');
+    expect(bad.userDataDirOverride).toBe('/AppData/xdt-maker-dev2');
     expect(bad.needsIsolatedDeviceId).toBe(true);
     expect(bad.isolationName).toBeNull();
     expect(bad.invalidIsolationName).toBe('我的沙箱');
@@ -79,19 +79,19 @@ describe('resolveDevCliFlags', () => {
       argv: [...base.argv, `--isolated=${'a'.repeat(33)}`],
     });
     expect(long.invalidIsolationName).toBe('a'.repeat(33));
-    expect(long.userDataDirOverride).toBe('/AppData/xdt-maker-dev');
+    expect(long.userDataDirOverride).toBe('/AppData/xdt-maker-dev2');
   });
 
   it('XDT_ISOLATED=1(restart 脚本默认沙箱路径)等价 --isolated', () => {
     const flags = resolveDevCliFlags({ ...base, envIsolated: '1' });
-    expect(flags.userDataDirOverride).toBe('/AppData/xdt-maker-dev');
+    expect(flags.userDataDirOverride).toBe('/AppData/xdt-maker-dev2');
     expect(flags.needsIsolatedDeviceId).toBe(true);
     expect(flags.isolationName).toBeNull();
   });
 
   it('XDT_ISOLATED=1 + XDT_ISOLATED_NAME(restart 脚本命名沙箱路径)等价 --isolated=<名字>', () => {
     const flags = resolveDevCliFlags({ ...base, envIsolated: '1', envIsolationName: 'feature-b' });
-    expect(flags.userDataDirOverride).toBe('/AppData/xdt-maker-dev-feature-b');
+    expect(flags.userDataDirOverride).toBe('/AppData/xdt-maker-dev2-feature-b');
     expect(flags.isolationName).toBe('feature-b');
   });
 
@@ -99,11 +99,11 @@ describe('resolveDevCliFlags', () => {
     // argv 路径
     const viaArgv = resolveDevCliFlags({ ...base, argv: [...base.argv, '--isolated=1'] });
     expect(viaArgv.isolationName).toBe('1');
-    expect(viaArgv.userDataDirOverride).toBe('/AppData/xdt-maker-dev-1');
+    expect(viaArgv.userDataDirOverride).toBe('/AppData/xdt-maker-dev2-1');
     // restart env 路径:开关与名字分离,名字 '1' 原样生效
     const viaEnv = resolveDevCliFlags({ ...base, envIsolated: '1', envIsolationName: '1' });
     expect(viaEnv.isolationName).toBe('1');
-    expect(viaEnv.userDataDirOverride).toBe('/AppData/xdt-maker-dev-1');
+    expect(viaEnv.userDataDirOverride).toBe('/AppData/xdt-maker-dev2-1');
   });
 
   it('XDT_ISOLATED 开关严格等于 "1" 才生效("0"/"false"/名字串都视为关)', () => {
@@ -116,7 +116,7 @@ describe('resolveDevCliFlags', () => {
 
   it('env 名字非法时回落默认沙箱并带出非法名', () => {
     const flags = resolveDevCliFlags({ ...base, envIsolated: '1', envIsolationName: '我的沙箱' });
-    expect(flags.userDataDirOverride).toBe('/AppData/xdt-maker-dev');
+    expect(flags.userDataDirOverride).toBe('/AppData/xdt-maker-dev2');
     expect(flags.invalidIsolationName).toBe('我的沙箱');
   });
 
@@ -136,7 +136,7 @@ describe('resolveDevCliFlags', () => {
       argv: [...base.argv, '--isolated'],
       envUserDataDir: '   ',
     });
-    expect(flags.userDataDirOverride).toBe('/AppData/xdt-maker-dev');
+    expect(flags.userDataDirOverride).toBe('/AppData/xdt-maker-dev2');
   });
 
   it('显式 XDT_DEVICE_ID_OVERRIDE 时隔离模式不再派生设备标识', () => {
@@ -217,7 +217,7 @@ describe('resolveDevCliFlags', () => {
     });
     expect(flags.schedulerPassive).toBe(true);
     expect(flags.isolated).toBe(true);
-    expect(flags.userDataDirOverride).toBe('/AppData/xdt-maker-dev-feature-a');
+    expect(flags.userDataDirOverride).toBe('/AppData/xdt-maker-dev2-feature-a');
     expect(flags.isolationName).toBe('feature-a');
   });
 });

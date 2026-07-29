@@ -392,7 +392,9 @@ function closeDarwinTerminalTtys(ttys) {
  * 非 packaged 时应用该覆写。
  */
 function defaultIsolatedUserDataDir(isolationName) {
-  const dirName = `${BRAND_USER_DATA_DIR_NAME}-dev${isolationName ? `-${isolationName}` : ''}`;
+  // 目录纪元 v2(-dev2),与 devCliFlags.ts 的派生保持一字不差:#871 起隔离沙箱用
+  // CindyDev 钥匙串身份,旧 -dev 目录留给旧 checkout(#912 review)。
+  const dirName = `${BRAND_USER_DATA_DIR_NAME}-dev2${isolationName ? `-${isolationName}` : ''}`;
   if (process.platform === 'win32') {
     const appData = process.env.APPDATA || path.join(process.env.USERPROFILE || '', 'AppData', 'Roaming');
     return path.join(appData, dirName);

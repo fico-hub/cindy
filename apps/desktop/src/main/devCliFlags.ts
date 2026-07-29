@@ -6,9 +6,9 @@
  * restart 脚本路径没有 argv,靠 XDT_ISOLATED=1(开关)+ XDT_ISOLATED_NAME(名字,
  * 可选)两个环境变量把隔离意图带进来——开关与名字分离,名字 "1" 也不会撞标记值。
  *
- * 隔离沙箱支持命名多开:`--isolated` 不带名字 = 默认沙箱(目录 <userData>-dev、
+ * 隔离沙箱支持命名多开:`--isolated` 不带名字 = 默认沙箱(目录 <userData>-dev2、
  * 设备标识 dev-<指纹>);`--isolated=<名字>` = 独立命名沙箱(目录
- * <userData>-dev-<名字>、设备标识 dev-<名字>-<指纹>),想开几个开几个,
+ * <userData>-dev2-<名字>、设备标识 dev-<名字>-<指纹>),想开几个开几个,
  * 数据 / 登录态 / 设备身份互不干扰、也不碰正式版。
  *
  * 纯函数、零 electron 依赖 —— index.ts 注入 argv / env / 默认 userData 目录,
@@ -28,7 +28,7 @@ export interface DevCliFlagsInput {
   isPackaged: boolean;
   /** 已显式设置的 XDT_USER_DATA_DIR;非空时优先于隔离模式的默认沙箱目录。 */
   envUserDataDir: string | undefined;
-  /** app.getPath('userData') 的默认值;隔离模式在其后缀 '-dev[-<名字>]' 生成沙箱目录。 */
+  /** app.getPath('userData') 的默认值;隔离模式在其后缀 '-dev2[-<名字>]' 生成沙箱目录。 */
   defaultUserDataDir: string;
   /**
    * XDT_ISOLATED 环境变量:严格 '1' = 隔离开关开,其它任何值(含 '0'/'false'/名字)
@@ -53,7 +53,7 @@ export interface DevCliFlags {
   isolated: boolean;
   /**
    * 生效的 userData 覆写目录;null = 不覆写。来源优先级:
-   * 显式 XDT_USER_DATA_DIR > 隔离模式默认沙箱目录(<userData>-dev[-<名字>])> 不覆写。
+   * 显式 XDT_USER_DATA_DIR > 隔离模式默认沙箱目录(<userData>-dev2[-<名字>])> 不覆写。
    */
   userDataDirOverride: string | null;
   /**
@@ -171,7 +171,11 @@ export function resolveDevCliFlags(input: DevCliFlagsInput): DevCliFlags {
   const envDir = input.envUserDataDir?.trim() ? input.envUserDataDir : undefined;
   let userDataDirOverride: string | null = envDir ?? null;
   if (isolated && !envDir) {
-    userDataDirOverride = `${input.defaultUserDataDir}-dev${isolationName ? `-${isolationName}` : ''}`;
+    // 目录纪元 v2(-dev2):#871 起隔离沙箱使用独立的 CindyDev 钥匙串身份;旧
+    // `-dev[-<名字>]` 目录属 Cindy 身份纪元,**留给旧 checkout 继续用**——同名目录
+    // 被新旧 checkout 轮流以两种钥匙串身份打开会互毁密文(#912 review),换目录做
+    // 物理隔离,新旧 checkout 各开各的沙箱。
+    userDataDirOverride = `${input.defaultUserDataDir}-dev2${isolationName ? `-${isolationName}` : ''}`;
   }
   return {
     schedulerPassive: input.argv.includes('--passive') || input.envSchedulerPassive === '1',
