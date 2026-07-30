@@ -59,7 +59,12 @@ function volumeIsCaseInsensitive(existingDir: string): boolean {
 function defaultCanonicalizePath(p: string): string {
   const resolved = resolve(p);
   try {
-    return realpathSync.native(resolved);
+    const real = realpathSync.native(resolved);
+    // 不敏感卷统一折叠为全小写:存在与不存在两分支必须产出**同一种规范形式**,
+    // 否则并发首启在两次 canonicalize 之间创建目录时(TOCTOU),同一路径会被判
+    // 不等——隔离启动误落观察模式抢注默认身份(review 反馈 P1 第二十六轮)。
+    // 折叠只用于判等,不回写任何路径。
+    return volumeIsCaseInsensitive(real) ? real.toLowerCase() : real;
   } catch {
     // 不存在:找最近存在的祖先,祖先真值 + 按祖先卷语义归一的剩余段。
   }
@@ -76,8 +81,10 @@ function defaultCanonicalizePath(p: string): string {
       // 卷语义按 ancestorReal(realpath 后的真实位置)探测,不能用词法路径 dir:
       // 祖先是跨卷符号链接时,剩余段实际创建在链接目标卷上,探链接所在卷会在
       // "不敏感卷链到敏感卷"时误折叠,把两个真实不同的目录判成同一纪元
-      // (review 反馈 P1 第二十四轮)。
-      return join(ancestorReal, volumeIsCaseInsensitive(ancestorReal) ? rest.toLowerCase() : rest);
+      // (review 反馈 P1 第二十四轮)。不敏感卷折叠**整条路径**(含祖先真值),
+      // 与上方存在分支的全小写形式保持一致(TOCTOU 稳定,第二十六轮)。
+      const joined = join(ancestorReal, rest);
+      return volumeIsCaseInsensitive(ancestorReal) ? joined.toLowerCase() : joined;
     } catch {
       // 该祖先也不存在,继续上溯。
     }

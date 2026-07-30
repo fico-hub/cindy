@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 
@@ -168,6 +168,22 @@ describe('resolveDevCliFlags', () => {
         expect(viaLink.isolatedDirIsEpochDerived).toBe(true);
       } finally {
         rmSync(linkAncestor, { force: true });
+      }
+      // TOCTOU 稳定性:目录被并发进程创建前后,同一写法的判定结果一致——
+      // 存在与不存在分支产出同一种规范形式(#912 review P1 第二十六轮)。
+      const variantInput = {
+        ...base,
+        defaultUserDataDir: join(ancestor, 'xdt-maker'),
+        envIsolated: '1',
+        envUserDataDir: join(ancestor, 'XDT-MAKER-DEV2'),
+      };
+      const beforeCreate = resolveDevCliFlags(variantInput).isolatedDirIsEpochDerived;
+      mkdirSync(join(ancestor, 'xdt-maker-dev2'));
+      try {
+        const afterCreate = resolveDevCliFlags(variantInput).isolatedDirIsEpochDerived;
+        expect(afterCreate).toBe(beforeCreate);
+      } finally {
+        rmSync(join(ancestor, 'xdt-maker-dev2'), { recursive: true, force: true });
       }
       // 等价写法(尾斜杠)在同一缺省实现下不受卷语义影响,恒命中。
       const slash = resolveDevCliFlags({
