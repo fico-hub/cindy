@@ -3939,7 +3939,7 @@ describe('Scheduler: attempt 生命周期状态机(#1016)', () => {
             ctxRef = ctx;
           }),
       });
-      const sch = await h.scheduler.create({ ...baseInput, intervalMs: 3_600_000 });
+      await h.scheduler.create({ ...baseInput, intervalMs: 3_600_000 });
       h.clock.advance(3_600_000);
       void h.scheduler.tick();
       await vi.waitFor(() => expect(h.scheduler.getRuntimeSnapshot().slotsInUse).toBe(1));
