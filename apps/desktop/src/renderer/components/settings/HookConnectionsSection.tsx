@@ -276,24 +276,33 @@ export function HookConnectionsSection() {
 
   /** (multi-team)绑定动作 IPC 的统一收口(应用快照 + 失败 toast)。 */
   const runHookAction = useCallback(
-    (action: () => Promise<{ hook: SlackHookView }>) => {
+    (
+      action: () => Promise<{ hook: SlackHookView }>,
+      options?: { localizedErrorOnly?: boolean },
+    ) => {
       const requestedAtRevision = ++viewRevisionRef.current;
       void action()
         .then((res) => {
           if (viewRevisionRef.current === requestedAtRevision) applyView(res.hook);
         })
-        .catch((err: unknown) =>
+        .catch((err: unknown) => {
+          const localizedFallback = t('settings.remoteControl.hook.toast.actionFailed');
           toast.error(
-            extractIpcError(err)?.message ?? t('settings.remoteControl.hook.toast.actionFailed'),
-          ),
-        );
+            options?.localizedErrorOnly
+              ? localizedFallback
+              : (extractIpcError(err)?.message ?? localizedFallback),
+          );
+        });
     },
     [applyView, t],
   );
 
   const handleLifecycleAnnouncementToggle = useCallback(
     (enabled: boolean) => {
-      runHookAction(() => window.electronAPI.hookControl.setLifecycleAnnouncement(enabled));
+      runHookAction(
+        () => window.electronAPI.hookControl.setLifecycleAnnouncement(enabled),
+        { localizedErrorOnly: true },
+      );
     },
     [runHookAction],
   );

@@ -2177,6 +2177,9 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
     ) {
       return;
     }
+    // serverFeatures intentionally survives reconnects for stable tool exposure,
+    // but capability-gated frames must wait for this transport's own welcome.
+    serverWelcomeReceived = false;
     // created 先声明后赋值: transport 工厂同步触发首个 onStatus(connecting),
     // 此时按"未注册"丢弃(status 随后统一置 connecting, 不丢信息)
     let created: HookTransport | null = null;
@@ -2221,6 +2224,7 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
         lastError = err;
         // 掉线(含退避重连中): 在途往返快速失败, 不让调用方挂满超时
         if (s !== 'connected') {
+          serverWelcomeReceived = false;
           dispatcher?.onDisconnected(dispatchId('slack'));
           drainPendingPrefs();
           drainPendingTools();
@@ -2342,6 +2346,7 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
       if (
         transport !== null &&
         status === 'connected' &&
+        serverWelcomeReceived &&
         serverFeatures.includes(HOOK_FEATURE_LIFECYCLE_ANNOUNCEMENT)
       ) {
         const sent = transport.send(makeLifecyclePreference({ enabled }));

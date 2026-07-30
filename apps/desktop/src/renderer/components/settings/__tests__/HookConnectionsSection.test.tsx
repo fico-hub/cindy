@@ -20,6 +20,7 @@ const ipc = vi.hoisted(() => ({
 }));
 const dialog = vi.hoisted(() => ({ confirm: vi.fn() }));
 const workspacePrefsEditor = vi.hoisted(() => ({ render: vi.fn() }));
+const toast = vi.hoisted(() => ({ error: vi.fn() }));
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
@@ -27,6 +28,10 @@ vi.mock('react-i18next', () => ({
 
 vi.mock('@/components/ui/confirm-dialog-provider', () => ({
   useConfirmDialog: () => ({ confirm: dialog.confirm }),
+}));
+
+vi.mock('@/lib/toast', () => ({
+  toast,
 }));
 
 vi.mock('@/components/ui/switch', () => ({
@@ -215,6 +220,42 @@ describe('HookConnectionsSection Telegram binding actions', () => {
     );
 
     await waitFor(() => expect(ipc.setLifecycleAnnouncement).toHaveBeenCalledWith(true));
+  });
+
+  it('uses a localized fallback when persisting the lifecycle preference fails', async () => {
+    const boundHook: SlackHookView = {
+      ...BASE_HOOK,
+      enabled: true,
+      status: 'connected',
+      binding: {
+        state: 'confirmed',
+        slackUserId: 'U1',
+        slackUserName: 'alice',
+        message: null,
+        authorizeUrl: null,
+        reason: null,
+        installUrl: null,
+        teamName: 'Acme',
+      },
+    };
+    ipc.get.mockResolvedValue({ hook: boundHook });
+    ipc.setLifecycleAnnouncement.mockRejectedValue(
+      new Error('[INTERNAL] failed to persist Slack lifecycle notification preference'),
+    );
+
+    render(<HookConnectionsSection />);
+    await expandChannelCard(SLACK_CARD);
+    fireEvent.click(
+      await screen.findByRole('switch', {
+        name: 'settings.remoteControl.hook.lifecycleAnnouncement.label',
+      }),
+    );
+
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith(
+        'settings.remoteControl.hook.toast.actionFailed',
+      ),
+    );
   });
 
   it('offers an explicit link action when Telegram is enabled but unbound', async () => {

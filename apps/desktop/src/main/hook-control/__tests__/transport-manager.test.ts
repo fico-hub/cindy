@@ -592,6 +592,48 @@ describe('hook-control transport + manager(真实 ws server)', () => {
     expect(manager.snapshot().status).toBe('connecting');
   });
 
+  it('Slack 重连在新 welcome 前不复用旧 capability 发送偏好', () => {
+    const store = memoryStore({ url: 'wss://fake.example' });
+    const transportOpts: HookTransportOpts[] = [];
+    const sends: Array<ReturnType<typeof vi.fn>> = [];
+    const manager = makeManager(store, {
+      createTransport: (opts) => {
+        transportOpts.push(opts);
+        const send = vi.fn(() => true);
+        sends.push(send);
+        return {
+          send,
+          dispose: vi.fn(),
+        };
+      },
+    });
+    cleanups.push(() => manager.dispose());
+
+    manager.sync();
+    transportOpts[0].onWelcome?.(
+      makeWelcome({
+        serverName: 'new-server',
+        features: [HOOK_FEATURE_LIFECYCLE_ANNOUNCEMENT],
+      }).payload,
+    );
+    transportOpts[0].onStatus('connected', null);
+
+    manager.sync();
+    expect(transportOpts).toHaveLength(2);
+    transportOpts[1].onStatus('connected', null);
+    manager.setLifecycleAnnouncement(true);
+    expect(sends[1]).not.toHaveBeenCalled();
+
+    transportOpts[1].onWelcome?.(
+      makeWelcome({
+        serverName: 'old-server',
+        features: [],
+      }).payload,
+    );
+    expect(sends[1]).not.toHaveBeenCalled();
+    expect(store.get().lifecycleAnnouncementOverride).toBe(true);
+  });
+
   it('未登录(token=null): 不发起连接, 状态 error + not logged in', async () => {
     const { wss, url } = await startServer();
     let serverGotConnection = false;
