@@ -16,6 +16,7 @@ import type {
   PreRunHookRunResult,
 } from '../types.js';
 import { SCRIPT_CAPABILITIES } from '../types.js';
+import { isLegalPhaseTransition } from './attemptLifecycle.js';
 import type { ScheduleStorage } from '../interfaces/schedule-storage.js';
 import type { ChildRunInput, ScheduleRunner } from '../interfaces/schedule-runner.js';
 import type { Clock } from '../interfaces/clock.js';
@@ -1614,6 +1615,98 @@ export class Scheduler extends EventEmitter {
   }
 
   /** 在第一次 await 前同步登记一次槽位占用，并输出可配对的注册日志。 */
+  /**
+   * 阶段转移的唯一写入口(#1016):合法性由 attemptLifecycle 的显式转移表判定,
+   * 非法转移**抛错**——「静默少做一件事」正是 #944 review 里同型出现四次的缺陷形态,
+   * 宁可响亮失败也不静默容忍。幂等重入(from === to)按 no-op 放行并返回 false
+   * (强制收口与迟到 settle 会各自把 attempt 置一次 'finalizing')。
+   */
+  private transitionAttempt(
+    attempt: InflightAttempt,
+    next: ScheduleRunPhase,
+    via: string,
+  ): boolean {
+    const from = attempt.phase;
+    if (from === next) return false;
+    if (!isLegalPhaseTransition(from, next)) {
+      throw new Error(
+        `scheduler: illegal attempt phase transition ${from} -> ${next} ` +
+          `(via ${via}, runId=${attempt.runId}, scheduleId=${attempt.scheduleId})`,
+      );
+    }
+    attempt.phase = next;
+    if (next === 'finalizing' && attempt.finalizingSince === undefined) {
+      attempt.finalizingSince = this.clock.now();
+    }
+    return true;
+  }
+
+  /**
+   * 单一出口的「出口清单」矫正(#1016):attempt 删除时校验并清掉所有仍指向它的
+   * 登记(controller / per-schedule 索引 / session 双向映射 / 静默标记)。这些登记
+   * 本应由各路径自己收干净(unregisterInflight / 强制收口);此处发现残留说明某条
+   * 出口路径漏了收口动作 —— 矫正之余响亮告警,让这类缺陷在日志/测试里直接可见,
+   * 而不是留成"槽位对不上 / 映射悬挂"的静默账。abandonedRuns 刻意不碰:它就是
+   * 设计为跨 attempt 生命周期存活、由迟到 settle 消费的(见字段注释)。
+   */
+  private reapAttemptResiduals(runId: string, scheduleId: string): void {
+    const residuals: string[] = [];
+    if (this.inflightControllers.delete(runId)) residuals.push('controller');
+    const set = this.inflightByschedule.get(scheduleId);
+    if (set?.delete(runId)) {
+      residuals.push('scheduleIndex');
+      if (set.size === 0) this.inflightByschedule.delete(scheduleId);
+    }
+    const sessionId = this.runIdToSessionId.get(runId);
+    if (sessionId !== undefined) {
+      if (this.sessionIdToRunId.get(sessionId) === runId) this.sessionIdToRunId.delete(sessionId);
+      this.runIdToSessionId.delete(runId);
+      residuals.push('sessionMap');
+    }
+    if (this.runIdToBoundSessionId.delete(runId)) residuals.push('boundSessionMap');
+    if (this.silencedRuns.delete(runId)) residuals.push('silencedRuns');
+    if (residuals.length > 0) {
+      this.logger?.warn?.(
+        'scheduler: attempt exit found unreaped registrations (cleaned; a lifecycle path skipped its cleanup)',
+        {
+          schedulerInstanceId: this.schedulerInstanceId,
+          processId: this.processId,
+          runId,
+          scheduleId,
+          residuals,
+        },
+      );
+    }
+  }
+
+  /**
+   * 登记一致性不变量(#1016):所有按 runId 键控的登记必须指向仍在账的 attempt。
+   * 违反 = 某条出口漏了收口且 reap 也没兜住(理论不可达;可达即缺陷),抛错让
+   * 单测与运行期都响亮失败。只在 begin(注册面唯一的扩张点)校验,O(登记数),
+   * 上限受并发闸门约束,代价可忽略。
+   */
+  private assertAttemptRegistryInvariants(): void {
+    for (const runId of this.inflightControllers.keys()) {
+      if (!this.inflightAttempts.has(runId)) {
+        throw new Error(`scheduler invariant violated: controller without attempt (runId=${runId})`);
+      }
+    }
+    for (const [scheduleId, runIds] of this.inflightByschedule) {
+      for (const runId of runIds) {
+        if (!this.inflightAttempts.has(runId)) {
+          throw new Error(
+            `scheduler invariant violated: schedule index entry without attempt (runId=${runId}, scheduleId=${scheduleId})`,
+          );
+        }
+      }
+    }
+    for (const runId of this.runIdToSessionId.keys()) {
+      if (!this.inflightAttempts.has(runId)) {
+        throw new Error(`scheduler invariant violated: session map entry without attempt (runId=${runId})`);
+      }
+    }
+  }
+
   private beginInflightAttempt(
     input: Omit<SchedulerInflightRun, 'startedAt' | 'lastProgressAt'>,
   ): void {
@@ -1621,6 +1714,7 @@ export class Scheduler extends EventEmitter {
       throw new Error(`duplicate scheduler run id: ${input.runId}`);
     }
     const before = this.inflightAttempts.size;
+    this.assertAttemptRegistryInvariants();
     const startedAt = this.clock.now();
     const attempt: InflightAttempt = { ...input, startedAt, lastProgressAt: startedAt };
     this.inflightAttempts.set(input.runId, attempt);
@@ -1644,10 +1738,7 @@ export class Scheduler extends EventEmitter {
   ): void {
     const current = this.inflightAttempts.get(runId);
     if (!current) return;
-    current.phase = phase;
-    if (phase === 'finalizing' && current.finalizingSince === undefined) {
-      current.finalizingSince = this.clock.now();
-    }
+    this.transitionAttempt(current, phase, 'updateInflightAttempt');
     if (schedule) {
       current.scheduleName = schedule.name;
       current.executionMode = schedule.executionMode ?? 'agent';
@@ -1672,6 +1763,7 @@ export class Scheduler extends EventEmitter {
     }
     const before = this.inflightAttempts.size;
     this.inflightAttempts.delete(runId);
+    this.reapAttemptResiduals(runId, attempt.scheduleId);
     const now = this.clock.now();
     this.logger?.info?.('scheduler: in-flight run released', {
       schedulerInstanceId: this.schedulerInstanceId,
@@ -2004,8 +2096,7 @@ export class Scheduler extends EventEmitter {
     return () => {
       const attempt = this.inflightAttempts.get(runId);
       if (!attempt) return;
-      if (attempt.phase === 'queued') return;
-      attempt.phase = 'queued';
+      if (!this.transitionAttempt(attempt, 'queued', 'onQueueWaitStart')) return;
       attempt.lastProgressAt = this.clock.now();
       this.logger?.info?.('scheduler: in-flight run entered pure queue wait (slot released)', {
         schedulerInstanceId: this.schedulerInstanceId,
@@ -2041,7 +2132,7 @@ export class Scheduler extends EventEmitter {
         // 不会执行,所以不该占并发槽 —— 复位成 'running' 会让 slotsInUse 临时超过
         // maxConcurrentRuns、UI 冒出 9/8,也与 endQueueWait 契约里"只复位记账"矛盾
         // (review #944 第十五轮)。
-        attempt.phase = 'cancelling';
+        this.transitionAttempt(attempt, 'cancelling', 'endQueueWait');
         attempt.lastProgressAt = this.clock.now();
         this.emitRuntimeState();
         return true;
@@ -2057,7 +2148,7 @@ export class Scheduler extends EventEmitter {
         });
         return false;
       }
-      attempt.phase = 'running';
+      this.transitionAttempt(attempt, 'running', 'endQueueWait-reclaim');
       attempt.lastProgressAt = this.clock.now();
       this.logger?.info?.('scheduler: queued run reclaimed a slot', {
         schedulerInstanceId: this.schedulerInstanceId,
@@ -2283,8 +2374,7 @@ export class Scheduler extends EventEmitter {
     // finishInflightAttempt 释放;真卡住就留在账上,由 logStorageStall 持续暴露。
     this.abandonedRuns.add(runId);
     this.inflightControllers.delete(runId);
-    attempt.phase = 'finalizing';
-    attempt.finalizingSince = now;
+    this.transitionAttempt(attempt, 'finalizing', 'force-release');
     const set = this.inflightByschedule.get(scheduleId);
     if (set) {
       set.delete(runId);

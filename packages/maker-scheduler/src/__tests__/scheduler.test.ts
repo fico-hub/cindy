@@ -3854,3 +3854,75 @@ describe('Scheduler: 排队不占槽与卡死守卫', () => {
     }
   });
 });
+
+// ── #1016:attempt 生命周期状态机(转移统一入口 + 单一出口清单) ──────────────
+describe('Scheduler: attempt 生命周期状态机(#1016)', () => {
+  function spyLogger(): { logger: Logger; warns: unknown[][] } {
+    const warns: unknown[][] = [];
+    const logger = {
+      info: vi.fn(),
+      warn: vi.fn((...args: unknown[]) => warns.push(args)),
+      error: vi.fn(),
+      debug: vi.fn(),
+    } as unknown as Logger;
+    return { logger, warns };
+  }
+
+  it('完整生命周期(含排队往返)合法收口:零非法转移、出口零残留告警', async () => {
+    const { logger, warns } = spyLogger();
+    let ctxRef: FireContext | undefined;
+    let release: (() => void) | undefined;
+    const h = makeHarness({
+      logger,
+      runnerImpl: (_s, ctx) =>
+        new Promise<FireResult>((resolve) => {
+          ctxRef = ctx;
+          ctx.onQueueWaitStart?.();
+          release = () => {
+            // 排队 → 回收槽位 → 正常完成:覆盖 running→queued→running→finalizing 全链。
+            expect(ctx.endQueueWait?.(true)).toBe(true);
+            resolve({ sessionId: 'sess-full-lifecycle' });
+          };
+        }),
+    });
+    const sch = await h.scheduler.create({ ...baseInput, manual: true });
+    const p = h.scheduler.runNow(sch.id);
+    await vi.waitFor(() => expect(ctxRef).toBeDefined());
+    expect(h.scheduler.getRuntimeSnapshot().inFlightRuns[0]?.phase).toBe('queued');
+    release?.();
+    await p;
+    const snap = h.scheduler.getRuntimeSnapshot();
+    expect(snap.inFlight).toBe(0);
+    expect(snap.slotsInUse).toBe(0);
+    // 单一出口清单未发现任何残留登记(残留 = 某条路径漏了收口,响亮告警)。
+    expect(
+      warns.some((args) => String(args[0]).includes('unreaped registrations')),
+    ).toBe(false);
+    await h.scheduler.stop();
+  });
+
+  it('排队中 runner 直接抛错(不经过 endQueueWait)→ queued→finalizing 合法收口为 failed', async () => {
+    const { logger, warns } = spyLogger();
+    let reject: ((err: Error) => void) | undefined;
+    const h = makeHarness({
+      logger,
+      runnerImpl: (_s, ctx) =>
+        new Promise<FireResult>((_resolve, rej) => {
+          ctx.onQueueWaitStart?.();
+          reject = rej;
+        }),
+    });
+    const sch = await h.scheduler.create({ ...baseInput, manual: true });
+    const p = h.scheduler.runNow(sch.id);
+    await vi.waitFor(() => expect(reject).toBeDefined());
+    reject?.(new Error('queued turn interrupted'));
+    await p;
+    const runs = await h.storage.listRuns(sch.id);
+    expect(runs[0]?.status).toBe('failed');
+    expect(h.scheduler.getRuntimeSnapshot().inFlight).toBe(0);
+    expect(
+      warns.some((args) => String(args[0]).includes('unreaped registrations')),
+    ).toBe(false);
+    await h.scheduler.stop();
+  });
+});
