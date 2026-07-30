@@ -327,11 +327,13 @@ export function createResponsesHandler(opts: ResponsesHandlerOptions): Responses
       }
     }
 
-    // 上游 200 但 content-type 不是 SSE(反代/网关吐 JSON 或 HTML):大概率整流翻不出
+    // 上游 2xx 但 content-type 不是 SSE(反代/网关吐 JSON 或 HTML):大概率整流翻不出
     // 任何事件,先留一条 warn ——零事件收尾时的合成 error 会带上正文前缀(#941)。
+    // 判定大小写不敏感(HTTP header 值的 media type 不区分大小写);真实状态码进日志,
+    // 本路径接受任意 2xx,不硬编码 200(review 反馈)。
     const upstreamContentType = upstream.headers.get('content-type') ?? '';
-    if (!upstreamContentType.includes('event-stream')) {
-      log.warn?.('upstream 200 with non-SSE content-type', {
+    if (!upstreamContentType.toLowerCase().includes('event-stream')) {
+      log.warn?.('upstream 2xx with non-SSE content-type', {
         reqId,
         status: upstream.status,
         contentType: upstreamContentType || '(missing)',
@@ -377,7 +379,7 @@ export function createResponsesHandler(opts: ResponsesHandlerOptions): Responses
           error: {
             type: 'api_error',
             message:
-              `upstream returned HTTP 200 but produced no translatable SSE events ` +
+              `upstream returned HTTP ${upstream.status} but produced no translatable SSE events ` +
               `(content-type: ${upstreamContentType || 'missing'}${bodyPrefix ? `; body: ${bodyPrefix}` : ''})`,
           },
         },
@@ -417,8 +419,13 @@ export function createResponsesHandler(opts: ResponsesHandlerOptions): Responses
       finalizeStream();
     } catch (err) {
       if (!abort.signal.aborted) {
-        log.warn?.('upstream stream error', { reqId, err: err instanceof Error ? err.message : String(err) });
-        finalizeStream();
+        const errMsg = err instanceof Error ? err.message : String(err);
+        log.warn?.('upstream stream error', { reqId, err: errMsg });
+        // 断流不走 finalizeStream:已写出部分事件后再补 message_stop,Claude Code 会
+        // 把截断响应当正常完成、上游读取错误被掩盖(review 反馈 P1)。fail() 关块后
+        // 发 error 事件收尾(错误帧已收尾时返回空,不重复报错);流失败于任何事件
+        // 之前时 error 事件同样成立,零事件合成诊断只服务「干净结束却零事件」路径。
+        for (const outEv of translator.fail(`upstream stream error: ${errMsg}`)) writeOut(outEv);
       }
     } finally {
       res.end();

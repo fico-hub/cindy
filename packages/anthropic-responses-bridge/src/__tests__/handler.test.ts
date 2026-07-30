@@ -123,8 +123,50 @@ describe('createResponsesHandler', () => {
     expect(r.text).toContain('no translatable SSE events');
     // 上游正文前缀进错误信息:真实错误不再被空 200 掩盖。
     expect(r.text).toContain('prompt too large for context window');
-    expect(warns).toContain('upstream 200 with non-SSE content-type');
+    expect(warns).toContain('upstream 2xx with non-SSE content-type');
     expect(warns).toContain('upstream stream yielded no translatable events');
+  });
+
+  it('content-type 判定大小写不敏感:Text/Event-Stream 不触发 non-SSE warn', async () => {
+    const warns: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(sse(OK_SSE), {
+      status: 200,
+      headers: { 'content-type': 'Text/Event-Stream; charset=utf-8' },
+    })));
+    const handler = createResponsesHandler({
+      providers: [providerConfig()],
+      logger: { warn: (msg) => warns.push(msg) },
+    });
+    const r = await invoke(handler, { model: 'chatgpt/gpt-5.5', messages: [] });
+    expect(r.text).toContain('message_stop');
+    expect(warns).not.toContain('upstream 2xx with non-SSE content-type');
+  });
+
+  it('已写出部分事件后断流 → error 事件收尾,不补 message_stop 伪装正常完成(#941 review)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      (() => {
+        // pull 式逐块投递:start 里 enqueue 后立即 error 会按 Streams 规范丢弃整个
+        // 未读队列,前面的块根本到不了 handler。
+        let step = 0;
+        return new ReadableStream<Uint8Array>({
+          pull(c) {
+            if (step < 3) {
+              c.enqueue(new TextEncoder().encode(`data: ${OK_SSE[step]}\n\n`));
+              step += 1;
+            } else {
+              c.error(new Error('socket reset'));
+            }
+          },
+        });
+      })(),
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
+    )));
+    const handler = createResponsesHandler({ providers: [providerConfig()] });
+    const r = await invoke(handler, { model: 'chatgpt/gpt-5.5', messages: [] });
+    expect(r.text).toContain('message_start');
+    expect(r.text).toContain('upstream stream error: socket reset');
+    // 截断响应必须以 error 事件收尾,不能以 message_stop 伪装正常完成。
+    expect(r.text).not.toContain('message_stop');
   });
 
   it('上游流内 OpenAI 风格 error 帧 → 透传为 Anthropic error 事件,不合成零事件错误(#941)', async () => {

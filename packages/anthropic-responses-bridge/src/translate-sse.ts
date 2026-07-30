@@ -222,6 +222,19 @@ export class SseTranslator {
     }
   }
 
+  /**
+   * 上游读流中途失败(reader 抛错)时的收尾:关块 + `error` 事件,**不发**
+   * message_delta/message_stop——已经写出部分内容后再补正常收尾,Claude Code 会把
+   * 截断响应当成正常完成,上游读取错误被完全掩盖(review 反馈 P1)。已收尾(错误帧
+   * 已翻译 / completed 已处理)则返回空,不重复报错。
+   */
+  fail(message: string): AnthropicSseEvent[] {
+    if (this.finished) return [];
+    const out: AnthropicSseEvent[] = [];
+    this.emitFailure(message, out);
+    return out;
+  }
+
   /** 上游流意外结束(没收到 response.completed)时兜底收尾。 */
   finish(): AnthropicSseEvent[] {
     if (this.finished) return [];
@@ -536,8 +549,14 @@ export class SseTranslator {
           ? err.type
           : '';
     const message = code && !baseMessage.includes(code) ? `[${code}] ${baseMessage}` : baseMessage;
-    // 关掉半开的块,再发一条 Anthropic error 事件(SDK 会把它当 turn 级错误处理)。
-    // 已到达的暂存内容先按原序回放,不随失败一起丢。
+    this.emitFailure(message, out);
+  }
+
+  /**
+   * 失败收尾的公共实现(流内错误帧与 fail() 共用):已到达的暂存内容先按原序回放、
+   * 关掉半开的块,再发一条 Anthropic error 事件(SDK 会把它当 turn 级错误处理)。
+   */
+  private emitFailure(message: string, out: AnthropicSseEvent[]): void {
     this.drainDeferred(out, true);
     this.closeAllOpenBlocks(out);
     out.push({
