@@ -170,6 +170,14 @@ export class SseTranslator {
   }
 
   private handleEvent(e: Record<string, unknown>, type: string, out: AnthropicSseEvent[]): void {
+    // OpenAI 系上游流内错误的惯用形态是 `event: error` + `data: {"error":{...}}` ——
+    // data 帧本身没有 type 字段,原先落 default 分支被静默丢弃,CLI 只能拿到空 200 SSE
+    // 报 "empty or malformed response" 并盲目重试(#941)。正常 Responses 事件一律带
+    // type,无 type 且携带对象 error 字段的帧可无歧义判定为错误帧。
+    if (!type && e.error && typeof e.error === 'object') {
+      this.onFailed(e, out);
+      return;
+    }
     switch (type) {
       case 'response.created':
       case 'response.in_progress': {
@@ -518,7 +526,16 @@ export class SseTranslator {
     if (this.finished) return;
     const resp = asRecord(e.response);
     const err = asRecord(resp.error ?? e.error);
-    const message = typeof err.message === 'string' ? err.message : 'upstream response failed';
+    const baseMessage = typeof err.message === 'string' ? err.message : 'upstream response failed';
+    // 上游错误码(code / type,如 context_length_exceeded)一并透传:这是用户判断
+    // 「该压缩还是该换模型」的关键信息,也是 CLI 识别可操作错误的原料。
+    const code =
+      typeof err.code === 'string' && err.code
+        ? err.code
+        : typeof err.type === 'string' && err.type
+          ? err.type
+          : '';
+    const message = code && !baseMessage.includes(code) ? `[${code}] ${baseMessage}` : baseMessage;
     // 关掉半开的块,再发一条 Anthropic error 事件(SDK 会把它当 turn 级错误处理)。
     // 已到达的暂存内容先按原序回放,不随失败一起丢。
     this.drainDeferred(out, true);
