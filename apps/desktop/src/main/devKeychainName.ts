@@ -68,7 +68,10 @@ export interface KeychainIdentityIo {
   readMarker(): KeychainMarkerRead;
   /**
    * 原子独占发布**完整且持久**的标记:临时文件写完 + fsync → hard link 独占落位
-   * → fsync 父目录。目标文件系统不支持硬链接时(exFAT / 部分 SMB,link 报非
+   * → fsync 父目录。「写完」必须校验写满——writeSync 允许短写,截断标记可能恰好
+   * 是词表另一合法身份("CindyDev\n" 截 5 字节 = "Cindy"),发布它会让两次启动
+   * 各选一个身份(review 反馈 P1 第十七轮);短写按写失败处理。
+   * 目标文件系统不支持硬链接时(exFAT / 部分 SMB,link 报非
    * EEXIST 错)回退 O_EXCL 独占创建:排他性(防双身份的协调点)仍由文件系统原子
    * 原语保证,仅该回退路径牺牲「可见即完整」——读侧三态 + 内容不可识别即 abort
    * 本就把不完整标记按 fail-safe 处理(review 反馈 P1 第十六轮)。

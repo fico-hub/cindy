@@ -148,6 +148,19 @@ if (devFlags.userDataDirOverride) {
       return process.platform === 'win32';
     }
   };
+  // writeSync 允许短写(配额/磁盘/网络文件系统压力下不抛错而少写)。短写发布的
+  // 截断标记可能恰好是词表里另一个合法身份("CindyDev\n" 截 5 字节 = "Cindy"),
+  // 认领进程与后续启动会各选一个身份(review 反馈 P1 第十七轮)——必须写满才算
+  // 写完;无进展按写失败抛出,走各自的 error/撤销路径。
+  const writeMarkerContentSync = (fd: number, name: string): void => {
+    const data = Buffer.from(`${name}\n`, 'utf8');
+    let offset = 0;
+    while (offset < data.length) {
+      const written = fs.writeSync(fd, data, offset, data.length - offset);
+      if (written <= 0) throw new Error('short write while publishing keychain identity marker');
+      offset += written;
+    }
+  };
   const keychainDecision = resolveDevKeychainDecision({
     isPackaged: app.isPackaged,
     // CindyDev 身份只在「显式隔离 + 纪元派生目录」下认领;其余覆写形态(裸覆写 /
@@ -179,7 +192,7 @@ if (devFlags.userDataDirOverride) {
           fs.mkdirSync(devFlags.userDataDirOverride!, { recursive: true });
           const fd = fs.openSync(tmpPath, 'w');
           try {
-            fs.writeSync(fd, `${name}\n`, null, 'utf8');
+            writeMarkerContentSync(fd, name);
             fs.fsyncSync(fd);
           } finally {
             fs.closeSync(fd);
@@ -212,7 +225,7 @@ if (devFlags.userDataDirOverride) {
             try {
               const exclFd = fs.openSync(keychainMarkerPath, 'wx');
               try {
-                fs.writeSync(exclFd, `${name}\n`, null, 'utf8');
+                writeMarkerContentSync(exclFd, name);
                 fs.fsyncSync(exclFd);
               } catch (writeErr) {
                 try {
