@@ -15,21 +15,68 @@
  * 便于单元测试。packaged 版本一律返回"无覆写",线上零影响。
  */
 import { realpathSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
+
+/** 字母大小写整体翻转(卷语义探测用):无字母的段翻转后与原串相同。 */
+function flipAsciiCase(s: string): string {
+  return s.replace(/[a-zA-Z]/g, (ch) =>
+    ch === ch.toLowerCase() ? ch.toUpperCase() : ch.toLowerCase(),
+  );
+}
+
+/**
+ * 探测**已存在**目录所在卷是否大小写不敏感:把末段字母翻转大小写后 realpath
+ * 仍指向同一真实路径 → 不敏感。末段无字母可翻转时上溯父目录(父必然也存在);
+ * 到根仍无从探测 → 保守按大小写敏感(不折叠,见调用方注释的代价论证)。
+ */
+function volumeIsCaseInsensitive(existingDir: string): boolean {
+  let dir = existingDir;
+  for (;;) {
+    const name = basename(dir);
+    const flipped = flipAsciiCase(name);
+    if (flipped !== name) {
+      try {
+        return realpathSync.native(join(dirname(dir), flipped)) === realpathSync.native(dir);
+      } catch {
+        return false;
+      }
+    }
+    const parent = dirname(dir);
+    if (parent === dir) return false;
+    dir = parent;
+  }
+}
 
 /**
  * 纪元判定的缺省路径规范化:优先 realpath 的文件系统真值——大小写不敏感卷
  * (macOS 默认 APFS / NTFS)上等价写法收敛到磁盘真实路径,大小写敏感卷上不同
- * 目录保持不同,两个方向都不靠猜平台语义(#912 review 第十九/二十/二十一轮)。
- * 路径尚不存在(首启)时回退 path.resolve:只归一尾斜杠与 './..' 段,不折叠
- * 大小写——把不同目录误判成同一纪元会让不认标记的旧 checkout 与新身份互写
- * 密文,比"等价写法首启漏判落观察模式"(单一身份,仅未隔离)更不可逆。
+ * 目录保持不同,两个方向都不靠猜平台语义(#912 review 第十九~二十二轮)。
+ * 路径尚不存在(首启)时,walk 到最近**存在**的祖先:realpath 该祖先取磁盘真值,
+ * 再用大小写翻转探测该卷语义——探明不敏感才折叠剩余段的大小写(首启的大小写
+ * 变体写法据此仍命中纪元目录),探明敏感或无从探测则保留原大小写(把不同目录
+ * 误判成同一纪元会让不认标记的旧 checkout 与新身份互写密文,方向必须保守)。
  */
 function defaultCanonicalizePath(p: string): string {
+  const resolved = resolve(p);
   try {
-    return realpathSync.native(p);
+    return realpathSync.native(resolved);
   } catch {
-    return resolve(p);
+    // 不存在:找最近存在的祖先,祖先真值 + 按祖先卷语义归一的剩余段。
+  }
+  let dir = resolved;
+  const suffix: string[] = [];
+  for (;;) {
+    const parent = dirname(dir);
+    suffix.unshift(basename(dir));
+    if (parent === dir) return resolved;
+    dir = parent;
+    try {
+      const ancestorReal = realpathSync.native(dir);
+      const rest = suffix.join(sep);
+      return join(ancestorReal, volumeIsCaseInsensitive(dir) ? rest.toLowerCase() : rest);
+    } catch {
+      // 该祖先也不存在,继续上溯。
+    }
   }
 }
 
@@ -48,8 +95,8 @@ export interface DevCliFlagsInput {
   /**
    * 纪元判定用的路径规范化钩子(注入以便单测模拟不同卷语义);缺省实现走
    * fs.realpathSync.native(文件系统真值:大小写不敏感卷上返回磁盘真实大小写,
-   * 敏感卷上不同目录得到不同规范路径),路径不存在时回退 path.resolve(不做大小写
-   * 折叠,保守方向)。
+   * 敏感卷上不同目录得到不同规范路径),路径不存在(首启)时按最近存在祖先的
+   * 卷语义探测决定是否折叠剩余段大小写,无从探测则保留原大小写(保守方向)。
    */
   canonicalizePath?: (p: string) => string;
   /** app.getPath('userData') 的默认值;隔离模式在其后缀 '-dev2[-<名字>]' 生成沙箱目录。 */

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
-import { join } from 'node:path';
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join } from 'node:path';
 
 import {
   resolveDevCliFlags,
@@ -116,14 +118,53 @@ describe('resolveDevCliFlags', () => {
       canonicalizePath: sensitiveVolume,
     });
     expect(miss.isolatedDirIsEpochDerived).toBe(false);
-    // 缺省实现对不存在的路径回退 path.resolve(不折叠大小写,保守方向):
-    // 首启的大小写变体写法不命中,落观察模式(单一身份,不会双身份互写)。
-    const firstLaunchVariant = resolveDevCliFlags({
+    // 缺省实现:路径与全部有字母的祖先都不存在时无从探测卷语义 → 保守不折叠
+    // (/AppData 在测试机不存在,最近存在祖先是根目录,无字母可翻转)。
+    const unprobeable = resolveDevCliFlags({
       ...base,
       envIsolated: '1',
       envUserDataDir: '/AppData/XDT-Maker-DEV2',
     });
-    expect(firstLaunchVariant.isolatedDirIsEpochDerived).toBe(false);
+    expect(unprobeable.isolatedDirIsEpochDerived).toBe(false);
+  });
+
+  it('缺省实现:首启(目录不存在)按最近存在祖先的卷语义探测(#912 review P2 第二十二轮)', () => {
+    // 在真实文件系统上建一个临时祖先目录:目标 -dev2 目录不存在,大小写变体写法
+    // 是否命中应跟随该卷的真实语义——macOS 默认 APFS(不敏感)命中,linux(敏感)
+    // 不命中。期望值用同一套"翻转大小写后是否同一目录"探测独立求得,不猜平台。
+    const ancestor = mkdtempSync(join(tmpdir(), 'epoch-vol-Probe-'));
+    try {
+      const flippedAncestor = join(
+        dirname(ancestor),
+        basename(ancestor).replace(/[a-zA-Z]/g, (ch) =>
+          ch === ch.toLowerCase() ? ch.toUpperCase() : ch.toLowerCase(),
+        ),
+      );
+      let volumeInsensitive = false;
+      try {
+        volumeInsensitive =
+          realpathSync.native(flippedAncestor) === realpathSync.native(ancestor);
+      } catch {
+        volumeInsensitive = false;
+      }
+      const flags = resolveDevCliFlags({
+        ...base,
+        defaultUserDataDir: join(ancestor, 'xdt-maker'),
+        envIsolated: '1',
+        envUserDataDir: join(ancestor, 'XDT-MAKER-DEV2'),
+      });
+      expect(flags.isolatedDirIsEpochDerived).toBe(volumeInsensitive);
+      // 等价写法(尾斜杠)在同一缺省实现下不受卷语义影响,恒命中。
+      const slash = resolveDevCliFlags({
+        ...base,
+        defaultUserDataDir: join(ancestor, 'xdt-maker'),
+        envIsolated: '1',
+        envUserDataDir: join(ancestor, 'xdt-maker-dev2') + '/',
+      });
+      expect(slash.isolatedDirIsEpochDerived).toBe(true);
+    } finally {
+      rmSync(ancestor, { recursive: true, force: true });
+    }
   });
 
   it('--isolated 默认沙箱:目录 <userData>-dev2,要求派生设备标识,无名字', () => {
