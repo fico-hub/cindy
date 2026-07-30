@@ -78,6 +78,11 @@ describe('resolveDevKeychainDecision', () => {
         io: io({ readMarker: () => ({ kind: 'present', value }) }),
       });
       expect(d.kind, JSON.stringify(value)).toBe('abort');
+      // 不回显原文:reason 只含元数据,不得把标记内容带进 stderr/日志
+      // (review 反馈 P2 第二十七轮)。
+      if (d.kind === 'abort' && value.trim().length > 0) {
+        expect(d.reason).not.toContain(value.trim());
+      }
     }
   });
 

@@ -149,7 +149,15 @@ function interpretMarker(
     }
     // 空串或不可识别的值:身份不确定。可能是损坏的标记——静默回退默认身份
     // 会用错钥匙覆盖既有密文(review 反馈 P1 第七轮),拒绝启动。
-    return { kind: 'abort', reason: `身份标记内容不可识别: ${JSON.stringify(read.value)}` };
+    // 不回显原文:裸覆写目录里可能存在同名的**外来文件**,内容不受词表约束,
+    // 拼进 reason 会经 stderr/日志泄露敏感材料或塞进巨量数据(review 反馈 P2
+    // 第二十七轮)。只报可排查的元数据。
+    return {
+      kind: 'abort',
+      reason:
+        `身份标记内容不可识别(${Buffer.byteLength(read.value, 'utf8')} 字节,` +
+        `${read.value.endsWith('\n') ? '有' : '无'}终止换行)`,
+    };
   }
   return null; // absent → 由调用侧继续判定。
 }
