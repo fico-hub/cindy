@@ -12,6 +12,8 @@ interface ImportMeta {
   readonly env: ImportMetaEnv;
 }
 
+type AgentProxyPrefPayload = import('../shared/agentProxyConfig').SshHostAgentProxyPref;
+type AgentProxyTunnelStatePayload = import('../shared/agentProxyConfig').AgentProxyTunnelState;
 type ModelAccessStatusPayload = import('../shared/modelAccess').ModelAccessStatus;
 type AnalyticsSettingsPayload = import('../shared/analyticsSettings').AnalyticsSettingsPayload;
 type RsbWindowCommand = import('../shared/rightSidebarWindow').RsbWindowCommand;
@@ -51,9 +53,9 @@ interface EnvCheckResult {
 type RemoteHostSnapshot = import('@cindy/maker-remote-ssh').HostSnapshot & {
   autoConnect: boolean;
   /** Agent 流量经 SSH 隧道走本地 Proxy 的 per-host 配置; 未开启 → null。 */
-  agentProxy: { enabled: boolean; localHost: string; localPort: number } | null;
+  agentProxy: AgentProxyPrefPayload | null;
   /** 隧道实时状态 (main 进程内存态); 无记录 → null。 */
-  agentProxyTunnel: { active: boolean; remotePort?: number; lastError?: string } | null;
+  agentProxyTunnel: AgentProxyTunnelStatePayload | null;
 };
 /** 设备互联:REST 设备视图(同 shared/deviceLinkIpc.ts DeviceLinkDeviceView) */
 interface DeviceLinkDeviceInfo {
@@ -168,7 +170,7 @@ interface RemoteAgentOneShotResult extends RemoteAgentExecResult {
 type VoiceInputState = import('@cindy/voice-input-core').VoiceInputState;
 type VoiceAudioTrace = import('@cindy/voice-input-core').AudioTrace;
 type VoiceSpeechSegment = import('@cindy/voice-input-core').SpeechSegment;
-type VoiceInputGlobalErrorCode = 'empty' | 'unavailable' | 'unconfirmed' | 'permission' | 'failed';
+type VoiceInputGlobalErrorCode = 'empty' | 'unavailable' | 'unconfirmed' | 'permission' | 'failed' | 'superseded';
 type VoiceInputGlobalResult =
   | { ok: true }
   | { ok: false; error: string; errorCode?: VoiceInputGlobalErrorCode };
@@ -374,6 +376,20 @@ type FeishuBotStatus = 'idle' | 'testing' | 'connected' | 'reconnecting' | 'conf
 
 /** @cindy/im DiscordIM 的 transport 状态(IMStatus union 的 mirror)。 */
 type DiscordBotTransportStatus =
+  | { kind: 'idle' }
+  | { kind: 'connecting' }
+  | { kind: 'connected'; appId: string }
+  | { kind: 'conflict'; appId: string }
+  | { kind: 'error'; reason: string };
+
+/** @cindy/im TelegramIM 的 transport 状态(IMStatus union 的 mirror)。 */
+interface TelegramBotBehavior {
+  emojiReactions: 'off' | 'minimal' | 'expressive';
+  replyQuoteGroup: 'off' | 'first' | 'all';
+  replyQuoteDm: 'off' | 'first';
+}
+
+type TelegramBotTransportStatus =
   | { kind: 'idle' }
   | { kind: 'connecting' }
   | { kind: 'connected'; appId: string }
@@ -1305,6 +1321,11 @@ interface ElectronAPI {
     }>;
     openMicrophoneSettings: () => Promise<{ ok: true } | { ok: false; error: string }>;
     openInputMonitoringSettings: () => Promise<VoiceInputGlobalResult>;
+    /**
+     * 失败走统一 IPC 错误协议（reject），成功路径只有 ok:true + 权限状态。
+     * status 与 getSystemPermissions 的各项同为 string 形状（granted / denied / …）。
+     */
+    requestInputMonitoringPermission: () => Promise<{ ok: true; status: string }>;
     muteSystemAudio: () => Promise<{ ok: true } | { ok: false; error: string }>;
     restoreSystemAudio: () => Promise<{ ok: true } | { ok: false; error: string }>;
     testConnection: () => Promise<VoiceInputConnectionTestResult>;
@@ -1381,7 +1402,12 @@ interface ElectronAPI {
     }) => VoiceInputDataSnapshot;
     updateSettings: (patch: Partial<VoiceInputSettingsData>) => Promise<VoiceInputSettingsData>;
     updateShortcutSetting: (shortcut: VoiceInputShortcut | null) => Promise<
-      | { ok: true; settings: VoiceInputSettingsData }
+      | {
+        ok: true;
+        settings: VoiceInputSettingsData;
+        /** 已存盘但 macOS 监听权限未授权，快捷键要等授权后才生效。 */
+        pendingInputMonitoring?: boolean;
+      }
       | { ok: false; error: string; errorCode?: VoiceInputGlobalErrorCode }
     >;
     deleteDictionaryEntries: (entryIds: string[]) => Promise<VoiceInputSettingsData>;
@@ -1398,10 +1424,21 @@ interface ElectronAPI {
     updateHistoryEntry: (id: string, text: string) => void;
     deleteHistoryEntry: (id: string) => void;
     onDataChanged: (callback: (payload: VoiceInputDataSnapshot) => void) => () => void;
-    setGlobalShortcut: (shortcut: VoiceInputShortcut | null) => Promise<VoiceInputGlobalResult>;
+    /** options.suspend = 录制期挂起（故意与存盘不同）；不带它的请求会被 main 按存盘校验。 */
+    setGlobalShortcut: (
+      shortcut: VoiceInputShortcut | null,
+      options?: { suspend?: true },
+    ) => Promise<VoiceInputGlobalResult>;
     startModifierShortcutRecording: () => Promise<VoiceInputGlobalResult>;
     stopModifierShortcutRecording: () => Promise<VoiceInputGlobalResult>;
     onModifierShortcutKeys: (callback: (payload: { keys: string[] }) => void) => () => void;
+    /** 「待授权」快捷键在设置页之外自动恢复失败（helper 起不来）。 */
+    onShortcutRecoveryFailed: (callback: () => void) => () => void;
+    /**
+     * 取走「自动恢复失败」这条待通知状态（取走即清，一次 App 运行只提示一次）。
+     * 挂载时也要主动取一次：失败可能发生在常挂载 UI 之前，那时推送没有订阅者。
+     */
+    consumeShortcutRecoveryFailure: () => Promise<{ failed: boolean }>;
     onGlobalShortcutTrigger: (callback: (payload?: { id?: string; phase?: 'start' | 'tap' | 'end' }) => void) => () => void;
     claimGlobalShortcutTrigger: (id: string) => void;
     onGlobalOverlayCommand: (callback: (command: { type: 'start' | 'submit' | 'cancel' }) => void) => () => void;
@@ -1664,6 +1701,43 @@ interface ElectronAPI {
     onStatusChange: (
       callback: (update: {
         status: DiscordBotTransportStatus;
+      }) => void,
+    ) => () => void;
+  };
+
+  // ── Personal Telegram Bot (Settings → IM Bot → Personal) ──
+  telegramBot: {
+    getStatus: () => Promise<{
+      status: TelegramBotTransportStatus;
+      ownerUserId: string | null;
+      botUsername: string | null;
+    }>;
+    setConfig: (payload: { token: string; ownerUserId: string }) => Promise<{
+      status: TelegramBotTransportStatus;
+      saveErrorStatus?: TelegramBotTransportStatus;
+      ownerUserId: string | null;
+      botUsername: string | null;
+    }>;
+    disconnect: () => Promise<{
+      status: TelegramBotTransportStatus;
+    }>;
+    checkSessionAuth: () => Promise<DiscordBotSessionAuthCheckResult>;
+    getBehavior: () => Promise<TelegramBotBehavior>;
+    setBehavior: (patch: Partial<TelegramBotBehavior>) => Promise<TelegramBotBehavior>;
+    listGroups: () => Promise<{
+      groups: Array<{ chatId: string; chatName: string | null; activation: 'mention' | 'always' }>;
+    }>;
+    setGroupActivation: (payload: { chatId: string; mode: 'mention' | 'always' }) => Promise<unknown>;
+    getPersona: () => Promise<{ botName: string; soul: string }>;
+    setPersona: (payload: {
+      botName?: string;
+      soul?: string;
+      syncProfile?: boolean;
+    }) => Promise<{ persona: { botName: string; soul: string }; profileSynced?: boolean }>;
+    onStatusChange: (
+      callback: (update: {
+        status: TelegramBotTransportStatus;
+        botUsername: string | null;
       }) => void,
     ) => () => void;
   };
@@ -1985,11 +2059,18 @@ interface ElectronAPI {
   /**
    * RSB web-browser plugin popup 路由订阅。guest webview 内 `window.open` /
    * `<a target="_blank">` / window.location 跨 host 时,main 端 webview-security
-   * setWindowOpenHandler 把 url + disposition 推过来,renderer 端 RightSidebarShell
-   * 收到后调 store.addTab 开新 web-browser tab。
+   * setWindowOpenHandler 把 url + disposition(+ opener 归属,按发起方 guest 的
+   * webContentsId 从 TabRegistry 反查)推过来,renderer 端 RightSidebarShell
+   * 收到后调 store.addTab 开新 web-browser tab——有 openerSessionId 时落进该
+   * session 的 bucket,而不是用户正在看的 session。
    */
   onRsbBrowserPopup: (
-    callback: (payload: { url: string; disposition: string }) => void,
+    callback: (payload: {
+      url: string;
+      disposition: string;
+      openerTabId?: string;
+      openerSessionId?: string;
+    }) => void,
   ) => () => void;
 
   /**
@@ -2517,7 +2598,7 @@ interface ElectronAPI {
       force?: boolean;
       /** 完整安装目标路径。不传 → global scope 默认路径。*/
       installPath?: string;
-      /** force 覆盖时跳过 XDMaker 持久备份,直接 rmrf 旧目录(完整替换)。 */
+      /** force 覆盖时跳过 Cindy 持久备份,直接 rmrf 旧目录(完整替换)。 */
       skipBackup?: boolean;
     }) => Promise<
       | { success: true; name: string; version: string; absolutePath: string }
@@ -2818,7 +2899,7 @@ interface ElectronAPI {
       authMethod?: 'agent' | 'key';
       identityFile?: string;
       /** 「Agent 流量走本地 Proxy」pref; null = 关闭, 缺省 = 不动。 */
-      agentProxy?: { enabled: boolean; localHost: string; localPort: number } | null;
+      agentProxy?: AgentProxyPrefPayload | null;
     }) => Promise<{ host: RemoteHostSnapshot }>;
     update: (host: {
       id: string;
@@ -2827,7 +2908,7 @@ interface ElectronAPI {
       user: string;
       authMethod?: 'agent' | 'key';
       identityFile?: string;
-      agentProxy?: { enabled: boolean; localHost: string; localPort: number } | null;
+      agentProxy?: AgentProxyPrefPayload | null;
     }) => Promise<{ host: RemoteHostSnapshot }>;
     remove: (id: string) => Promise<{ ok: true }>;
     connect: (id: string) => Promise<{ host: RemoteHostSnapshot | null }>;
@@ -2950,6 +3031,13 @@ interface ElectronAPI {
     reason?: 'gone' | 'no-worktree' | 'git-error';
     detail?: string;
   }>;
+  /**
+   * 「worktree 回收链已跑完」推送。归档/删除后 main 侧的回收是 fire-and-forget 的
+   * 异步链，store 条目移除远晚于状态 IPC 返回，renderer 必须等这条才能拿到真实快照。
+   */
+  onWorktreeChanged: (
+    callback: (payload: { sessionId: string }) => void,
+  ) => () => void;
 
   // ── Slack Hook(中心 slack-hook-server 接入) ── 类型正本在 shared/hookControlIpc.ts
   hookControl: {
@@ -3202,8 +3290,14 @@ interface ElectronAPI {
        * fire-and-forget；renderer 应在 emitPatch userSendAt 之后调用，作为持久化兜底。
        */
       touchUserSend: (id: string, atMs?: number) => Promise<void>;
-      /** interrupted-turn-resume:尾部停在未忽略中断标记行的 active 会话 id(启动红点)。 */
+      /** interrupted-turn-resume:「疑似中断」(startedAt > endedAt)的 active 会话 id。 */
       interruptedPending: () => Promise<string[]>;
+      /** 红点派生的周期性重算源:尾部停在未 dismissed 错误行的 active 会话 id。 */
+      errorTailPending: () => Promise<string[]>;
+      /** 批量处置未处理告警(「全部标为已读」)。failed = 未处置成功的会话 id。 */
+      dismissPendingAlerts: (
+        sessionIds: string[],
+      ) => Promise<{ dismissed: number; processed: string[]; failed: string[] }>;
       ackInterrupted: (id: string) => Promise<void>;
       // Stage 2 C2: fork 已迁到 electronAPI.maker.fork (走 maker:fork IPC)。
     };
@@ -3496,9 +3590,10 @@ interface ElectronAPI {
   };
 
   /**
-   * Browser backend toggle (Phase 5): 切换 MCP `browser` 工具实际控制的浏览器。
-   * - `external`: vendored Playwright + 独立 Chrome(老行为)
-   * - `rsb-webview`: 右侧栏内置 webview tab(新默认)
+   * Browser backend toggle: 切换 MCP `browser` 工具实际控制的浏览器。
+   * - `external`: vendored Playwright + 独立 Chrome(**系统默认**)
+   * - `rsb-webview`: 右侧栏内置 webview tab
+   * 默认值口径与两次翻转的 override 语义见 main/browser-backend-settings-store.ts。
    */
   browserBackend: {
     getState: () => Promise<{
@@ -3741,7 +3836,7 @@ interface ElectronAPI {
 
     listAgentSkills: (
       agentKind: 'claude-code' | 'codex',
-      params: { workingDir: string; forceReload?: boolean },
+      params: { workingDir?: string; forceReload?: boolean },
     ) => Promise<{
       success: boolean;
       error?: string;
@@ -4551,7 +4646,8 @@ interface ElectronAPI {
         };
       } | UtilityTextFailure>;
       listRuns: (id: string, limit?: number) => Promise<unknown[]>;
-      listSidebarIndexRuns: () => Promise<unknown[]>;
+      /** { runs, inflightRunIds } —— 形态见 features/scheduler/lib/scheduleSidebarIndexRuns。 */
+      listSidebarIndexRuns: () => Promise<unknown>;
       listCostSummaries: () => Promise<unknown[]>;
       deleteRun: (runId: string) => Promise<void>;
       getInflightCount: (id: string) => Promise<number>;
