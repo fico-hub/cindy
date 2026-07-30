@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 
@@ -154,6 +154,21 @@ describe('resolveDevCliFlags', () => {
         envUserDataDir: join(ancestor, 'XDT-MAKER-DEV2'),
       });
       expect(flags.isolatedDirIsEpochDerived).toBe(volumeInsensitive);
+      // 祖先是符号链接:canonical 以链接目标(realpath)为基,链接写法与真身
+      // 写法收敛到同一纪元路径(卷语义也按目标卷探测,#912 review P1 第二十四轮)。
+      const linkAncestor = join(dirname(ancestor), `${basename(ancestor)}-link`);
+      symlinkSync(ancestor, linkAncestor);
+      try {
+        const viaLink = resolveDevCliFlags({
+          ...base,
+          defaultUserDataDir: join(ancestor, 'xdt-maker'),
+          envIsolated: '1',
+          envUserDataDir: join(linkAncestor, 'xdt-maker-dev2'),
+        });
+        expect(viaLink.isolatedDirIsEpochDerived).toBe(true);
+      } finally {
+        rmSync(linkAncestor, { force: true });
+      }
       // 等价写法(尾斜杠)在同一缺省实现下不受卷语义影响,恒命中。
       const slash = resolveDevCliFlags({
         ...base,

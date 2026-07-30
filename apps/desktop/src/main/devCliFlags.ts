@@ -73,7 +73,11 @@ function defaultCanonicalizePath(p: string): string {
     try {
       const ancestorReal = realpathSync.native(dir);
       const rest = suffix.join(sep);
-      return join(ancestorReal, volumeIsCaseInsensitive(dir) ? rest.toLowerCase() : rest);
+      // 卷语义按 ancestorReal(realpath 后的真实位置)探测,不能用词法路径 dir:
+      // 祖先是跨卷符号链接时,剩余段实际创建在链接目标卷上,探链接所在卷会在
+      // "不敏感卷链到敏感卷"时误折叠,把两个真实不同的目录判成同一纪元
+      // (review 反馈 P1 第二十四轮)。
+      return join(ancestorReal, volumeIsCaseInsensitive(ancestorReal) ? rest.toLowerCase() : rest);
     } catch {
       // 该祖先也不存在,继续上溯。
     }
