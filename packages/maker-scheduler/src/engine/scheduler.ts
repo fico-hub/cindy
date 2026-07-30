@@ -2095,7 +2095,10 @@ export class Scheduler extends EventEmitter {
   private buildOnQueueWaitStart(runId: string): () => void {
     return () => {
       const attempt = this.inflightAttempts.get(runId);
-      if (!attempt) return;
+      // 迟到回调竞态是**预期**而非状态机缺陷:强制收口把 attempt 置 'finalizing' 后,
+      // runner 的异步 continuation 仍可能调进来 —— 与 endQueueWait 同款按 no-op 处理,
+      // 不让正常竞态伪装成非法转移错误(review 反馈)。
+      if (!attempt || attempt.phase === 'finalizing') return;
       if (!this.transitionAttempt(attempt, 'queued', 'onQueueWaitStart')) return;
       attempt.lastProgressAt = this.clock.now();
       this.logger?.info?.('scheduler: in-flight run entered pure queue wait (slot released)', {

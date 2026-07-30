@@ -3926,3 +3926,33 @@ describe('Scheduler: attempt 生命周期状态机(#1016)', () => {
     await h.scheduler.stop();
   });
 });
+
+  it('强制收口后 runner 迟到调用 onQueueWaitStart → no-op,不抛非法转移(#1016 review)', async () => {
+    vi.useFakeTimers();
+    try {
+      let ctxRef: FireContext | undefined;
+      const h = makeHarness({
+        runStallMs: 60_000,
+        runStallAbortGraceMs: 30_000,
+        runnerImpl: (_s, ctx) =>
+          new Promise<FireResult>(() => {
+            ctxRef = ctx;
+          }),
+      });
+      const sch = await h.scheduler.create({ ...baseInput, intervalMs: 3_600_000 });
+      h.clock.advance(3_600_000);
+      void h.scheduler.tick();
+      await vi.waitFor(() => expect(h.scheduler.getRuntimeSnapshot().slotsInUse).toBe(1));
+      h.clock.advance(60_001);
+      await vi.advanceTimersByTimeAsync(RUN_HEARTBEAT_INTERVAL_MS);
+      h.clock.advance(30_001);
+      await vi.advanceTimersByTimeAsync(RUN_HEARTBEAT_INTERVAL_MS);
+      await vi.waitFor(() => expect(h.scheduler.getRuntimeSnapshot().inFlight).toBe(0));
+      // 强制收口已完成,runner 的 continuation 迟到调排队回调:必须是安静的 no-op。
+      expect(() => ctxRef?.onQueueWaitStart?.()).not.toThrow();
+      expect(() => ctxRef?.endQueueWait?.(true)).not.toThrow();
+      await h.scheduler.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
