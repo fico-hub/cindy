@@ -79,7 +79,11 @@ export interface KeychainIdentityIo {
    * EEXIST 错)回退 O_EXCL 独占创建:排他性(防双身份的协调点)仍由文件系统原子
    * 原语保证,仅该回退路径牺牲「可见即完整」——读侧以**终止换行**为完整判据
    * (resolver 只接受 `<name>\n`,合法身份的无换行前缀按不可识别 abort),半成品
-   * 标记落在 fail-safe 方向(review 反馈 P1 第十六/十八轮)。
+   * 标记落在 fail-safe 方向(review 反馈 P1 第十六/十八轮)。回退路径的撤销只
+   * 允许在内容不完整时做:内容写满后并发读者可能已按完整标记接受,fsync 失败再
+   * 撤销会造成「读者已用身份 + 标记消失」的旧沙箱误判——此时留完整标记、本进程
+   * 按 'error' 拒启;内容持久性由读侧接受前的自 fsync 兜底(review 反馈 P1
+   * 第二十三轮,实现见 index.ts 的 readMarker / claimMarker)。
    * **'claimed' 与 'exists' 两种返回前都必须完成目录持久化**——
    * 输家不 flush 就接受对方标记,断电可能保住输家写的密文、丢掉标记(review 反馈
    * P1 第十二轮);flush 失败按 'error'(仅 Windows 因平台性打不开目录 fd 例外为

@@ -177,8 +177,23 @@ if (devFlags.userDataDirOverride) {
           // 原始内容不 trim:完整性(终止换行)由 resolver 判定。提前 trim 会把
           // O_EXCL 回退里写到一半的 "Cindy"(= "CindyDev\n" 前 5 字节)洗成完整
           // 的默认身份标记,并发读端据此分裂身份(review 反馈 P1 第十八轮)。
-          const value = fs.readFileSync(keychainMarkerPath, 'utf8');
-          return { kind: 'present', value };
+          const fd = fs.openSync(keychainMarkerPath, 'r');
+          try {
+            const value = fs.readFileSync(fd, 'utf8');
+            // 接受前把刚读到的内容自 fsync 落盘:O_EXCL 回退里写者的 fsync 可能
+            // 尚未成功甚至失败,读者只做目录 fsync 就按内容接受的话,断电后可能
+            // 「凭证已按该身份写入、标记内容却没落盘」(review 反馈 P1 第二十三轮)。
+            // 自 fsync 成功 = 内容持久,与写者命运解耦。仅 Windows 因只读句柄平台性
+            // fsync 受限保持 best-effort(与 flushProfileDir 的既有例外同款)。
+            try {
+              fs.fsyncSync(fd);
+            } catch {
+              if (process.platform !== 'win32') return { kind: 'unreadable' };
+            }
+            return { kind: 'present', value };
+          } finally {
+            fs.closeSync(fd);
+          }
         } catch (err) {
           return (err as NodeJS.ErrnoException)?.code === 'ENOENT'
             ? { kind: 'absent' }
@@ -228,16 +243,28 @@ if (devFlags.userDataDirOverride) {
             // 后续启动全部挡在 abort 上。
             try {
               const exclFd = fs.openSync(keychainMarkerPath, 'wx');
+              // 撤销只允许在**内容不完整**时做:内容一旦写满,并发读者可能已按完整
+              // 标记接受并写入该身份的密文,此后 fsync 失败再 unlink 会造成「读者
+              // 已用身份 + 标记消失 + profile 非空」→ 下次启动误判旧沙箱切回默认
+              // 身份,双身份互写(review 反馈 P1 第二十三轮)。fsync 失败留完整标记
+              // 并返回 'error'(本进程拒启):内容真值在盘上,后续启动读它自愈;
+              // 持久性由读侧接受前的自 fsync 兜底(见 readMarker)。
+              let contentComplete = false;
               try {
                 writeMarkerContentSync(exclFd, name);
+                contentComplete = true;
                 fs.fsyncSync(exclFd);
               } catch (writeErr) {
-                try {
-                  fs.unlinkSync(keychainMarkerPath);
-                } catch {
-                  // 撤销失败:残留标记会让后续启动 abort 并给出处置指引,仍是安全方向。
+                if (!contentComplete) {
+                  try {
+                    fs.unlinkSync(keychainMarkerPath);
+                  } catch {
+                    // 撤销失败:残留半成品标记会让后续启动 abort 并给出处置指引,
+                    // 仍是安全方向。
+                  }
+                  throw writeErr;
                 }
-                throw writeErr;
+                return 'error';
               } finally {
                 fs.closeSync(exclFd);
               }
