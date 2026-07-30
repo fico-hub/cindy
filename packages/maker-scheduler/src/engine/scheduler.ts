@@ -493,6 +493,10 @@ export class Scheduler extends EventEmitter {
     this.sessionIdToRunId.clear();
     this.runIdToSessionId.clear();
     this.runIdToBoundSessionId.clear();
+    // silencedRuns 与上面同为 runId 键控登记,必须随 stop 一起清:留着会让重启后
+    // 第一次 begin 的不变量断言把它当悬挂登记抛错(codex review P1)。语义上也与
+    // silenceRun 文档一致 —— 标记丢失的安全方向就是照常通知。
+    this.silencedRuns.clear();
     this.activeSchedules.clear();
     this.started = false;
     this.emitRuntimeState();

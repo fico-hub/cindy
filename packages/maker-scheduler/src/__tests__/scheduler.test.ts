@@ -3994,3 +3994,23 @@ describe('Scheduler: attempt 生命周期状态机(#1016)', () => {
       vi.useRealTimers();
     }
   });
+
+  it('stop() 清 silencedRuns:静默 run 执行中停机后再 runNow 不被不变量断言误杀(#1016 review)', async () => {
+    const h = makeHarness({
+      runnerImpl: () => new Promise<FireResult>(() => {}),
+    });
+    const sch = await h.scheduler.create({ ...baseInput, silentWhenIdle: true });
+    const first = h.scheduler.runNow(sch.id);
+    first.catch(() => {});
+    await vi.waitFor(() => expect(h.scheduler.getRuntimeSnapshot().inFlight).toBe(1));
+    const [running] = await h.scheduler.listRuns(sch.id);
+    expect(h.scheduler.isRunSilenced(running.id)).toBe(true);
+    await h.scheduler.stop();
+    // stop 清空 attempts 的同时必须一并清 silencedRuns:留着的话,同实例后续第一次
+    // beginInflightAttempt 的不变量断言会把它当悬挂登记抛错(codex review P1)。
+    expect(h.scheduler.isRunSilenced(running.id)).toBe(false);
+    const second = h.scheduler.runNow(sch.id);
+    second.catch(() => {});
+    await vi.waitFor(() => expect(h.scheduler.getRuntimeSnapshot().inFlight).toBe(1));
+    await h.scheduler.stop();
+  });
