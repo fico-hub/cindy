@@ -555,6 +555,43 @@ describe('hook-control transport + manager(真实 ws server)', () => {
     expect(manager.snapshot().lifecycleAnnouncement).toBe(true);
   });
 
+  it('上下线通知实时更新发送失败时重建连接，并由下一次 hello 同步持久化值', () => {
+    const store = memoryStore({ url: 'wss://fake.example' });
+    const transportOpts: HookTransportOpts[] = [];
+    const disposes: Array<ReturnType<typeof vi.fn>> = [];
+    let sendOk = true;
+    const manager = makeManager(store, {
+      createTransport: (opts) => {
+        transportOpts.push(opts);
+        const dispose = vi.fn();
+        disposes.push(dispose);
+        return {
+          send: () => sendOk,
+          dispose,
+        };
+      },
+    });
+    cleanups.push(() => manager.dispose());
+
+    manager.sync();
+    const first = transportOpts[0];
+    const welcome = makeWelcome({
+      serverName: 'mock',
+      features: [HOOK_FEATURE_LIFECYCLE_ANNOUNCEMENT],
+    });
+    first.onWelcome?.(welcome.payload);
+    first.onStatus('connected', null);
+
+    sendOk = false;
+    manager.setLifecycleAnnouncement(true);
+
+    expect(store.get().lifecycleAnnouncementOverride).toBe(true);
+    expect(disposes[0]).toHaveBeenCalledOnce();
+    expect(transportOpts).toHaveLength(2);
+    expect(transportOpts[1].buildHello().lifecycleAnnouncement).toBe(true);
+    expect(manager.snapshot().status).toBe('connecting');
+  });
+
   it('未登录(token=null): 不发起连接, 状态 error + not logged in', async () => {
     const { wss, url } = await startServer();
     let serverGotConnection = false;

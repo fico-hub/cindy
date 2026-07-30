@@ -1503,7 +1503,10 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
     HOOK_FEATURE_SESSION_PICKER,
   ];
 
-  function buildHello(features: readonly string[]): HelloInput {
+  function buildHello(
+    features: readonly string[],
+    includeLifecycleAnnouncement = false,
+  ): HelloInput {
     // 每次连接成功都重读配置 —— 别名映射变更后重连即生效
     const device = deviceInfo();
     return {
@@ -1515,7 +1518,7 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
       // 每条连接只声明其服务会实际使用的能力，避免把 provider-neutral wire 误投
       // 到 Slack 服务，也保持老 Slack hello 的兼容面最小。
       features: [...features],
-      ...(features === SLACK_HELLO_FEATURES
+      ...(includeLifecycleAnnouncement
         ? { lifecycleAnnouncement: lifecycleAnnouncementEnabled() }
         : {}),
     };
@@ -2181,7 +2184,7 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
       url: store.effectiveUrl(),
       getAuthToken,
       refreshAuthToken,
-      buildHello: () => buildHello(SLACK_HELLO_FEATURES),
+      buildHello: () => buildHello(SLACK_HELLO_FEATURES, true),
       onMessage: (msg, send) => handleBusinessMessage('slack', msg, send),
       onWelcome: (payload) => {
         if (created === null || transport !== created) return;
@@ -2341,7 +2344,15 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
         status === 'connected' &&
         serverFeatures.includes(HOOK_FEATURE_LIFECYCLE_ANNOUNCEMENT)
       ) {
-        transport.send(makeLifecyclePreference({ enabled }));
+        const sent = transport.send(makeLifecyclePreference({ enabled }));
+        if (!sent) {
+          // 连接状态与 socket readyState 可能在 close 回调前短暂错位。偏好已经
+          // 持久化；主动重建连接，让下一次 hello 立即携带最新值，避免等待旧
+          // transport 的退避/回调后 server 继续沿用旧偏好。
+          log.warn('lifecycle preference send failed; reconnecting to resync persisted value');
+          stopSlack();
+          startSlack();
+        }
       }
       notifyStatus(toView());
     },
@@ -2350,7 +2361,7 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
       let sent = true;
       if (transport !== null && status === 'connected') {
         attempted = true;
-        sent = transport.send(makeHello(buildHello(SLACK_HELLO_FEATURES))) && sent;
+        sent = transport.send(makeHello(buildHello(SLACK_HELLO_FEATURES, true))) && sent;
       }
       for (const lane of lanes) {
         if (lane.transport !== null && lane.status === 'connected') {
