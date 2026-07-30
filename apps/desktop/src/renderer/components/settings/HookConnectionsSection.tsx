@@ -1110,7 +1110,7 @@ export function HookConnectionsSection() {
                   <Switch
                     checked={hook.lifecycleAnnouncement}
                     onCheckedChange={handleLifecycleAnnouncementToggle}
-                    aria-label={t('settings.remoteControl.hook.lifecycleAnnouncement.cellLabel')}
+                    aria-label={t('settings.remoteControl.hook.lifecycleAnnouncement.label')}
                   />
                 </div>
               </div>

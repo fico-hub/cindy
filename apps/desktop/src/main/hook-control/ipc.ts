@@ -77,6 +77,7 @@ import { validateTelegramExternalUrl } from './telegramDeepLink.js';
 import { isAppContentWindow } from '../windowFocusClassifier.js';
 import { assertTrustedAppRendererEvent } from '../security/trustedAppRenderer.js';
 import { getAgentIslandService } from '../agent-island/service.js';
+import { setLifecycleAnnouncementFromIpc } from './lifecycleAnnouncementIpc.js';
 
 const log = createLogger('hook-control');
 
@@ -496,8 +497,7 @@ export function registerHookControlIpc(): void {
       if (typeof p.enabled !== 'boolean') {
         throwIpcError('INVALID_PARAMS', 'enabled must be boolean');
       }
-      m.setLifecycleAnnouncement(p.enabled);
-      return { hook: m.snapshot() };
+      return setLifecycleAnnouncementFromIpc(m, p.enabled, log);
     },
   );
 

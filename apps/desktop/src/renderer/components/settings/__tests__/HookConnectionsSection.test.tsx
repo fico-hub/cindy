@@ -210,7 +210,7 @@ describe('HookConnectionsSection Telegram binding actions', () => {
 
     fireEvent.click(
       await screen.findByRole('switch', {
-        name: 'settings.remoteControl.hook.lifecycleAnnouncement.cellLabel',
+        name: 'settings.remoteControl.hook.lifecycleAnnouncement.label',
       }),
     );
 
