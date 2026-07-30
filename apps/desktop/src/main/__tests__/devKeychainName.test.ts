@@ -307,6 +307,11 @@ describe('isKeychainIdentityMarkerArtifact', () => {
   it('标记文件与 .tmp 半成品是机制自身产物,不构成「旧沙箱证据」', () => {
     expect(isKeychainIdentityMarkerArtifact('keychain-identity')).toBe(true);
     expect(isKeychainIdentityMarkerArtifact('keychain-identity.12345.tmp')).toBe(true);
+    expect(
+      isKeychainIdentityMarkerArtifact(
+        'keychain-identity.12345-8b3f2c1a-9d4e-4f6a-b7c8-0e1d2f3a4b5c.tmp',
+      ),
+    ).toBe(true);
     expect(isKeychainIdentityMarkerArtifact('cindy-user1.db')).toBe(false);
     expect(isKeychainIdentityMarkerArtifact('safe-storage')).toBe(false);
     expect(isKeychainIdentityMarkerArtifact('keychain-identity-notes.txt')).toBe(false);

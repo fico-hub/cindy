@@ -49,7 +49,7 @@ import { BRAND_IDENTITY } from '@cindy/maker-shared/brand-identity';
  */
 export const KEYCHAIN_IDENTITY_MARKER_FILE = 'keychain-identity';
 
-/** 该目录项是否属于身份标记机制自己的产物(最终标记 或 `<marker>.<pid>.tmp` 半成品)。 */
+/** 该目录项是否属于身份标记机制自己的产物(最终标记 或 `<marker>.<pid>-<uuid>.tmp` 半成品)。 */
 export function isKeychainIdentityMarkerArtifact(entryName: string): boolean {
   if (entryName === KEYCHAIN_IDENTITY_MARKER_FILE) return true;
   return (

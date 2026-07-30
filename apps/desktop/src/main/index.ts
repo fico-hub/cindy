@@ -2,6 +2,7 @@
 import fixPath from 'fix-path';
 import { app } from 'electron';
 import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import fs from 'node:fs';
 import { setDefaultAutoSelectFamilyAttemptTimeout } from 'node:net';
@@ -205,10 +206,14 @@ if (devFlags.userDataDirOverride) {
         // 父目录——link 既是排他认领(EEXIST = 输掉竞态)又保证可见即完整;fsync 保证
         // 标记先于后续任何 profile/凭证写入持久化,否则断电后「标记消失 + profile
         // 非空」会被下次启动判成旧沙箱、用错钥匙覆盖 CindyDev 密文(review 反馈)。
-        const tmpPath = `${keychainMarkerPath}.${process.pid}.tmp`;
+        // 临时文件名带随机成分且 'wx' 独占创建:仅 PID 后缀在 SMB 等多主机共享
+        // 目录上会撞名(两台机器同 PID),'w' 打开还会截断对方的 tmp——若对方已把
+        // 该 inode hard link 成最终标记,这里的重写会隔着共享 inode 改掉**已发布**
+        // 的标记内容,认领结果与盘上真值分叉(review 反馈 P1 第二十五轮)。
+        const tmpPath = `${keychainMarkerPath}.${process.pid}-${randomUUID()}.tmp`;
         try {
           fs.mkdirSync(devFlags.userDataDirOverride!, { recursive: true });
-          const fd = fs.openSync(tmpPath, 'w');
+          const fd = fs.openSync(tmpPath, 'wx');
           try {
             writeMarkerContentSync(fd, name);
             fs.fsyncSync(fd);
@@ -231,7 +236,7 @@ if (devFlags.userDataDirOverride) {
             try {
               fs.unlinkSync(tmpPath);
             } catch {
-              // 临时文件清理失败无害(pid 后缀不冲突)。
+              // 临时文件清理失败无害(随机后缀不冲突,残留会被 profileHasData 排除)。
             }
           }
           if (linkOutcome === null) {
