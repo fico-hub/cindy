@@ -9,15 +9,10 @@
  * 这里补的是**不可交互的文字提示**:卡片仍然只在桌面(不动既有设计边界),
  * IM 侧即时收到「有确认卡在桌面等你」。best-effort:提示失败绝不影响确认流程
  * (fire-and-forget,桥不等待、不感知失败)。
+ *
+ * 本文件只放纯逻辑(零 electron / db 依赖,单测直接引);生产接线在
+ * desktopConfirmNoticeWiring.ts(按 architecture-invariants §2 顶层静态 import)。
  */
-
-import { eq } from 'drizzle-orm';
-
-import { createLogger } from '../logger.js';
-import { getDbClient } from '../localDb/client/current.js';
-import { sessions } from '../localDb/schema.js';
-
-const log = createLogger('im-desktop-confirm-notice');
 
 export interface DesktopConfirmNoticeDeps {
   /** 会话绑定的飞书 openId;非飞书会话返回 null(桌面本来就是唯一交互面)。 */
@@ -26,7 +21,7 @@ export interface DesktopConfirmNoticeDeps {
   logWarn?(message: string): void;
 }
 
-/** 飞书目标解析的注入面(纯逻辑可单测;生产接线见 createFeishuDesktopConfirmNotifier)。 */
+/** 飞书目标解析的注入面(纯逻辑可单测;生产接线见 desktopConfirmNoticeWiring.ts)。 */
 export interface FeishuNoticeTargetDeps {
   /** bindingStore.findByTarget:/ctr 接管的普通会话,接管者身份在 binding 而非 session 行。 */
   findBinding(sessionId: string): { channel: string; userId: string } | null;
@@ -55,7 +50,7 @@ export function buildDesktopConfirmNoticeText(what: string): string {
 
 /**
  * 组装 fire-and-forget 通知函数(DI 便于单测;生产接线见
- * createFeishuDesktopConfirmNotifier)。
+ * desktopConfirmNoticeWiring.ts)。
  */
 export function createDesktopConfirmNotifier(
   deps: DesktopConfirmNoticeDeps,
@@ -73,37 +68,4 @@ export function createDesktopConfirmNotifier(
       }
     })();
   };
-}
-
-/** 生产接线:sessions 表反查 feishuOpenId + 复用 im/host 的 feishuIm 实例。 */
-export function createFeishuDesktopConfirmNotifier(): (sessionId: string, what: string) => void {
-  return createDesktopConfirmNotifier({
-    async getFeishuOpenId(sessionId) {
-      // 动态 import binding:与 im 编排层解耦,确认卡可能出现在 IM 从未启用的会话里。
-      const { bindingStore } = await import('./binding.js');
-      return resolveFeishuNoticeTarget(
-        {
-          findBinding: (id) => bindingStore.findByTarget(id),
-          getSessionOpenId: async (id) => {
-            const db = getDbClient().drizzle;
-            const [row] = await db
-              .select({ openId: sessions.feishuOpenId })
-              .from(sessions)
-              .where(eq(sessions.id, id))
-              .limit(1);
-            const openId = row?.openId?.trim();
-            return openId ? openId : null;
-          },
-        },
-        sessionId,
-      );
-    },
-    async sendFeishuText(openId, markdown) {
-      // 动态 import 避免模块加载期就拉起 im/host(它有连接副作用;确认卡可能在
-      // IM 从未启用的会话里出现,这时根本走不到 send)。
-      const { feishuIm } = await import('./host.js');
-      return feishuIm.sendMarkdownText(openId, markdown);
-    },
-    logWarn: (m) => log.warn(m),
-  });
 }
