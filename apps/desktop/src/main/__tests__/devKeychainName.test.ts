@@ -61,13 +61,33 @@ describe('resolveDevKeychainDecision', () => {
     // 'Cindy' 无换行 = O_EXCL 回退里 "CindyDev\n" 写到第 5 字节的并发读快照,
     // 也可能是完整默认标记缺了换行——两者读侧无法区分,统一按身份不确定 abort
     // (review 反馈 P1 第十八轮:只 trim 会把该前缀当完整默认身份接受,双身份分裂)。
-    for (const value of ['', 'SomethingElse', 'Cindy', 'CindyDev', 'SomethingElse\n']) {
+    // 剥离规则严格到恰好一个末尾换行:多余换行/空白被 trim 洗成合法身份会让
+    // 损坏/手改内容的判定不再确定(review 反馈第二十轮)。
+    for (const value of [
+      '',
+      'SomethingElse',
+      'Cindy',
+      'CindyDev',
+      'SomethingElse\n',
+      'CindyDev\n\n',
+      ' Cindy \n',
+      '\n',
+    ]) {
       const d = resolveDevKeychainDecision({
         ...base,
         io: io({ readMarker: () => ({ kind: 'present', value }) }),
       });
       expect(d.kind, JSON.stringify(value)).toBe('abort');
     }
+  });
+
+  it('Windows 编辑器手工修复(\r\n 结尾)按恰好一个换行剥离,照常接受', () => {
+    expect(
+      resolveDevKeychainDecision({
+        ...base,
+        io: io({ readMarker: () => ({ kind: 'present', value: 'CindyDev\r\n' }) }),
+      }),
+    ).toEqual({ kind: 'rename', appName: 'CindyDev' });
   });
 
   it('全新沙箱 → 原子认领成功后改名', () => {

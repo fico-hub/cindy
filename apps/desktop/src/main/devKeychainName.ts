@@ -125,7 +125,12 @@ function interpretMarker(
     // "CindyDev\n" 的前 5 字节恰是词表另一合法身份 "Cindy":只 trim 的话,并发读端
     // 会把写到一半的前缀当完整标记接受,一个 profile 分裂到两个钥匙串身份。无终止
     // 换行(半成品/损坏)落入下方「不可识别 → abort」的 fail-safe。
-    const complete = read.value.endsWith('\n') ? read.value.trim() : null;
+    // 剥离规则严格到**恰好一个**末尾换行(兼容 \r\n,照顾 Windows 编辑器的手工修复):
+    // "CindyDev\n\n" / " Cindy \n" 这类多余空白若被 trim 洗成合法身份,损坏/手改
+    // 内容的判定就不再确定(review 反馈第二十轮)——格式不精确一律按不可识别 abort。
+    const complete = read.value.endsWith('\n')
+      ? read.value.slice(0, -1).replace(/\r$/, '')
+      : null;
     if (complete === devName || complete === defaultName) {
       // 接受观察到的标记前先把它的目录项持久化:写入者可能尚未完成自己的 fsync,
       // 不 flush 就以该身份写密文,断电后会出现「密文在、标记丢」(review 反馈

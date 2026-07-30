@@ -96,6 +96,18 @@ describe('resolveDevCliFlags', () => {
     expect(sibling.isolatedDirIsEpochDerived).toBe(false);
   });
 
+  it('大小写折叠覆盖默认大小写不敏感平台(win32 与 darwin,#912 review P2 第二十轮)', () => {
+    // macOS 默认 APFS 与 NTFS 一样大小写不敏感——仅大小写不同的写法指向同一实际
+    // 目录,漏判会让空沙箱被观察模式抢注默认身份;linux 保持大小写敏感语义。
+    const caseFolded = process.platform === 'win32' || process.platform === 'darwin';
+    const flags = resolveDevCliFlags({
+      ...base,
+      envIsolated: '1',
+      envUserDataDir: '/AppData/XDT-Maker-DEV2',
+    });
+    expect(flags.isolatedDirIsEpochDerived).toBe(caseFolded);
+  });
+
   it('--isolated 默认沙箱:目录 <userData>-dev2,要求派生设备标识,无名字', () => {
     const flags = resolveDevCliFlags({ ...base, argv: [...base.argv, '--isolated'] });
     expect(flags.userDataDirOverride).toBe('/AppData/xdt-maker-dev2');

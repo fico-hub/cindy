@@ -194,9 +194,16 @@ export function resolveDevCliFlags(input: DevCliFlagsInput): DevCliFlags {
   // 字符串全等会把标准纪元目录的等价写法误判成"其它目录"→ 观察模式给空沙箱抢注
   // 默认身份标记,该沙箱**永久**回到共享 Cindy 钥匙串(#912 review P2 第十九轮)。
   // 误判方向的代价不对称:等价写法漏判丢隔离且不可逆;真不同目录本就不该命中。
+  // 大小写折叠覆盖默认大小写不敏感的平台:win32(NTFS)与 darwin(默认 APFS)——
+  // 后者正是钥匙串隔离的主要目标平台(#912 review P2 第二十轮)。刻意不探测目标卷
+  // 的真实语义:在少数大小写敏感卷上,折叠最多把"仅大小写不同的另一个目录"也标成
+  // 纪元目录——它同样是用户显式隔离指向的沙箱,标记机制仍自洽;反方向(默认卷上
+  // 漏判)则是永久丢隔离,代价不对称。
   const normalizeForEpochCompare = (p: string): string => {
     const resolved = resolve(p);
-    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+    return process.platform === 'win32' || process.platform === 'darwin'
+      ? resolved.toLowerCase()
+      : resolved;
   };
   const isolatedDirIsEpochDerived =
     isolated &&
