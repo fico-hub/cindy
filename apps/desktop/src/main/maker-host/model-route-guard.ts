@@ -104,7 +104,17 @@ export function checkModelRoute(
   if (!copyAgentSelectable(wouldRoute, modelId, agent)) {
     return { kind: 'reject', reason: 'capability-model' };
   }
-  if (!copyDisabled(wouldRoute, modelId, agent)) return { kind: 'pass' };
+  if (!copyDisabled(wouldRoute, modelId, agent)) {
+    // 推演落点是用户自定义来源时不能保持隐式:实际路由层(provider-route)对
+    // providerId null 只会回落**内置** spawn-aware 默认,不会替任意自定义模型推断
+    // 来源 —— 「pass 保持 null」会让会话落到默认网关,上游报 invalid model。
+    // scheduler 建的后台会话没有 renderer 选择器替它显式绑来源,正是这样断的
+    // (issue #1028)。改判 reroute,由调用方显式绑定该来源落库;内置 rail 的
+    // 隐式语义(spawn-aware 默认)不变。
+    return wouldRoute.source === 'user'
+      ? { kind: 'reroute', providerId: wouldRoute.id }
+      : { kind: 'pass' };
+  }
 
   // 原生默认落点被停用:解析一份启用且已连接的替代拷贝(effectiveSourceIdForModel
   // 走过滤后的 rail),且那份拷贝也必须是对话模型条目,有 ⇒ 显式改路由;

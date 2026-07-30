@@ -1,8 +1,9 @@
 /**
  * model-route-guard.test.ts —— 停用轴在 main 会话路由边界的三态裁决矩阵。
  * 纯函数直测(规则 14);register.ts 的 bootstrapSession / SET_MODEL / agent-switch
- * 只是薄接线。语义:pass = 不涉停用;reroute = 隐式默认落点被停用但有启用替代拷贝
- * (调用方以显式来源落地);reject = 显式点名停用来源 / 全部已连接拷贝停用。
+ * 只是薄接线。语义:pass = 不涉停用;reroute = 需要调用方以显式来源落地——隐式默认
+ * 落点被停用但有启用替代拷贝,或推演落点是用户自定义来源(实际路由层不会替它做
+ * 隐式推断,issue #1028);reject = 显式点名停用来源 / 全部已连接拷贝停用。
  */
 
 import { describe, expect, it } from 'vitest';
@@ -159,6 +160,35 @@ describe('checkModelRoute', () => {
     expect(checkModelRoute(v, 'claude-code', 'gpt-image-2', null)).toEqual({
       kind: 'reject',
       reason: 'capability-model',
+    });
+  });
+
+  it('模型仅用户自定义来源提供 + 隐式来源 ⇒ reroute 显式绑定该来源(issue #1028)', () => {
+    // provider-route 对 providerId null 只回落内置 spawn-aware 默认,不会替任意
+    // 自定义模型推断来源 —— pass 保持 null 会让会话落到默认网关,上游报
+    // invalid model。scheduler 建的后台会话没有 renderer 选择器替它显式绑来源,
+    // 正是这样断的。
+    const catalog = {
+      providers: [
+        provider('xd', [model('claude-opus-5')]),
+        provider('gpt', [model('gpt-5.6-terra', { group: 'custom:gpt' })], 'user'),
+      ],
+    } as Catalog;
+    const v = buildRegistry(catalog, { xd: true, gpt: true }, {});
+    expect(checkModelRoute(v, 'claude-code', 'gpt-5.6-terra', null)).toEqual({
+      kind: 'reroute',
+      providerId: 'gpt',
+    });
+    // 显式点名该来源照常 pass;内置默认可路由的模型隐式语义不变(spawn-aware 默认)。
+    expect(checkModelRoute(v, 'claude-code', 'gpt-5.6-terra', 'gpt')).toEqual({ kind: 'pass' });
+    expect(checkModelRoute(v, 'claude-code', 'claude-opus-5', null)).toEqual({ kind: 'pass' });
+    // 该用户拷贝被停用且无替代 ⇒ 仍按停用语义 reject,不因 user 来源改判。
+    const disabled = buildRegistry(catalog, { xd: true, gpt: true }, {}, {
+      disabledModels: { 'gpt:gpt-5.6-terra': true },
+    });
+    expect(checkModelRoute(disabled, 'claude-code', 'gpt-5.6-terra', null)).toEqual({
+      kind: 'reject',
+      reason: 'model-disabled',
     });
   });
 
