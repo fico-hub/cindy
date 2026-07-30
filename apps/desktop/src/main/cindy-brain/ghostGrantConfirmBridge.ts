@@ -72,6 +72,8 @@ export interface GhostGrantConfirmBridgeDeps {
   /** 确认超时,默认 10 分钟(对齐 permission prompt / issue 确认卡)。测试注小值。 */
   timeoutMs?: number;
   logger?: { warn: (...args: unknown[]) => void };
+  /** 同 IssueConfirmBridgeDeps.onDesktopOnlyConfirmPending(#926):IM 侧「去桌面确认」提示。 */
+  onDesktopOnlyConfirmPending?: (sessionId: string) => void;
 }
 
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
@@ -100,6 +102,7 @@ export class GhostGrantConfirmBridge {
         sessionId,
         request: { kind: 'ghost_grant_confirm', requestId, ...payload },
       });
+      this.deps.onDesktopOnlyConfirmPending?.(sessionId);
     });
   }
 

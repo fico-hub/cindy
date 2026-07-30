@@ -69,6 +69,12 @@ export interface IssueConfirmBridgeDeps {
   /** 确认超时,默认 10 分钟(对齐 permission prompt 的超时语义)。测试注小值。 */
   timeoutMs?: number;
   logger?: { warn: (...args: unknown[]) => void };
+  /**
+   * 确认卡已派发的回调(#926):确认卡有意只在桌面出现,IM 绑定会话的用户可能
+   * 人在 IM 侧看不到 —— 接线方在这里给 IM 发「去桌面确认」的文字提示。
+   * fire-and-forget,不得阻塞或影响确认流程。
+   */
+  onDesktopOnlyConfirmPending?: (sessionId: string) => void;
 }
 
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
@@ -116,6 +122,7 @@ export class IssueConfirmBridge {
           suggestedPublicName,
         },
       });
+      this.deps.onDesktopOnlyConfirmPending?.(sessionId);
     });
   }
 

@@ -30,6 +30,8 @@ export interface RenameSessionsConfirmBridgeDeps {
   broadcast: (channel: string, payload: unknown) => void;
   timeoutMs?: number;
   logger?: { warn: (...args: unknown[]) => void };
+  /** 同 IssueConfirmBridgeDeps.onDesktopOnlyConfirmPending(#926):IM 侧「去桌面确认」提示。 */
+  onDesktopOnlyConfirmPending?: (sessionId: string) => void;
 }
 
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
@@ -60,6 +62,7 @@ export class RenameSessionsConfirmBridge {
         sessionId,
         request: { kind: 'rename_sessions_confirm', requestId, changes },
       });
+      this.deps.onDesktopOnlyConfirmPending?.(sessionId);
     });
   }
 
