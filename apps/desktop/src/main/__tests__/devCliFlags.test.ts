@@ -96,16 +96,34 @@ describe('resolveDevCliFlags', () => {
     expect(sibling.isolatedDirIsEpochDerived).toBe(false);
   });
 
-  it('大小写折叠覆盖默认大小写不敏感平台(win32 与 darwin,#912 review P2 第二十轮)', () => {
-    // macOS 默认 APFS 与 NTFS 一样大小写不敏感——仅大小写不同的写法指向同一实际
-    // 目录,漏判会让空沙箱被观察模式抢注默认身份;linux 保持大小写敏感语义。
-    const caseFolded = process.platform === 'win32' || process.platform === 'darwin';
-    const flags = resolveDevCliFlags({
+  it('大小写判定交给文件系统真值:不敏感卷收敛同一目录,敏感卷保持不同(#912 review 第二十/二十一轮)', () => {
+    // 大小写不敏感卷(macOS 默认 APFS / NTFS):realpath 把等价写法收敛到磁盘真实
+    // 大小写 → 命中;大小写敏感卷:仅大小写不同的是另一个真实目录,标成纪元目录
+    // 会让不认标记的旧 checkout 与 CindyDev 身份互写密文 → 必须不命中。
+    const insensitiveVolume = (p: string) => p.toLowerCase();
+    const hit = resolveDevCliFlags({
+      ...base,
+      envIsolated: '1',
+      envUserDataDir: '/AppData/XDT-Maker-DEV2',
+      canonicalizePath: insensitiveVolume,
+    });
+    expect(hit.isolatedDirIsEpochDerived).toBe(true);
+    const sensitiveVolume = (p: string) => p;
+    const miss = resolveDevCliFlags({
+      ...base,
+      envIsolated: '1',
+      envUserDataDir: '/AppData/XDT-Maker-DEV2',
+      canonicalizePath: sensitiveVolume,
+    });
+    expect(miss.isolatedDirIsEpochDerived).toBe(false);
+    // 缺省实现对不存在的路径回退 path.resolve(不折叠大小写,保守方向):
+    // 首启的大小写变体写法不命中,落观察模式(单一身份,不会双身份互写)。
+    const firstLaunchVariant = resolveDevCliFlags({
       ...base,
       envIsolated: '1',
       envUserDataDir: '/AppData/XDT-Maker-DEV2',
     });
-    expect(flags.isolatedDirIsEpochDerived).toBe(caseFolded);
+    expect(firstLaunchVariant.isolatedDirIsEpochDerived).toBe(false);
   });
 
   it('--isolated 默认沙箱:目录 <userData>-dev2,要求派生设备标识,无名字', () => {

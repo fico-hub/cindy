@@ -14,7 +14,24 @@
  * 纯函数、零 electron 依赖 —— index.ts 注入 argv / env / 默认 userData 目录,
  * 便于单元测试。packaged 版本一律返回"无覆写",线上零影响。
  */
+import { realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+
+/**
+ * 纪元判定的缺省路径规范化:优先 realpath 的文件系统真值——大小写不敏感卷
+ * (macOS 默认 APFS / NTFS)上等价写法收敛到磁盘真实路径,大小写敏感卷上不同
+ * 目录保持不同,两个方向都不靠猜平台语义(#912 review 第十九/二十/二十一轮)。
+ * 路径尚不存在(首启)时回退 path.resolve:只归一尾斜杠与 './..' 段,不折叠
+ * 大小写——把不同目录误判成同一纪元会让不认标记的旧 checkout 与新身份互写
+ * 密文,比"等价写法首启漏判落观察模式"(单一身份,仅未隔离)更不可逆。
+ */
+function defaultCanonicalizePath(p: string): string {
+  try {
+    return realpathSync.native(p);
+  } catch {
+    return resolve(p);
+  }
+}
 
 /**
  * 沙箱名字白名单:字母数字下划线连字符、≤32。同时约束两件事——
@@ -28,6 +45,13 @@ export interface DevCliFlagsInput {
   isPackaged: boolean;
   /** 已显式设置的 XDT_USER_DATA_DIR;非空时优先于隔离模式的默认沙箱目录。 */
   envUserDataDir: string | undefined;
+  /**
+   * 纪元判定用的路径规范化钩子(注入以便单测模拟不同卷语义);缺省实现走
+   * fs.realpathSync.native(文件系统真值:大小写不敏感卷上返回磁盘真实大小写,
+   * 敏感卷上不同目录得到不同规范路径),路径不存在时回退 path.resolve(不做大小写
+   * 折叠,保守方向)。
+   */
+  canonicalizePath?: (p: string) => string;
   /** app.getPath('userData') 的默认值;隔离模式在其后缀 '-dev2[-<名字>]' 生成沙箱目录。 */
   defaultUserDataDir: string;
   /**
@@ -190,25 +214,18 @@ export function resolveDevCliFlags(input: DevCliFlagsInput): DevCliFlags {
   // profile,或会被无隔离/旧 checkout 启动形态打开的目录)则不标记——否则同一目录
   // 在「--isolated + 显式覆写」与「裸覆写 / 旧 checkout」两种受支持启动形态之间
   // 会被两种钥匙串身份轮流打开(#912 review P1 第十二轮)。
-  // 判等按规范化路径:尾斜杠 / '.' 段 / Windows 大小写差异都指向同一实际目录,
-  // 字符串全等会把标准纪元目录的等价写法误判成"其它目录"→ 观察模式给空沙箱抢注
-  // 默认身份标记,该沙箱**永久**回到共享 Cindy 钥匙串(#912 review P2 第十九轮)。
-  // 误判方向的代价不对称:等价写法漏判丢隔离且不可逆;真不同目录本就不该命中。
-  // 大小写折叠覆盖默认大小写不敏感的平台:win32(NTFS)与 darwin(默认 APFS)——
-  // 后者正是钥匙串隔离的主要目标平台(#912 review P2 第二十轮)。刻意不探测目标卷
-  // 的真实语义:在少数大小写敏感卷上,折叠最多把"仅大小写不同的另一个目录"也标成
-  // 纪元目录——它同样是用户显式隔离指向的沙箱,标记机制仍自洽;反方向(默认卷上
-  // 漏判)则是永久丢隔离,代价不对称。
-  const normalizeForEpochCompare = (p: string): string => {
-    const resolved = resolve(p);
-    return process.platform === 'win32' || process.platform === 'darwin'
-      ? resolved.toLowerCase()
-      : resolved;
-  };
+  // 判等按规范化路径:尾斜杠 / '.' 段 / 大小写不敏感卷上的大小写差异都指向同一
+  // 实际目录,字符串全等会把标准纪元目录的等价写法误判成"其它目录"→ 观察模式给
+  // 空沙箱抢注默认身份标记,该沙箱**永久**回到共享 Cindy 钥匙串(#912 review 第
+  // 十九/二十轮)。规范化交给 canonicalizePath(缺省 realpath 文件系统真值,见
+  // defaultCanonicalizePath 注释):不做平台性大小写折叠——大小写敏感卷上仅大小写
+  // 不同的是另一个真实目录,把它标成纪元目录会让不认标记的旧 checkout 与 CindyDev
+  // 身份对同一 profile 互写密文(#912 review P1 第二十一轮)。
+  const canonicalize = input.canonicalizePath ?? defaultCanonicalizePath;
   const isolatedDirIsEpochDerived =
     isolated &&
     userDataDirOverride !== null &&
-    normalizeForEpochCompare(userDataDirOverride) === normalizeForEpochCompare(epochDerivedDir);
+    canonicalize(userDataDirOverride) === canonicalize(epochDerivedDir);
   return {
     schedulerPassive: input.argv.includes('--passive') || input.envSchedulerPassive === '1',
     isolated,
