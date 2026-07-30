@@ -1661,67 +1661,30 @@ export class ClaudeCodeAgent extends BaseAgent {
     function onUpstreamResponseIdleTimeout(): void {
       if (closed || !turnInFlight) return;
       const idleMs = upstreamResponseIdleTimeoutMs;
-        const msSinceLast = upstreamResponseLastEventAt > 0
-          ? Date.now() - upstreamResponseLastEventAt
-          : null;
-        log.warn('upstream-response-idle watchdog tripped — interrupting current turn', {
-          idleMs,
-          sdkSessionId,
-          lastEventType: upstreamResponseLastEventType,
-          msSinceLastEvent: msSinceLast,
-          pendingToolIdsSize: pendingToolIds.size,
-          turnInFlight,
+      const msSinceLast = upstreamResponseLastEventAt > 0
+        ? Date.now() - upstreamResponseLastEventAt
+        : null;
+      log.warn('upstream-response-idle watchdog tripped — interrupting current turn', {
+        idleMs,
+        sdkSessionId,
+        lastEventType: upstreamResponseLastEventType,
+        msSinceLastEvent: msSinceLast,
+        pendingToolIdsSize: pendingToolIds.size,
+        turnInFlight,
+      });
+      // Bridge 消费兜底 (Codex review 3535664420 / 3536509277): 若 watchdog 在
+      // bridge /compact turn 内触发(大上下文压缩容易超 idle 阈值), 语义与用户 Stop
+      // 一致:取消整条 "compact → real user message" 序列。只 inputQueue.clear()
+      // 不够,因为 SDK 可能已经 eager-drain 了后续真实用户输入;只 q.interrupt()
+      // 也可能只中断当前 /compact turn,让已 drain 的真实消息继续跑。这里走与
+      // abort() 相同的 close-and-rebuild 路径,并保留 rewind resume point 给下一次
+      // send 重建。
+      if (queuedBridgeTurns > 0 || activeBridgeRewindResumeAt !== undefined) {
+        log.warn('upstream-idle watchdog fired during bridge — closing query and preserving rewind resume point', {
+          queuedBridgeTurns,
+          queuedInput: inputQueue.pending,
+          activeBridgeRewindResumeAt,
         });
-        // Bridge 消费兜底 (Codex review 3535664420 / 3536509277): 若 watchdog 在
-        // bridge /compact turn 内触发(大上下文压缩容易超 idle 阈值), 语义与用户 Stop
-        // 一致:取消整条 "compact → real user message" 序列。只 inputQueue.clear()
-        // 不够,因为 SDK 可能已经 eager-drain 了后续真实用户输入;只 q.interrupt()
-        // 也可能只中断当前 /compact turn,让已 drain 的真实消息继续跑。这里走与
-        // abort() 相同的 close-and-rebuild 路径,并保留 rewind resume point 给下一次
-        // send 重建。
-        if (queuedBridgeTurns > 0 || activeBridgeRewindResumeAt !== undefined) {
-          log.warn('upstream-idle watchdog fired during bridge — closing query and preserving rewind resume point', {
-            queuedBridgeTurns,
-            queuedInput: inputQueue.pending,
-            activeBridgeRewindResumeAt,
-          });
-          eventQueue.push({
-            type: 'error',
-            data: {
-              message:
-                `上游 API 单次响应已静默 ${Math.round(idleMs / 1000)}s, ` +
-                `已自动中断当前 turn 防止卡死。可以直接发下一条消息继续 ` +
-                `(已完成的 tool result 都保留)。`,
-              isTerminal: true,
-              reason: 'upstream_response_idle_timeout',
-              idleMs,
-              sdkSessionId,
-              lastEventType: upstreamResponseLastEventType,
-              msSinceLastEvent: msSinceLast,
-            },
-            source: 'claude-code',
-          });
-          queuedBridgeTurns = 0;
-          restoreBridgeAutoCompactSnapshot('upstream_response_idle_timeout');
-          autoCompactController?.onCompactCanceled('upstream_response_idle_timeout');
-          inputQueue.clear();
-          try {
-            inputQueue.end();
-          } catch (e) {
-            log.warn('upstream-idle watchdog during bridge: inputQueue.end threw', { error: String(e) });
-          }
-          canceledBridgeQueries.add(q);
-          try {
-            q.close();
-          } catch (e) {
-            log.warn('upstream-idle watchdog during bridge: q.close threw', { error: String(e) });
-          }
-          turnInFlight = false;
-          turnState.interruptRequested = false;
-          pendingToolIds.clear();
-          emitTurnBoundary('upstream_response_idle_timeout', takeBridgeSuppressedDoneData());
-          return;
-        }
         eventQueue.push({
           type: 'error',
           data: {
@@ -1738,20 +1701,57 @@ export class ClaudeCodeAgent extends BaseAgent {
           },
           source: 'claude-code',
         });
-        // 先关 turn-in-flight + 清 pending 再 interrupt: 这样 SDK drain 出 ResultMessage 时,
-        // translator 的 onTurnEnd 还会再清一次 (幂等), 但中间任何 message 都不会重新 arm timer。
+        queuedBridgeTurns = 0;
+        restoreBridgeAutoCompactSnapshot('upstream_response_idle_timeout');
+        autoCompactController?.onCompactCanceled('upstream_response_idle_timeout');
+        inputQueue.clear();
+        try {
+          inputQueue.end();
+        } catch (e) {
+          log.warn('upstream-idle watchdog during bridge: inputQueue.end threw', { error: String(e) });
+        }
+        canceledBridgeQueries.add(q);
+        try {
+          q.close();
+        } catch (e) {
+          log.warn('upstream-idle watchdog during bridge: q.close threw', { error: String(e) });
+        }
         turnInFlight = false;
+        turnState.interruptRequested = false;
         pendingToolIds.clear();
-        // watchdog 上面已推过带 reason 的 terminal error, interrupt 后 drain 出的
-        // is_error result 不能再触发 translator 的失败兜底(双 error banner)。
-        turnState.interruptRequested = true;
-        turnState.interruptGeneration = turnState.generation;
-        void q.interrupt().catch((e) => {
-          // interrupt 没发出去 → 不会有被打断的 result 来消费标记, 残留会错误
-          // 抑制下一真实 turn 的 is_error 兜底 —— 立即回收。
-          turnState.interruptRequested = false;
-          log.warn('upstream-response-idle watchdog: interrupt threw', { error: String(e) });
-        });
+        emitTurnBoundary('upstream_response_idle_timeout', takeBridgeSuppressedDoneData());
+        return;
+      }
+      eventQueue.push({
+        type: 'error',
+        data: {
+          message:
+            `上游 API 单次响应已静默 ${Math.round(idleMs / 1000)}s, ` +
+            `已自动中断当前 turn 防止卡死。可以直接发下一条消息继续 ` +
+            `(已完成的 tool result 都保留)。`,
+          isTerminal: true,
+          reason: 'upstream_response_idle_timeout',
+          idleMs,
+          sdkSessionId,
+          lastEventType: upstreamResponseLastEventType,
+          msSinceLastEvent: msSinceLast,
+        },
+        source: 'claude-code',
+      });
+      // 先关 turn-in-flight + 清 pending 再 interrupt: 这样 SDK drain 出 ResultMessage 时,
+      // translator 的 onTurnEnd 还会再清一次 (幂等), 但中间任何 message 都不会重新 arm timer。
+      turnInFlight = false;
+      pendingToolIds.clear();
+      // watchdog 上面已推过带 reason 的 terminal error, interrupt 后 drain 出的
+      // is_error result 不能再触发 translator 的失败兜底(双 error banner)。
+      turnState.interruptRequested = true;
+      turnState.interruptGeneration = turnState.generation;
+      void q.interrupt().catch((e) => {
+        // interrupt 没发出去 → 不会有被打断的 result 来消费标记, 残留会错误
+        // 抑制下一真实 turn 的 is_error 兜底 —— 立即回收。
+        turnState.interruptRequested = false;
+        log.warn('upstream-response-idle watchdog: interrupt threw', { error: String(e) });
+      });
     }
     function noteUpstreamResponseActivity(eventType: string): void {
       upstreamResponseLastEventType = eventType;
