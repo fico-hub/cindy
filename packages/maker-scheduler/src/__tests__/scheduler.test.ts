@@ -3956,3 +3956,41 @@ describe('Scheduler: attempt 生命周期状态机(#1016)', () => {
       vi.useRealTimers();
     }
   });
+
+  it('强制收口后迟到的 onTurnActive/onSessionBound 不留悬挂登记(#1016 review)', async () => {
+    vi.useFakeTimers();
+    try {
+      let ctxRef: FireContext | undefined;
+      const h = makeHarness({
+        runStallMs: 60_000,
+        runStallAbortGraceMs: 30_000,
+        runnerImpl: (_s, ctx) =>
+          new Promise<FireResult>(() => {
+            ctxRef = ctx;
+          }),
+      });
+      const sch = await h.scheduler.create({ ...baseInput, intervalMs: 3_600_000 });
+      h.clock.advance(3_600_000);
+      void h.scheduler.tick();
+      await vi.waitFor(() => expect(h.scheduler.getRuntimeSnapshot().slotsInUse).toBe(1));
+      h.clock.advance(60_001);
+      await vi.advanceTimersByTimeAsync(RUN_HEARTBEAT_INTERVAL_MS);
+      h.clock.advance(30_001);
+      await vi.advanceTimersByTimeAsync(RUN_HEARTBEAT_INTERVAL_MS);
+      await vi.waitFor(() => expect(h.scheduler.getRuntimeSnapshot().inFlight).toBe(0));
+      // attempt 已删并 reap:迟到的 turn-active / session-bound 上报必须整体 no-op,
+      // 不写 session 映射 / 绑定映射(悬挂登记会让下一次 begin 的不变量断言抛错)。
+      expect(() => ctxRef?.onTurnActive?.('sess-late-turn')).not.toThrow();
+      await ctxRef?.onSessionBound?.('sess-late-bind');
+      expect(h.scheduler.resolveInflightRunForSession('sess-late-turn')).toBeUndefined();
+      // 下一轮 fire 的 beginInflightAttempt 会跑 assertAttemptRegistryInvariants
+      // (含 bound-session / silenced 覆盖)——迟到写入若真落了账,这里会响亮抛错。
+      h.clock.advance(3_600_000);
+      void h.scheduler.tick();
+      await vi.waitFor(() => expect(h.scheduler.getRuntimeSnapshot().slotsInUse).toBe(1));
+      expect(sch.id).toBeTruthy();
+      await h.scheduler.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });

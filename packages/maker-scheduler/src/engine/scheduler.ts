@@ -1614,7 +1614,6 @@ export class Scheduler extends EventEmitter {
     }
   }
 
-  /** 在第一次 await 前同步登记一次槽位占用，并输出可配对的注册日志。 */
   /**
    * 阶段转移的唯一写入口(#1016):合法性由 attemptLifecycle 的显式转移表判定,
    * 非法转移**抛错**——「静默少做一件事」正是 #944 review 里同型出现四次的缺陷形态,
@@ -1705,8 +1704,21 @@ export class Scheduler extends EventEmitter {
         throw new Error(`scheduler invariant violated: session map entry without attempt (runId=${runId})`);
       }
     }
+    for (const runId of this.runIdToBoundSessionId.keys()) {
+      if (!this.inflightAttempts.has(runId)) {
+        throw new Error(
+          `scheduler invariant violated: bound-session map entry without attempt (runId=${runId})`,
+        );
+      }
+    }
+    for (const runId of this.silencedRuns) {
+      if (!this.inflightAttempts.has(runId)) {
+        throw new Error(`scheduler invariant violated: silenced mark without attempt (runId=${runId})`);
+      }
+    }
   }
 
+  /** 在第一次 await 前同步登记一次槽位占用，并输出可配对的注册日志。 */
   private beginInflightAttempt(
     input: Omit<SchedulerInflightRun, 'startedAt' | 'lastProgressAt'>,
   ): void {
@@ -2039,6 +2051,10 @@ export class Scheduler extends EventEmitter {
   private buildOnSessionBound(scheduleId: string, runId: string): (sessionId: string) => Promise<void> {
     return async (sessionId: string) => {
       if (!sessionId) return;
+      // 与 onTurnActive 同款迟到守卫:run 已被强制收口时不再写绑定映射(悬挂
+      // 登记会触发 begin 的不变量断言),也不再往已定案 failed 的 run 行补状态。
+      const attempt = this.inflightAttempts.get(runId);
+      if (!attempt || attempt.phase === 'finalizing') return;
       try {
         this.runIdToBoundSessionId.set(runId, sessionId);
         await this.storage.updateRun(runId, { sessionId });
@@ -2079,6 +2095,11 @@ export class Scheduler extends EventEmitter {
   private buildOnTurnActive(runId: string): (sessionId: string) => void {
     return (sessionId: string) => {
       if (!sessionId) return;
+      const attempt = this.inflightAttempts.get(runId);
+      // 迟到回调竞态同 onQueueWaitStart:强制收口删除 attempt 后 runner 的
+      // continuation 仍可能报 turn active,此时写映射会留下悬挂登记,被下一次
+      // begin 的 assertAttemptRegistryInvariants 当成缺陷抛错(codex review P1)。
+      if (!attempt || attempt.phase === 'finalizing') return;
       this.sessionIdToRunId.set(sessionId, runId);
       this.runIdToSessionId.set(runId, sessionId);
     };
