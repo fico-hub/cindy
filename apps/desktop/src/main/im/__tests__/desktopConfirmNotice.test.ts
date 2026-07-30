@@ -10,6 +10,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   buildDesktopConfirmNoticeText,
   createDesktopConfirmNotifier,
+  resolveFeishuNoticeTarget,
 } from '../desktopConfirmNotice.js';
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -65,5 +66,36 @@ describe('createDesktopConfirmNotifier', () => {
     notify2('s1', 'x');
     await flush();
     expect(sendFail).toHaveBeenCalled();
+  });
+});
+
+describe('resolveFeishuNoticeTarget(#1059 review P1)', () => {
+  it('/ctr 接管的普通会话:session 行无 feishuOpenId,以接管绑定的 userId 为准', async () => {
+    const openId = await resolveFeishuNoticeTarget(
+      {
+        findBinding: () => ({ channel: 'feishu', userId: 'ou_takeover' }),
+        getSessionOpenId: async () => null,
+      },
+      'desktop-session',
+    );
+    expect(openId).toBe('ou_takeover');
+  });
+
+  it('非飞书渠道的接管绑定不误用,回落 session 行;两者皆无 → null', async () => {
+    expect(
+      await resolveFeishuNoticeTarget(
+        {
+          findBinding: () => ({ channel: 'slack', userId: 'U123' }),
+          getSessionOpenId: async () => 'ou_native',
+        },
+        's1',
+      ),
+    ).toBe('ou_native');
+    expect(
+      await resolveFeishuNoticeTarget(
+        { findBinding: () => null, getSessionOpenId: async () => null },
+        's2',
+      ),
+    ).toBe(null);
   });
 });

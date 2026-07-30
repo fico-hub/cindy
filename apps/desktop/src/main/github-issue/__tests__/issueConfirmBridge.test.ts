@@ -241,3 +241,28 @@ describe('onDesktopOnlyConfirmPending(#926)', () => {
     expect(decision.confirmed).toBe(false);
   });
 });
+
+describe('onDesktopOnlyConfirmPending 抛错防护(#1059 review)', () => {
+  it('回调同步抛错被吞掉只 warn,确认流程照常走到超时收口', async () => {
+    const warn = vi.fn();
+    const bridge = new IssueConfirmBridge({
+      broadcast: () => {},
+      timeoutMs: 50,
+      logger: { warn },
+      onDesktopOnlyConfirmPending: () => {
+        throw new Error('notifier exploded');
+      },
+    });
+    const decision = await bridge.request(
+      's-throw',
+      { title: 't', body: 'b', type: 'bug' },
+      { appVersion: '0.0.0', platform: 'darwin', arch: 'arm64', osVersion: '1', region: 'cn' },
+      { kind: 'github-user', login: 'u' },
+    );
+    expect(decision.confirmed).toBe(false);
+    expect(warn).toHaveBeenCalledWith(
+      'onDesktopOnlyConfirmPending threw (ignored)',
+      expect.objectContaining({ sessionId: 's-throw' }),
+    );
+  });
+});

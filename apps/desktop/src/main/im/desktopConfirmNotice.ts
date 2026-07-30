@@ -26,6 +26,28 @@ export interface DesktopConfirmNoticeDeps {
   logWarn?(message: string): void;
 }
 
+/** 飞书目标解析的注入面(纯逻辑可单测;生产接线见 createFeishuDesktopConfirmNotifier)。 */
+export interface FeishuNoticeTargetDeps {
+  /** bindingStore.findByTarget:/ctr 接管的普通会话,接管者身份在 binding 而非 session 行。 */
+  findBinding(sessionId: string): { channel: string; userId: string } | null;
+  /** sessions 行的 feishuOpenId(飞书原生会话)。 */
+  getSessionOpenId(sessionId: string): Promise<string | null>;
+}
+
+/**
+ * 解析确认提示应发往的飞书 openId。优先接管绑定(review P1:/ctr 接管的普通
+ * desktop 会话,session 行的 feishuOpenId 为 null,接管者身份保存在 bindingStore),
+ * 其次才是飞书原生会话的 session 行;两者皆无 → null(非飞书场景,零动作)。
+ */
+export async function resolveFeishuNoticeTarget(
+  deps: FeishuNoticeTargetDeps,
+  sessionId: string,
+): Promise<string | null> {
+  const bound = deps.findBinding(sessionId);
+  if (bound?.channel === 'feishu' && bound.userId) return bound.userId;
+  return deps.getSessionOpenId(sessionId);
+}
+
 /** 提示文案(纯函数,便于单测锚定)。 */
 export function buildDesktopConfirmNoticeText(what: string): string {
   return `🔔 ${what}正在桌面端 Cindy 等待你的确认;超时将自动取消,如需继续请到桌面端操作。`;
@@ -57,14 +79,24 @@ export function createDesktopConfirmNotifier(
 export function createFeishuDesktopConfirmNotifier(): (sessionId: string, what: string) => void {
   return createDesktopConfirmNotifier({
     async getFeishuOpenId(sessionId) {
-      const db = getDbClient().drizzle;
-      const [row] = await db
-        .select({ openId: sessions.feishuOpenId })
-        .from(sessions)
-        .where(eq(sessions.id, sessionId))
-        .limit(1);
-      const openId = row?.openId?.trim();
-      return openId ? openId : null;
+      // 动态 import binding:与 im 编排层解耦,确认卡可能出现在 IM 从未启用的会话里。
+      const { bindingStore } = await import('./binding.js');
+      return resolveFeishuNoticeTarget(
+        {
+          findBinding: (id) => bindingStore.findByTarget(id),
+          getSessionOpenId: async (id) => {
+            const db = getDbClient().drizzle;
+            const [row] = await db
+              .select({ openId: sessions.feishuOpenId })
+              .from(sessions)
+              .where(eq(sessions.id, id))
+              .limit(1);
+            const openId = row?.openId?.trim();
+            return openId ? openId : null;
+          },
+        },
+        sessionId,
+      );
     },
     async sendFeishuText(openId, markdown) {
       // 动态 import 避免模块加载期就拉起 im/host(它有连接副作用;确认卡可能在
