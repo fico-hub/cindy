@@ -45,6 +45,7 @@ import {
 import { createLogger } from '../logger.js';
 import { throwIpcError, requireString, requireObject, requireEnum } from '../utils/ipcValidate.js';
 import { getRemoteClaudeEnv } from './claude-env.js';
+import { composeInstallFailureMessage } from './install-failure-message.js';
 import { serializeEnvBlock } from './env-block.js';
 import {
   addKeyToAgent,
@@ -414,10 +415,27 @@ export async function ensureRemoteAgentInstalledOrInstall(
       });
       if (!result.ready) {
         const baseMsg = result.error ?? 'install did not reach ready state';
-        // 拼上最近 install log 尾, 让 renderer toast 直接显示根因 (curl 403 / 网络等)。
-        const composedMsg = logTail.length > 0
-          ? `${baseMsg}\n${logTail.join('\n')}`
-          : baseMsg;
+        // 失败文案与「远端未安装」区分(issue #1023):失败主体是 Cindy 专用运行时;
+        // 远端 PATH 里若有用户系统级同名 CLI,顺带探测出来写进提示——用户的 codex
+        // 明明可用却被引导去「安装」,排查方向会被带偏。探测失败不影响主错误。
+        let systemBinPath: string | null = null;
+        try {
+          const bin = agentKind === 'codex' ? 'codex' : 'claude';
+          const probe = await host.exec(`command -v ${bin} 2>/dev/null || true`, {
+            timeoutMs: 5_000,
+            label: 'probe-system-agent',
+          });
+          const first = probe.stdout.trim().split('\n')[0]?.trim();
+          systemBinPath = first ? first : null;
+        } catch {
+          systemBinPath = null;
+        }
+        const composedMsg = composeInstallFailureMessage({
+          agentKind,
+          baseMsg,
+          logTail,
+          systemBinPath,
+        });
         log.warn('silent-install: failed (not ready)', { hostId, agentKind, error: composedMsg });
         broadcastSilentInstallStatus({ hostId, agentKind, phase: 'failed', message: composedMsg });
         throwIpcError('SSH_INSTALL_FAILED', composedMsg);
