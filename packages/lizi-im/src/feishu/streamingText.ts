@@ -26,6 +26,11 @@
 
 import { sendCardRaw, patchCardRaw, uploadImage, sendFile } from './outbound.js';
 import { buildMarkdownCardV2, buildMixedMarkdownCardV2 } from './cards.js';
+import {
+  FEISHU_CARD_TEXT_MAX_BYTES,
+  capMarkdownTailBytes,
+  splitMarkdownForCards,
+} from './cardSegments.js';
 import { getLog } from './moduleScope.js';
 import { messages as transportMessages } from './messages.js';
 import type { StreamingTextHandle } from '../types.js';
@@ -140,6 +145,13 @@ class FeishuStreamingTextHandle implements StreamingTextHandle {
     if (klass === 'image-only') text = transportMessages.streaming.preparingImage;
     else if (klass === 'file-only') text = transportMessages.streaming.preparingFile;
     else text = stripXdtForStreaming(this.buffer);
+    // 超限中间帧截尾展示(直播视图尾部信息量最大):不截会被飞书 API 整帧拒收,
+    // 后续每个 1.5s 节流帧都失败,卡片停在旧内容上(issue #924)。
+    text = capMarkdownTailBytes(
+      text,
+      FEISHU_CARD_TEXT_MAX_BYTES,
+      transportMessages.streaming.liveTrimmedNotice,
+    );
     const log = getLog();
     this.inFlight = (async () => {
       try {
@@ -259,8 +271,49 @@ class FeishuStreamingTextHandle implements StreamingTextHandle {
     //    b) text + images (markdown 内联 OR tool_result 追加) → mixed elements card
     //    c) empty text + only files → "🎉 N 个文件已送达" placeholder
     //    d) totally empty → fallback "(空回复)"
+    //    e) 超长文本 → 分条:原卡放第 1 段 + 提示,其余段按序追发新卡,图片元素
+    //       随其 xdt 引用所在的段渲染,tool_result 追加图挂在最后一段(issue #924)。
     const hasAnyImage = imageUrls.length > 0 || extraImageKeys.length > 0;
     try {
+      const segments = splitMarkdownForCards(cardText, FEISHU_CARD_TEXT_MAX_BYTES);
+      if (segments.length > 1) {
+        log.info(
+          `[feishu/streamingText] long reply split into ${segments.length} cards (${Buffer.byteLength(cardText, 'utf8')} bytes)`,
+        );
+        await patchCardRaw(
+          this.messageId,
+          buildMixedMarkdownCardV2(
+            segments[0] + transportMessages.streaming.longReplyMore(segments.length - 1),
+            imageMap,
+            [],
+          ),
+        );
+        // 顺序追发,保持阅读顺序;单段失败继续后续段,结尾统一提示不完整。
+        let failed = 0;
+        for (let i = 1; i < segments.length; i++) {
+          const isLast = i === segments.length - 1;
+          const body =
+            transportMessages.streaming.longReplySegment(i + 1, segments.length) + segments[i];
+          try {
+            await sendCardRaw(
+              this.openId,
+              buildMixedMarkdownCardV2(body, imageMap, isLast ? extraImageKeys : []),
+            );
+          } catch (err) {
+            failed += 1;
+            const msg = err instanceof Error ? err.message : String(err);
+            log.warn(`[feishu/streamingText] long-reply segment ${i + 1} send failed: ${msg}`);
+          }
+        }
+        if (failed > 0) {
+          await sendCardRaw(
+            this.openId,
+            buildMarkdownCardV2(transportMessages.streaming.deliveryFailed),
+          ).catch(() => undefined);
+        }
+        this.flushed = this.buffer;
+        return;
+      }
       let card: unknown;
       if (cardTextTrimmed.length === 0 && !hasAnyImage && fileLinks.length > 0) {
         card = buildMarkdownCardV2(transportMessages.streaming.fileSentDone(fileLinks.length));
@@ -277,6 +330,13 @@ class FeishuStreamingTextHandle implements StreamingTextHandle {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.warn(`[feishu/streamingText] finalize patch failed: ${msg}`);
+      // 终态兜底:不能让卡片静默停在旧的流式中间帧上(用户以为没有回复)。
+      // 占位卡也发不出去时只剩 warn 日志 —— 已尽力。
+      try {
+        await patchCardRaw(this.messageId, buildMarkdownCardV2(transportMessages.streaming.deliveryFailed));
+      } catch {
+        /* 双重失败:保持日志,不再重试 */
+      }
     }
   }
 }

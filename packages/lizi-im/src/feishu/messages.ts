@@ -44,6 +44,19 @@ export const messages = {
     },
     /** Finalize: card text empty AND no files (rare — agent emitted nothing useful). */
     emptyReply: '_(空回复)_',
+    /** Intermediate frame trimmed to fit card limit (long reply still streaming). */
+    liveTrimmedNotice: '_…(前文过长,此处省略,完整内容将分条送达)_\n\n',
+    /** First card's tail marker when a long reply is split across multiple cards. */
+    longReplyMore(rest: number): string {
+      return `\n\n⬇️ _回复较长,剩余内容分 ${rest} 条消息发送_`;
+    },
+    /** Continuation card header (i is 2-based position, n is total segments). */
+    longReplySegment(i: number, n: number): string {
+      return `_(长回复 ${i}/${n})_\n\n`;
+    },
+    /** Finalize failed终态兜底 — card would otherwise silently keep the stale frame. */
+    deliveryFailed:
+      '⚠️ 本条回复未能完整送达飞书(可能超出消息上限),请在桌面端 Cindy 查看完整内容。',
   },
 } as const;
 
