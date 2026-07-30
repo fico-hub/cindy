@@ -14,7 +14,7 @@
  * 纯函数、零 electron 依赖 —— index.ts 注入 argv / env / 默认 userData 目录,
  * 便于单元测试。packaged 版本一律返回"无覆写",线上零影响。
  */
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 /**
  * 沙箱名字白名单:字母数字下划线连字符、≤32。同时约束两件事——
@@ -190,7 +190,18 @@ export function resolveDevCliFlags(input: DevCliFlagsInput): DevCliFlags {
   // profile,或会被无隔离/旧 checkout 启动形态打开的目录)则不标记——否则同一目录
   // 在「--isolated + 显式覆写」与「裸覆写 / 旧 checkout」两种受支持启动形态之间
   // 会被两种钥匙串身份轮流打开(#912 review P1 第十二轮)。
-  const isolatedDirIsEpochDerived = isolated && userDataDirOverride === epochDerivedDir;
+  // 判等按规范化路径:尾斜杠 / '.' 段 / Windows 大小写差异都指向同一实际目录,
+  // 字符串全等会把标准纪元目录的等价写法误判成"其它目录"→ 观察模式给空沙箱抢注
+  // 默认身份标记,该沙箱**永久**回到共享 Cindy 钥匙串(#912 review P2 第十九轮)。
+  // 误判方向的代价不对称:等价写法漏判丢隔离且不可逆;真不同目录本就不该命中。
+  const normalizeForEpochCompare = (p: string): string => {
+    const resolved = resolve(p);
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  };
+  const isolatedDirIsEpochDerived =
+    isolated &&
+    userDataDirOverride !== null &&
+    normalizeForEpochCompare(userDataDirOverride) === normalizeForEpochCompare(epochDerivedDir);
   return {
     schedulerPassive: input.argv.includes('--passive') || input.envSchedulerPassive === '1',
     isolated,

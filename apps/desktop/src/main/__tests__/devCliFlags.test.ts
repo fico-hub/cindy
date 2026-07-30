@@ -74,6 +74,28 @@ describe('resolveDevCliFlags', () => {
     expect(notIsolated.isolatedDirIsEpochDerived).toBe(false);
   });
 
+  it('纪元判定按规范化路径:尾斜杠 / "." 段的等价写法同样命中(#912 review P2 第十九轮)', () => {
+    // 字符串全等会把标准纪元目录的等价写法误判成"其它目录"→ 观察模式给空沙箱
+    // 抢注默认身份标记,该沙箱永久回到共享 Cindy 钥匙串。
+    for (const dir of [
+      '/AppData/xdt-maker-dev2/',
+      '/AppData/./xdt-maker-dev2',
+      '/AppData/other/../xdt-maker-dev2',
+    ]) {
+      const flags = resolveDevCliFlags({ ...base, envIsolated: '1', envUserDataDir: dir });
+      expect(flags.isolatedDirIsEpochDerived, dir).toBe(true);
+      // 覆写值本身保持原样传递(app.setPath 消化),只有判等做规范化。
+      expect(flags.userDataDirOverride, dir).toBe(dir);
+    }
+    // 真正的不同目录(前缀相同的兄弟目录)不受规范化影响,仍不命中。
+    const sibling = resolveDevCliFlags({
+      ...base,
+      envIsolated: '1',
+      envUserDataDir: '/AppData/xdt-maker-dev2-extra',
+    });
+    expect(sibling.isolatedDirIsEpochDerived).toBe(false);
+  });
+
   it('--isolated 默认沙箱:目录 <userData>-dev2,要求派生设备标识,无名字', () => {
     const flags = resolveDevCliFlags({ ...base, argv: [...base.argv, '--isolated'] });
     expect(flags.userDataDirOverride).toBe('/AppData/xdt-maker-dev2');
