@@ -18,6 +18,7 @@ import { randomUUID } from 'node:crypto';
 
 import {
   HOOK_FEATURE_GROUP_RELAY,
+  HOOK_FEATURE_LIFECYCLE_ANNOUNCEMENT,
   HOOK_FEATURE_MULTI_TEAM,
   HOOK_FEATURE_PROVIDER_BIND,
   HOOK_FEATURE_PROVIDER_PREFS,
@@ -27,6 +28,7 @@ import {
   makeBindRevoke,
   makeBindStart,
   makeHello,
+  makeLifecyclePreference,
   makePrefsGet,
   makePrefsSet,
   makeProviderBindCancel,
@@ -63,7 +65,11 @@ import type {
   HookTeamBindingView,
   SlackHookView,
 } from '../../shared/hookControlIpc.js';
-import type { ProviderBindingCacheEntry, SlackHookStore } from './store.js';
+import {
+  DEFAULT_SLACK_LIFECYCLE_ANNOUNCEMENT,
+  type ProviderBindingCacheEntry,
+  type SlackHookStore,
+} from './store.js';
 import type { HookDispatcher } from './dispatcher.js';
 import { buildQueryResponse, type AgentModelSource } from './queryResponder.js';
 import { recordGroupMessage, sweepGroupWindowExpired } from './groupWindow.js';
@@ -200,6 +206,8 @@ export interface HookControlManager {
   refreshHello(): boolean;
   /** 渲染层快照。 */
   snapshot(): SlackHookView;
+  /** 持久化并尽力实时同步 Slack 上下线通知偏好。 */
+  setLifecycleAnnouncement(enabled: boolean): void;
   /**
    * 发起 Slack 账号绑定(SIWS OIDC): 发 bind.start(无参); server 回
    * bind.update(pending, authorizeUrl), main 打开系统浏览器。false = 连接不在线。
@@ -740,6 +748,10 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
     return lane.config.requiredFeatures.every((f) => lane.serverFeatures.includes(f));
   }
 
+  function lifecycleAnnouncementEnabled(): boolean {
+    return store.get().lifecycleAnnouncementOverride ?? DEFAULT_SLACK_LIFECYCLE_ANNOUNCEMENT;
+  }
+
   function dispatchId(provider: HookProvider): string {
     const account = getAccountFingerprint?.() ?? 'no-account';
     return `${id}:${account}:${provider}`;
@@ -936,6 +948,8 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
     const config = store.get();
     return {
       enabled: config.enabled,
+      lifecycleAnnouncement:
+        config.lifecycleAnnouncementOverride ?? DEFAULT_SLACK_LIFECYCLE_ANNOUNCEMENT,
       url: store.effectiveUrl(),
       workspaces: { ...config.workspaces },
       status: toViewStatus(status, config.enabled),
@@ -1501,6 +1515,9 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
       // 每条连接只声明其服务会实际使用的能力，避免把 provider-neutral wire 误投
       // 到 Slack 服务，也保持老 Slack hello 的兼容面最小。
       features: [...features],
+      ...(features === SLACK_HELLO_FEATURES
+        ? { lifecycleAnnouncement: lifecycleAnnouncementEnabled() }
+        : {}),
     };
   }
 
@@ -2171,6 +2188,15 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
         // server 能力集以最新一次握手为准(重连可能落到另一版本实例)
         serverFeatures = [...payload.features];
         serverWelcomeReceived = true;
+        // hello 发出后、welcome 返回前用户仍可能切换设置。能力协商完成时
+        // 补发当前有效值，避免 server 留在 hello 携带的旧快照。
+        if (serverFeatures.includes(HOOK_FEATURE_LIFECYCLE_ANNOUNCEMENT)) {
+          created.send(
+            makeLifecyclePreference({
+              enabled: lifecycleAnnouncementEnabled(),
+            }),
+          );
+        }
         // 落回老 server(无 multi-team): 多绑定列表与缓存作废 —— 老 server 是
         // 单绑定权威(它会经 bind.update 推现状), 残留的多绑定行会让 toView
         // 误走 multi 映射、渲染层误开列表 UI。pendingBind 无条件清: 滚动发布
@@ -2308,6 +2334,17 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
       notifyStatus(toView());
     },
     snapshot: () => toView(),
+    setLifecycleAnnouncement(enabled) {
+      store.setLifecycleAnnouncementOverride(enabled);
+      if (
+        transport !== null &&
+        status === 'connected' &&
+        serverFeatures.includes(HOOK_FEATURE_LIFECYCLE_ANNOUNCEMENT)
+      ) {
+        transport.send(makeLifecyclePreference({ enabled }));
+      }
+      notifyStatus(toView());
+    },
     refreshHello() {
       let attempted = false;
       let sent = true;

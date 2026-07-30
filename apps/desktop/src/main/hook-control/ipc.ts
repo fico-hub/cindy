@@ -53,6 +53,7 @@ import {
   type SlackHookView,
 } from '../../shared/hookControlIpc.js';
 import {
+  DEFAULT_SLACK_LIFECYCLE_ANNOUNCEMENT,
   createSlackHookStore,
   HookConnectionValidationError,
   type SlackHookStore,
@@ -104,6 +105,7 @@ function requireHookControl(): void {
 function disabledHookView(): SlackHookView {
   return {
     enabled: false,
+    lifecycleAnnouncement: DEFAULT_SLACK_LIFECYCLE_ANNOUNCEMENT,
     url: getClientEndpoint('slackHookWsUrl'),
     workspaces: {},
     status: 'disabled',
@@ -484,6 +486,20 @@ export function registerHookControlIpc(): void {
     m.setProviderEnabled('slack', p.enabled);
     return { hook: m.snapshot() };
   });
+
+  registerTrustedHookControlHandler(
+    HOOK_CONTROL_INVOKE.SET_LIFECYCLE_ANNOUNCEMENT,
+    (_e, payload) => {
+      requireHookControl();
+      const { manager: m } = ensureInstances();
+      const p = requireObject(payload);
+      if (typeof p.enabled !== 'boolean') {
+        throwIpcError('INVALID_PARAMS', 'enabled must be boolean');
+      }
+      m.setLifecycleAnnouncement(p.enabled);
+      return { hook: m.snapshot() };
+    },
+  );
 
   registerTrustedHookControlHandler(HOOK_CONTROL_INVOKE.SET_PROVIDER_ENABLED, (_e, payload) => {
     requireHookControl();

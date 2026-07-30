@@ -9,6 +9,7 @@ const ipc = vi.hoisted(() => ({
   get: vi.fn(),
   onStatusChanged: vi.fn<(listener: (view: SlackHookView) => void) => () => void>(() => () => {}),
   setEnabled: vi.fn(),
+  setLifecycleAnnouncement: vi.fn(),
   providerBindStart: vi.fn(),
   providerBindCancel: vi.fn(),
   providerBindRevoke: vi.fn(),
@@ -84,6 +85,7 @@ const TELEGRAM_CARD = /settings\.tina\.prefs\.providerTelegram/;
 
 const BASE_HOOK: SlackHookView = {
   enabled: false,
+  lifecycleAnnouncement: false,
   url: 'wss://im.example.test',
   workspaces: {},
   status: 'disabled',
@@ -108,6 +110,7 @@ describe('HookConnectionsSection Telegram binding actions', () => {
     vi.clearAllMocks();
     ipc.onStatusChanged.mockReturnValue(() => {});
     ipc.setEnabled.mockResolvedValue({ hook: BASE_HOOK });
+    ipc.setLifecycleAnnouncement.mockResolvedValue({ hook: BASE_HOOK });
     ipc.providerBindRevoke.mockResolvedValue({ hook: BASE_HOOK });
     ipc.revokeTeam.mockResolvedValue({ hook: BASE_HOOK });
     ipc.openTelegramAction.mockResolvedValue(undefined);
@@ -117,6 +120,7 @@ describe('HookConnectionsSection Telegram binding actions', () => {
         get: ipc.get,
         onStatusChanged: ipc.onStatusChanged,
         setEnabled: ipc.setEnabled,
+        setLifecycleAnnouncement: ipc.setLifecycleAnnouncement,
         providerBindStart: ipc.providerBindStart,
         providerBindCancel: ipc.providerBindCancel,
         providerBindRevoke: ipc.providerBindRevoke,
@@ -178,6 +182,39 @@ describe('HookConnectionsSection Telegram binding actions', () => {
     expect(workspacePrefsEditor.render).toHaveBeenCalledWith(
       expect.objectContaining({ alias: 'chat', maxVisibleModelRows: undefined }),
     );
+  });
+
+  it('shows the lifecycle notification switch only after Slack is bound and persists changes', async () => {
+    const boundHook: SlackHookView = {
+      ...BASE_HOOK,
+      enabled: true,
+      status: 'connected',
+      binding: {
+        state: 'confirmed',
+        slackUserId: 'U1',
+        slackUserName: 'alice',
+        message: null,
+        authorizeUrl: null,
+        reason: null,
+        installUrl: null,
+        teamName: 'Acme',
+      },
+    };
+    ipc.get.mockResolvedValue({ hook: boundHook });
+    ipc.setLifecycleAnnouncement.mockResolvedValue({
+      hook: { ...boundHook, lifecycleAnnouncement: true },
+    });
+
+    render(<HookConnectionsSection />);
+    await expandChannelCard(SLACK_CARD);
+
+    fireEvent.click(
+      await screen.findByRole('switch', {
+        name: 'settings.remoteControl.hook.lifecycleAnnouncement.cellLabel',
+      }),
+    );
+
+    await waitFor(() => expect(ipc.setLifecycleAnnouncement).toHaveBeenCalledWith(true));
   });
 
   it('offers an explicit link action when Telegram is enabled but unbound', async () => {

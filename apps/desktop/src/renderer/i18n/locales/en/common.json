@@ -2179,6 +2179,11 @@
         "slackDescription": "Bind Slack workspaces and hand tasks to Cindy from Slack.",
         "slackDisabledHint": "Turn on the switch to start Slack authorization; once bound you can dispatch tasks from Slack.",
         "slackBoundHint": "Binding complete. Turning the switch off unbinds this device; turning it back on requires authorizing again.",
+        "lifecycleAnnouncement": {
+          "label": "Online/Offline Notifications",
+          "cellLabel": "Message Notifications",
+          "hint": "Have the Slack Bot send a message when this device goes online or offline"
+        },
         "toggleAria": "Toggle the Slack connection",
         "installApp": "Install Slack App",
         "status": {

@@ -291,6 +291,13 @@ export function HookConnectionsSection() {
     [applyView, t],
   );
 
+  const handleLifecycleAnnouncementToggle = useCallback(
+    (enabled: boolean) => {
+      runHookAction(() => window.electronAPI.hookControl.setLifecycleAnnouncement(enabled));
+    },
+    [runHookAction],
+  );
+
   // "等安装"确认框: binding 转入 failed + not-installed(且开关开着)时弹一次 ——
   // 确认则打开安装授权页(装完 server 自动补完绑定、推 confirmed, 免二次授权);
   // 取消则关回开关(无事发生; main 的关分支会发 bind.revoke, 作废 server 侧
@@ -657,6 +664,9 @@ export function HookConnectionsSection() {
       ? t('settings.remoteControl.hook.loginRequired')
       : telegram.lastError;
   const workdirCount = Object.keys(hook.workspaces).length;
+  const hasActiveSlackBinding = multiUi
+    ? activeTeams.length > 0
+    : hook.binding?.state === 'confirmed';
 
   /**
    * 工作目录映射区块(渲染进每张渠道卡的展开区): 目录清单是设备级共享的
@@ -1079,6 +1089,32 @@ export function HookConnectionsSection() {
             <span className="text-11 leading-relaxed text-[var(--text-tertiary)]">
               {t('settings.remoteControl.hook.slackBoundHint')}
             </span>
+          ) : null}
+
+          {hasActiveSlackBinding ? (
+            <>
+              <div className="h-px w-full bg-[var(--border-default)]" />
+              <div className="flex flex-col gap-1.5">
+                <span className="text-12 font-medium text-[var(--text-secondary)]">
+                  {t('settings.remoteControl.hook.lifecycleAnnouncement.label')}
+                </span>
+                <div className="flex items-center justify-between gap-3 rounded-xl border border-[var(--border-default)] px-3 py-2.5">
+                  <div className="flex min-w-0 flex-col gap-0.5">
+                    <span className="text-13 text-[var(--text-primary)]">
+                      {t('settings.remoteControl.hook.lifecycleAnnouncement.cellLabel')}
+                    </span>
+                    <span className="text-11 leading-relaxed text-[var(--text-tertiary)]">
+                      {t('settings.remoteControl.hook.lifecycleAnnouncement.hint')}
+                    </span>
+                  </div>
+                  <Switch
+                    checked={hook.lifecycleAnnouncement}
+                    onCheckedChange={handleLifecycleAnnouncementToggle}
+                    aria-label={t('settings.remoteControl.hook.lifecycleAnnouncement.cellLabel')}
+                  />
+                </div>
+              </div>
+            </>
           ) : null}
 
           {/* 工作目录映射(清单共享, 偏好取 Slack 那份) */}

@@ -2178,6 +2178,11 @@
         "slackDescription": "绑定 Slack workspace，在 Slack 里 @Cindy 派发任务。",
         "slackDisabledHint": "打开开关即发起 Slack 授权，绑定完成后即可在 Slack 里派活。",
         "slackBoundHint": "已完成绑定。关闭开关将解除绑定，重新打开需再次授权。",
+        "lifecycleAnnouncement": {
+          "label": "上下线通知",
+          "cellLabel": "消息通知",
+          "hint": "设备上下线时由 Slack Bot 发送通知消息"
+        },
         "toggleAria": "切换 Slack 连接的启用状态",
         "installApp": "安装 Slack App",
         "status": {

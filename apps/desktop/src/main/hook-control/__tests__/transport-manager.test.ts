@@ -13,6 +13,7 @@ import { WebSocketServer, type WebSocket as ServerSocket } from 'ws';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  HOOK_FEATURE_LIFECYCLE_ANNOUNCEMENT,
   HOOK_FEATURE_MULTI_TEAM,
   HOOK_FEATURE_PROVIDER_BIND,
   HOOK_FEATURE_PROVIDER_PREFS,
@@ -58,6 +59,7 @@ function memoryStore(initial: Partial<SlackHookConfigState> & { url: string }): 
     urlOverride: initial.url,
     workspaces: initial.workspaces ?? {},
     bindingsCache: initial.bindingsCache ?? [],
+    lifecycleAnnouncementOverride: initial.lifecycleAnnouncementOverride ?? null,
     telegramBindingCache: initial.telegramBindingCache ?? null,
   };
   return {
@@ -85,6 +87,10 @@ function memoryStore(initial: Partial<SlackHookConfigState> & { url: string }): 
     },
     setBindingsCache(entries) {
       state = { ...state, bindingsCache: entries.map((e) => ({ ...e })) };
+      return state;
+    },
+    setLifecycleAnnouncementOverride(enabled) {
+      state = { ...state, lifecycleAnnouncementOverride: enabled };
       return state;
     },
     setTelegramBindingCache(entry) {
@@ -474,6 +480,7 @@ describe('hook-control transport + manager(真实 ws server)', () => {
     const hello = await server.waitFor('hello');
     if (hello.type !== 'hello') throw new Error('unreachable');
     expect(hello.payload.deviceId).toBe('dev-1');
+    expect(hello.payload.lifecycleAnnouncement).toBe(false);
     // 内置「对话」伪目录 chat 恒在清单第一位, 真实别名跟在后面
     expect(hello.payload.workspaces[0]).toBe('chat');
     expect([...hello.payload.workspaces].sort()).toEqual(['blog', 'chat', 'xdmaker']);
@@ -512,6 +519,40 @@ describe('hook-control transport + manager(真实 ws server)', () => {
       result: 'rejected',
       reason: 'disabled',
     });
+  });
+
+  it('上下线通知偏好随 hello 上报，并在能力协商后实时更新', async () => {
+    const { wss, url } = await startServer();
+    const store = memoryStore({ url });
+    const manager = makeManager(store);
+    cleanups.push(() => manager.dispose());
+
+    const connPromise = once(wss, 'connection') as Promise<[ServerSocket]>;
+    manager.sync();
+    const [sock] = await connPromise;
+    const server = collectFrames(sock);
+
+    const hello = await server.waitFor('hello');
+    if (hello.type !== 'hello') throw new Error('unreachable');
+    expect(hello.payload.lifecycleAnnouncement).toBe(false);
+
+    // 模拟 hello 已发送、welcome 尚未返回时切换。welcome 能力协商完成后
+    // 必须补发最新值，不能让 server 永久停留在 hello 的旧快照。
+    manager.setLifecycleAnnouncement(true);
+    sock.send(
+      serializeHookMessage(
+        makeWelcome({
+          serverName: 'mock',
+          features: [HOOK_FEATURE_LIFECYCLE_ANNOUNCEMENT],
+        }),
+      ),
+    );
+    const preference = await server.waitFor('lifecycle.preference');
+    if (preference.type !== 'lifecycle.preference') throw new Error('unreachable');
+    expect(preference.payload.enabled).toBe(true);
+    await expect.poll(() => manager.snapshot().status, { timeout: 3000 }).toBe('connected');
+    expect(store.get().lifecycleAnnouncementOverride).toBe(true);
+    expect(manager.snapshot().lifecycleAnnouncement).toBe(true);
   });
 
   it('未登录(token=null): 不发起连接, 状态 error + not logged in', async () => {
