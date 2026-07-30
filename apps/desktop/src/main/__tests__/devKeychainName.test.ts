@@ -23,7 +23,7 @@ import {
 } from '../devKeychainName.js';
 
 const ABSENT: KeychainMarkerRead = { kind: 'absent' };
-const DEV: KeychainMarkerRead = { kind: 'present', value: 'CindyDev' };
+const DEV: KeychainMarkerRead = { kind: 'present', value: 'CindyDev\n' };
 
 function io(overrides: Partial<KeychainIdentityIo>): KeychainIdentityIo {
   return {
@@ -57,8 +57,11 @@ describe('resolveDevKeychainDecision', () => {
     expect(d.kind).toBe('abort');
   });
 
-  it('标记内容为空或不可识别 → abort(身份不确定)', () => {
-    for (const value of ['', 'SomethingElse']) {
+  it('标记内容为空、不可识别或缺终止换行(写到一半的前缀)→ abort(身份不确定)', () => {
+    // 'Cindy' 无换行 = O_EXCL 回退里 "CindyDev\n" 写到第 5 字节的并发读快照,
+    // 也可能是完整默认标记缺了换行——两者读侧无法区分,统一按身份不确定 abort
+    // (review 反馈 P1 第十八轮:只 trim 会把该前缀当完整默认身份接受,双身份分裂)。
+    for (const value of ['', 'SomethingElse', 'Cindy', 'CindyDev', 'SomethingElse\n']) {
       const d = resolveDevKeychainDecision({
         ...base,
         io: io({ readMarker: () => ({ kind: 'present', value }) }),
@@ -220,7 +223,7 @@ describe('默认身份标记(词表第二项,review 反馈 P1 第十五轮)', ()
     expect(
       resolveDevKeychainDecision({
         ...base,
-        io: io({ readMarker: () => ({ kind: 'present', value: 'Cindy' }), flushProfileDir: flush }),
+        io: io({ readMarker: () => ({ kind: 'present', value: 'Cindy\n' }), flushProfileDir: flush }),
       }),
     ).toEqual({ kind: 'keep-default' });
     expect(flush).toHaveBeenCalled();
@@ -231,7 +234,7 @@ describe('默认身份标记(词表第二项,review 反馈 P1 第十五轮)', ()
       resolveDevKeychainDecision({
         ...base,
         io: io({
-          readMarker: () => ({ kind: 'present', value: 'Cindy' }),
+          readMarker: () => ({ kind: 'present', value: 'Cindy\n' }),
           flushProfileDir: () => false,
         }),
       }).kind,

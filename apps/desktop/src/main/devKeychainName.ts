@@ -57,7 +57,11 @@ export function isKeychainIdentityMarkerArtifact(entryName: string): boolean {
   );
 }
 
-/** 标记读取三态:absent 仅代表确证的 ENOENT;其它 IO 错一律 unreadable。 */
+/**
+ * 标记读取三态:absent 仅代表确证的 ENOENT;其它 IO 错一律 unreadable。
+ * present.value 必须是**原始文件内容**(不 trim):完整性(终止换行)由 resolver
+ * 判定,读侧提前 trim 会把 O_EXCL 回退中写到一半的合法身份前缀洗成完整标记。
+ */
 export type KeychainMarkerRead =
   | { kind: 'present'; value: string }
   | { kind: 'absent' }
@@ -73,8 +77,9 @@ export interface KeychainIdentityIo {
    * 各选一个身份(review 反馈 P1 第十七轮);短写按写失败处理。
    * 目标文件系统不支持硬链接时(exFAT / 部分 SMB,link 报非
    * EEXIST 错)回退 O_EXCL 独占创建:排他性(防双身份的协调点)仍由文件系统原子
-   * 原语保证,仅该回退路径牺牲「可见即完整」——读侧三态 + 内容不可识别即 abort
-   * 本就把不完整标记按 fail-safe 处理(review 反馈 P1 第十六轮)。
+   * 原语保证,仅该回退路径牺牲「可见即完整」——读侧以**终止换行**为完整判据
+   * (resolver 只接受 `<name>\n`,合法身份的无换行前缀按不可识别 abort),半成品
+   * 标记落在 fail-safe 方向(review 反馈 P1 第十六/十八轮)。
    * **'claimed' 与 'exists' 两种返回前都必须完成目录持久化**——
    * 输家不 flush 就接受对方标记,断电可能保住输家写的密文、丢掉标记(review 反馈
    * P1 第十二轮);flush 失败按 'error'(仅 Windows 因平台性打不开目录 fd 例外为
@@ -115,7 +120,13 @@ function interpretMarker(
     return { kind: 'abort', reason: '身份标记读取失败(非 ENOENT)' };
   }
   if (read.kind === 'present') {
-    if (read.value === devName || read.value === defaultName) {
+    // 完整性判定(review 反馈 P1 第十八轮):value 是**原始文件内容**,必须带终止
+    // 换行才算写完 —— 写侧格式恒为 `<name>\n`。O_EXCL 回退路径在最终路径上增量写,
+    // "CindyDev\n" 的前 5 字节恰是词表另一合法身份 "Cindy":只 trim 的话,并发读端
+    // 会把写到一半的前缀当完整标记接受,一个 profile 分裂到两个钥匙串身份。无终止
+    // 换行(半成品/损坏)落入下方「不可识别 → abort」的 fail-safe。
+    const complete = read.value.endsWith('\n') ? read.value.trim() : null;
+    if (complete === devName || complete === defaultName) {
       // 接受观察到的标记前先把它的目录项持久化:写入者可能尚未完成自己的 fsync,
       // 不 flush 就以该身份写密文,断电后会出现「密文在、标记丢」(review 反馈
       // P1 第十三轮)。flush 失败按身份不确定 → abort。默认身份标记同一规则——
@@ -123,7 +134,7 @@ function interpretMarker(
       if (!io.flushProfileDir()) {
         return { kind: 'abort', reason: '身份标记持久化确认失败' };
       }
-      return read.value === devName
+      return complete === devName
         ? { kind: 'rename', appName: devName }
         : { kind: 'keep-default' };
     }

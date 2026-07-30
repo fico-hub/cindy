@@ -174,7 +174,10 @@ if (devFlags.userDataDirOverride) {
       flushProfileDir: flushProfileDirForClaim,
       readMarker: () => {
         try {
-          const value = fs.readFileSync(keychainMarkerPath, 'utf8').trim();
+          // 原始内容不 trim:完整性(终止换行)由 resolver 判定。提前 trim 会把
+          // O_EXCL 回退里写到一半的 "Cindy"(= "CindyDev\n" 前 5 字节)洗成完整
+          // 的默认身份标记,并发读端据此分裂身份(review 反馈 P1 第十八轮)。
+          const value = fs.readFileSync(keychainMarkerPath, 'utf8');
           return { kind: 'present', value };
         } catch (err) {
           return (err as NodeJS.ErrnoException)?.code === 'ENOENT'
@@ -218,8 +221,9 @@ if (devFlags.userDataDirOverride) {
           }
           if (linkOutcome === null) {
             // 回退发布:O_EXCL 独占创建。排他性(防双身份的协调点)仍由文件系统
-            // 原子原语保证;仅此路径牺牲「可见即完整」——读侧三态 + 内容不可识别
-            // 即 abort 本就把不完整标记按 fail-safe 处理,方向安全。写入中途失败
+            // 原子原语保证;仅此路径牺牲「可见即完整」——读侧以终止换行为完整判据
+            // (resolver 只接受 `<name>\n`,无换行前缀按不可识别 abort),半成品
+            // 标记落在 fail-safe 方向。写入中途失败
             // 尽力撤销(标记归我们独占创建,他人不可能已认领),避免残留空标记把
             // 后续启动全部挡在 abort 上。
             try {
@@ -268,7 +272,8 @@ if (devFlags.userDataDirOverride) {
         `为避免用错误主密钥覆盖沙箱既有密文,拒绝启动。\n` +
         `  标记文件: ${keychainMarkerPath}\n` +
         `  处置: 若确认该沙箱从未用过 CindyDev 身份,删除该标记文件后重启` +
-        `(或将内容修复为 "Cindy");若沙箱曾以 CindyDev 运行,修复其内容为 "CindyDev"。\n`,
+        `(或将内容修复为 "Cindy",须以换行结尾);若沙箱曾以 CindyDev 运行,` +
+        `修复其内容为 "CindyDev"(同样以换行结尾)。\n`,
     );
     exit(1);
   }
