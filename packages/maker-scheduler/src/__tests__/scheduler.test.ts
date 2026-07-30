@@ -4014,3 +4014,38 @@ describe('Scheduler: attempt 生命周期状态机(#1016)', () => {
     await vi.waitFor(() => expect(h.scheduler.getRuntimeSnapshot().inFlight).toBe(1));
     await h.scheduler.stop();
   });
+
+  it('stop() 打在前置 await 期间:恢复的 continuation 不登记悬挂 controller(#1016 review)', async () => {
+    // stop() 清 attempt 时 continuation 还没有 controller,无从 abort;恢复后若照常
+    // registerInflight,controller/索引就成了没有 attempt 的悬挂登记,此后同实例每次
+    // begin 都被不变量断言拦下(codex review P1)。守卫应放弃本轮并(runNow 契约)抛错。
+    const storage = new InMemoryStorage();
+    let releaseInsert: (() => void) | null = null;
+    let gated = true;
+    const realInsertRun = storage.insertRun.bind(storage);
+    storage.insertRun = (run: ScheduleRun) => {
+      if (!gated) return realInsertRun(run);
+      return new Promise<void>((resolve) => {
+        releaseInsert = () => resolve(realInsertRun(run));
+      });
+    };
+    const h = makeHarness({
+      storage,
+      runnerImpl: async () => ({ sessionId: 'sess-after-stop' }),
+    });
+    const sch = await h.scheduler.create({ ...baseInput });
+    const first = h.scheduler.runNow(sch.id);
+    const firstOutcome = first.then(
+      () => 'resolved',
+      (e) => String(e),
+    );
+    await vi.waitFor(() => expect(releaseInsert).not.toBeNull());
+    await h.scheduler.stop();
+    gated = false;
+    releaseInsert!();
+    expect(await firstOutcome).toMatch(/stopped while starting runNow/);
+    // 无悬挂登记:同实例再 runNow,begin 的不变量断言不抛,run 正常收尾。
+    const second = await h.scheduler.runNow(sch.id);
+    expect(second.runId).toBeTruthy();
+    await h.scheduler.stop();
+  });

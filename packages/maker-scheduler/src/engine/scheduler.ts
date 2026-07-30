@@ -658,6 +658,20 @@ export class Scheduler extends EventEmitter {
       this.logger?.error?.('insertRun failed', err);
       return;
     }
+    // stop() 竞态守卫(codex review P1):前置 await(claimDueFire/insertRun)期间
+    // stop() 会清掉 attempt,且此时还没有 controller 可 abort 本 continuation。恢复后
+    // attempt 已不在账就不得再登记 controller/索引——悬挂登记会让停机后同实例的每次
+    // begin 都被不变量断言拦下。放弃本轮:刚插入的 run 行与其他 stop 释放的 run 同样
+    // 交给下次 start() 的僵尸清扫收敛成 interrupted,认领走崩溃恢复的既有归一路径。
+    if (!this.inflightAttempts.has(runId)) {
+      this.logger?.info?.('scheduler: attempt released during pre-register await (stopped); dropping fire', {
+        schedulerInstanceId: this.schedulerInstanceId,
+        processId: this.processId,
+        runId,
+        scheduleId: schedule.id,
+      });
+      return;
+    }
     const controller = new AbortController();
     this.registerInflight(schedule.id, runId, controller);
     if (schedule.silentWhenIdle) {
@@ -942,6 +956,18 @@ export class Scheduler extends EventEmitter {
     await this.storage.update(schedule.id, { lastFiredAt: firedAt });
     const cached = this.activeSchedules.get(schedule.id);
     if (cached) this.activeSchedules.set(schedule.id, { ...cached, lastFiredAt: firedAt });
+    // stop() 竞态守卫,与 fireOneInner 同款(codex review P1):storage.get/insertRun/
+    // update 期间 stop() 清掉 attempt 后不得再登记 controller/索引。runNow 契约上
+    // 以抛错收场(调用方显式动作,静默吞掉会让"没跑"看起来像"跑了")。
+    if (!this.inflightAttempts.has(runId)) {
+      this.logger?.info?.('scheduler: attempt released during pre-register await (stopped); dropping runNow', {
+        schedulerInstanceId: this.schedulerInstanceId,
+        processId: this.processId,
+        runId,
+        scheduleId: schedule.id,
+      });
+      throw new Error(`scheduler stopped while starting runNow (scheduleId=${schedule.id})`);
+    }
     const controller = new AbortController();
     this.registerInflight(schedule.id, runId, controller);
     if (schedule.silentWhenIdle) {
