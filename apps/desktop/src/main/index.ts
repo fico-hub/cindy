@@ -178,9 +178,30 @@ if (devFlags.userDataDirOverride) {
           // 原始内容不 trim:完整性(终止换行)由 resolver 判定。提前 trim 会把
           // O_EXCL 回退里写到一半的 "Cindy"(= "CindyDev\n" 前 5 字节)洗成完整
           // 的默认身份标记,并发读端据此分裂身份(review 反馈 P1 第十八轮)。
-          const fd = fs.openSync(keychainMarkerPath, 'r');
+          // 只接受普通文件 + 有界读取:裸覆写目录可能存在同名**外来文件**——
+          // 巨型文件无界读会耗尽内存,FIFO / 设备(或指向它们的符号链接)会把
+          // main 启动永久阻塞(review 反馈 P2 第二十八轮)。O_NOFOLLOW 拒符号
+          // 链接、O_NONBLOCK 防 FIFO 在 open 挂起;非普通文件与超限一律按
+          // unreadable → abort(fail-safe 方向不变)。上限远大于词表最长合法
+          // 内容("CindyDev\n" 9 字节),不影响任何正常标记。
+          const fd = fs.openSync(
+            keychainMarkerPath,
+            fs.constants.O_RDONLY |
+              (fs.constants.O_NOFOLLOW ?? 0) |
+              (fs.constants.O_NONBLOCK ?? 0),
+          );
           try {
-            const value = fs.readFileSync(fd, 'utf8');
+            if (!fs.fstatSync(fd).isFile()) return { kind: 'unreadable' };
+            const maxBytes = 256;
+            const buf = Buffer.alloc(maxBytes + 1);
+            let total = 0;
+            while (total < buf.length) {
+              const n = fs.readSync(fd, buf, total, buf.length - total, total);
+              if (n <= 0) break;
+              total += n;
+            }
+            if (total > maxBytes) return { kind: 'unreadable' };
+            const value = buf.subarray(0, total).toString('utf8');
             // 接受前把刚读到的内容自 fsync 落盘:O_EXCL 回退里写者的 fsync 可能
             // 尚未成功甚至失败,读者只做目录 fsync 就按内容接受的话,断电后可能
             // 「凭证已按该身份写入、标记内容却没落盘」(review 反馈 P1 第二十三轮)。
