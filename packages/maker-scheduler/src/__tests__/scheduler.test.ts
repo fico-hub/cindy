@@ -3925,7 +3925,6 @@ describe('Scheduler: attempt 生命周期状态机(#1016)', () => {
     ).toBe(false);
     await h.scheduler.stop();
   });
-});
 
   it('强制收口后 runner 迟到调用 onQueueWaitStart → no-op,不抛非法转移(#1016 review)', async () => {
     vi.useFakeTimers();
@@ -4025,7 +4024,7 @@ describe('Scheduler: attempt 生命周期状态机(#1016)', () => {
     const realInsertRun = storage.insertRun.bind(storage);
     storage.insertRun = (run: ScheduleRun) => {
       if (!gated) return realInsertRun(run);
-      return new Promise<void>((resolve) => {
+      return new Promise<ScheduleRun>((resolve) => {
         releaseInsert = () => resolve(realInsertRun(run));
       });
     };
@@ -4049,3 +4048,4 @@ describe('Scheduler: attempt 生命周期状态机(#1016)', () => {
     expect(second.runId).toBeTruthy();
     await h.scheduler.stop();
   });
+});
