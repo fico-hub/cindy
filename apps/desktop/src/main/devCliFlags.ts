@@ -32,26 +32,30 @@ function flipAsciiCase(s: string): string {
 function volumeIsCaseInsensitive(existingDir: string): boolean {
   let dir = existingDir;
   for (;;) {
-    const name = basename(dir);
-    const flipped = flipAsciiCase(name);
-    if (flipped !== name) {
+    const parent = dirname(dir);
+    const atRoot = parent === dir;
+    // 挂载点边界必须在**翻转探测之前**判:名字翻转后的解析发生在父目录(宿主卷)
+    // 的查找语义里——挂载点名含字母时(如 /Volumes/CaseSensitive 的大小写敏感卷
+    // 挂在不敏感宿主上),翻转命中测到的是宿主语义而非目标卷(review 反馈 P1 第
+    // 三十一轮);名字无字母继续上溯则会整个越过挂载点(第三十轮)。两种形态统一
+    // 处理:与父目录设备号不同(= 挂载点)即按无从探测返回,保守不折叠。
+    if (!atRoot) {
       try {
-        return realpathSync.native(join(dirname(dir), flipped)) === realpathSync.native(dir);
+        if (statSync(parent).dev !== statSync(dir).dev) return false;
       } catch {
         return false;
       }
     }
-    const parent = dirname(dir);
-    if (parent === dir) return false;
-    // 上溯不得跨挂载点:目标卷挂载名可能不含字母(如 /Volumes/数据 的大小写敏感
-    // 卷),继续上溯会探到宿主卷的语义——宿主不敏感时误折叠目标卷上仅大小写不同
-    // 的两个真实目录(review 反馈 P1 第三十轮)。设备号变化即停,按无从探测处理
-    // (保守不折叠)。
-    try {
-      if (statSync(parent).dev !== statSync(dir).dev) return false;
-    } catch {
-      return false;
+    const name = basename(dir);
+    const flipped = flipAsciiCase(name);
+    if (flipped !== name) {
+      try {
+        return realpathSync.native(join(parent, flipped)) === realpathSync.native(dir);
+      } catch {
+        return false;
+      }
     }
+    if (atRoot) return false;
     dir = parent;
   }
 }
