@@ -14,7 +14,7 @@
  * 纯函数、零 electron 依赖 —— index.ts 注入 argv / env / 默认 userData 目录,
  * 便于单元测试。packaged 版本一律返回"无覆写",线上零影响。
  */
-import { realpathSync } from 'node:fs';
+import { realpathSync, statSync } from 'node:fs';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 
 /** 字母大小写整体翻转(卷语义探测用):无字母的段翻转后与原串相同。 */
@@ -43,6 +43,15 @@ function volumeIsCaseInsensitive(existingDir: string): boolean {
     }
     const parent = dirname(dir);
     if (parent === dir) return false;
+    // 上溯不得跨挂载点:目标卷挂载名可能不含字母(如 /Volumes/数据 的大小写敏感
+    // 卷),继续上溯会探到宿主卷的语义——宿主不敏感时误折叠目标卷上仅大小写不同
+    // 的两个真实目录(review 反馈 P1 第三十轮)。设备号变化即停,按无从探测处理
+    // (保守不折叠)。
+    try {
+      if (statSync(parent).dev !== statSync(dir).dev) return false;
+    } catch {
+      return false;
+    }
     dir = parent;
   }
 }
