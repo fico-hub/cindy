@@ -98,6 +98,7 @@ import {
   claimLegacyOwnerNamespace,
   recordLegacyGhostMigrationResult,
 } from './ownerNamespaceMigration.js';
+import { buildSafeStorageIssueMeta } from './safeStorageIssueLog.js';
 
 const log = createLogger('authManager');
 
@@ -345,11 +346,7 @@ function logSafeStorageIssueOnce(reason: string, key: string, err?: unknown): vo
   const issueKey = `${reason}:${key}`;
   if (safeStorageIssueLogged.has(issueKey)) return;
   safeStorageIssueLogged.add(issueKey);
-  const code = (err as NodeJS.ErrnoException | undefined)?.code;
-  log.warn(`safeStorage ${reason}`, {
-    key,
-    ...(err instanceof Error ? { error: code ?? err.name } : {}),
-  });
+  log.warn(`safeStorage ${reason}`, buildSafeStorageIssueMeta(key, err));
 }
 
 function readSafe(key: string): string | null {
