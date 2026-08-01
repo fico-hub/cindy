@@ -18,6 +18,7 @@ const base = {
   defaultUserDataDir: '/AppData/xdt-maker',
   envIsolated: undefined as string | undefined,
   envIsolationName: undefined as string | undefined,
+  envUserDataDirEpoch: undefined as string | undefined,
   envDeviceIdOverride: undefined as string | undefined,
   envSchedulerPassive: undefined as string | undefined,
   envEndpointsCdn: undefined as string | undefined,
@@ -63,8 +64,18 @@ describe('resolveDevCliFlags', () => {
       ...base,
       envIsolated: '1',
       envUserDataDir: '/AppData/xdt-maker-dev2',
+      envUserDataDirEpoch: '1',
     });
     expect(viaEnvSame.isolatedDirIsEpochDerived).toBe(true);
+    // 同一路径但没有可信纪元信号(人肉覆写 / 旧 checkout 形态)→ 观察模式:
+    // 旧代码不认标记、以默认身份打开同一显式路径,认领 CindyDev 会双身份互写
+    // (#912 review P1 第三十二轮)。
+    const viaEnvUntrusted = resolveDevCliFlags({
+      ...base,
+      envIsolated: '1',
+      envUserDataDir: '/AppData/xdt-maker-dev2',
+    });
+    expect(viaEnvUntrusted.isolatedDirIsEpochDerived).toBe(false);
     const custom = resolveDevCliFlags({
       ...base,
       argv: [...base.argv, '--isolated'],
@@ -84,7 +95,12 @@ describe('resolveDevCliFlags', () => {
       '/AppData/./xdt-maker-dev2',
       '/AppData/other/../xdt-maker-dev2',
     ]) {
-      const flags = resolveDevCliFlags({ ...base, envIsolated: '1', envUserDataDir: dir });
+      const flags = resolveDevCliFlags({
+        ...base,
+        envIsolated: '1',
+        envUserDataDir: dir,
+        envUserDataDirEpoch: '1',
+      });
       expect(flags.isolatedDirIsEpochDerived, dir).toBe(true);
       // 覆写值本身保持原样传递(app.setPath 消化),只有判等做规范化。
       expect(flags.userDataDirOverride, dir).toBe(dir);
@@ -94,6 +110,7 @@ describe('resolveDevCliFlags', () => {
       ...base,
       envIsolated: '1',
       envUserDataDir: '/AppData/xdt-maker-dev2-extra',
+      envUserDataDirEpoch: '1',
     });
     expect(sibling.isolatedDirIsEpochDerived).toBe(false);
   });
@@ -107,6 +124,7 @@ describe('resolveDevCliFlags', () => {
       ...base,
       envIsolated: '1',
       envUserDataDir: '/AppData/XDT-Maker-DEV2',
+      envUserDataDirEpoch: '1',
       canonicalizePath: insensitiveVolume,
     });
     expect(hit.isolatedDirIsEpochDerived).toBe(true);
@@ -115,6 +133,7 @@ describe('resolveDevCliFlags', () => {
       ...base,
       envIsolated: '1',
       envUserDataDir: '/AppData/XDT-Maker-DEV2',
+      envUserDataDirEpoch: '1',
       canonicalizePath: sensitiveVolume,
     });
     expect(miss.isolatedDirIsEpochDerived).toBe(false);
@@ -124,6 +143,7 @@ describe('resolveDevCliFlags', () => {
       ...base,
       envIsolated: '1',
       envUserDataDir: '/AppData/XDT-Maker-DEV2',
+      envUserDataDirEpoch: '1',
     });
     expect(unprobeable.isolatedDirIsEpochDerived).toBe(false);
   });
@@ -152,6 +172,7 @@ describe('resolveDevCliFlags', () => {
         defaultUserDataDir: join(ancestor, 'xdt-maker'),
         envIsolated: '1',
         envUserDataDir: join(ancestor, 'XDT-MAKER-DEV2'),
+      envUserDataDirEpoch: '1',
       });
       expect(flags.isolatedDirIsEpochDerived).toBe(volumeInsensitive);
       // 祖先是符号链接:canonical 以链接目标(realpath)为基,链接写法与真身
@@ -164,6 +185,7 @@ describe('resolveDevCliFlags', () => {
           defaultUserDataDir: join(ancestor, 'xdt-maker'),
           envIsolated: '1',
           envUserDataDir: join(linkAncestor, 'xdt-maker-dev2'),
+      envUserDataDirEpoch: '1',
         });
         expect(viaLink.isolatedDirIsEpochDerived).toBe(true);
       } finally {
@@ -176,6 +198,7 @@ describe('resolveDevCliFlags', () => {
         defaultUserDataDir: join(ancestor, 'xdt-maker'),
         envIsolated: '1',
         envUserDataDir: join(ancestor, 'XDT-MAKER-DEV2'),
+      envUserDataDirEpoch: '1',
       };
       const beforeCreate = resolveDevCliFlags(variantInput).isolatedDirIsEpochDerived;
       mkdirSync(join(ancestor, 'xdt-maker-dev2'));
@@ -191,6 +214,7 @@ describe('resolveDevCliFlags', () => {
         defaultUserDataDir: join(ancestor, 'xdt-maker'),
         envIsolated: '1',
         envUserDataDir: join(ancestor, 'xdt-maker-dev2') + '/',
+      envUserDataDirEpoch: '1',
       });
       expect(slash.isolatedDirIsEpochDerived).toBe(true);
     } finally {

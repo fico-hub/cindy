@@ -133,6 +133,13 @@ export interface DevCliFlagsInput {
   envIsolated: string | undefined;
   /** XDT_ISOLATED_NAME 环境变量:命名沙箱的名字(restart 脚本路径专用,与开关分离)。 */
   envIsolationName: string | undefined;
+  /**
+   * XDT_USER_DATA_DIR_EPOCH 环境变量:严格 '1' = 显式 XDT_USER_DATA_DIR 由 restart
+   * 脚本按 -dev2 纪元派生(可信纪元信号)。旧 checkout 与人肉覆写都不会携带——
+   * 显式覆写没有该信号时即使路径与纪元派生相同也不认领 CindyDev,防旧代码以
+   * 同一显式路径按默认身份打开造成双身份互写(#912 review P1 第三十二轮)。
+   */
+  envUserDataDirEpoch: string | undefined;
   /** 已显式设置的 XDT_DEVICE_ID_OVERRIDE;非空时隔离模式不再派生独立设备标识。 */
   envDeviceIdOverride: string | undefined;
   /** XDT_SCHEDULER_PASSIVE 环境变量:严格 '1' = 被动模式(restart 脚本路径)。 */
@@ -293,8 +300,14 @@ export function resolveDevCliFlags(input: DevCliFlagsInput): DevCliFlags {
   // 不同的是另一个真实目录,把它标成纪元目录会让不认标记的旧 checkout 与 CindyDev
   // 身份对同一 profile 互写密文(#912 review P1 第二十一轮)。
   const canonicalize = input.canonicalizePath ?? defaultCanonicalizePath;
+  // 显式 env 覆写必须携带可信纪元信号(XDT_USER_DATA_DIR_EPOCH=1,restart 脚本
+  // 派生路径时设置)才允许命中:路径判等挡不住"旧 checkout 以同一显式路径启动"
+  // ——旧代码不认标记、以默认身份打开,新代码若认领 CindyDev 即双身份互写
+  // (review 反馈 P1 第三十二轮)。内部派生(无 envDir)无需信号。
+  const explicitDirTrusted = !envDir || input.envUserDataDirEpoch === '1';
   const isolatedDirIsEpochDerived =
     isolated &&
+    explicitDirTrusted &&
     userDataDirOverride !== null &&
     canonicalize(userDataDirOverride) === canonicalize(epochDerivedDir);
   return {

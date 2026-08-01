@@ -96,6 +96,24 @@ describe('createKeychainMarkerIo', () => {
     expect(io.readMarker()).toEqual({ kind: 'unreadable' });
   });
 
+  it('读后重校验:标记在读取期间被替换(inode 变化)→ 重试耗尽按 unreadable(#912 review)', () => {
+    const io = makeIo();
+    expect(io.claimMarker('CindyDev')).toBe('claimed');
+    // 注入的 statSync 每次返回不同 ino,模拟"每次读取期间都被并发替换"。
+    let fakeIno = 10_000;
+    const alwaysChanged = (p: string): fs.Stats => {
+      const real = fs.statSync(p);
+      fakeIno += 1;
+      return Object.assign(Object.create(Object.getPrototypeOf(real) as object), real, {
+        ino: fakeIno,
+      }) as fs.Stats;
+    };
+    const unstable = makeIo({ statSync: alwaysChanged });
+    expect(unstable.readMarker()).toEqual({ kind: 'unreadable' });
+    // 路径稳定(真实 statSync)时照常 present——重校验不影响正常读取。
+    expect(io.readMarker()).toEqual({ kind: 'present', value: 'CindyDev\n' });
+  });
+
   it('profileHasData:标记与 .tmp 半成品不算数据,真实文件算', () => {
     const io = makeIo();
     expect(io.profileHasData()).toBe(false);

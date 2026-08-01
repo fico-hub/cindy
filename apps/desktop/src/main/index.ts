@@ -96,6 +96,7 @@ const devFlags = resolveDevCliFlags({
   defaultUserDataDir: app.getPath('userData'),
   envIsolated: process.env.XDT_ISOLATED,
   envIsolationName: process.env.XDT_ISOLATED_NAME,
+  envUserDataDirEpoch: process.env.XDT_USER_DATA_DIR_EPOCH,
   envDeviceIdOverride: process.env.XDT_DEVICE_ID_OVERRIDE,
   envSchedulerPassive: process.env.XDT_SCHEDULER_PASSIVE,
   envEndpointsCdn: process.env.XDT_ENDPOINTS_CDN,

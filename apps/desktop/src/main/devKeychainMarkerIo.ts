@@ -24,6 +24,8 @@ export interface KeychainMarkerIoDeps {
   fsOverrides?: {
     linkSync?: typeof fs.linkSync;
     writeSync?: typeof fs.writeSync;
+    /** readMarker 读后重校验用的路径 stat(测试注入模拟"读取期间被替换")。 */
+    statSync?: (path: string) => fs.Stats;
   };
 }
 
@@ -31,6 +33,7 @@ export function createKeychainMarkerIo(deps: KeychainMarkerIoDeps): KeychainIden
   const { markerPath, profileDir } = deps;
   const linkSync = deps.fsOverrides?.linkSync ?? fs.linkSync;
   const writeSync = deps.fsOverrides?.writeSync ?? fs.writeSync;
+  const statPath = deps.fsOverrides?.statSync ?? ((p: string) => fs.statSync(p));
 
   // fsync profile 目录(claimMarker 与 flushProfileDir 共用同一实现)。
   const flushProfileDirImpl = (): boolean => {
@@ -61,58 +64,84 @@ export function createKeychainMarkerIo(deps: KeychainMarkerIoDeps): KeychainIden
     }
   };
 
+
+  type ReadOutcome = ReturnType<KeychainIdentityIo['readMarker']> | 'changed';
+  const readMarkerOnce = (): ReadOutcome => {
+    try {
+      // 原始内容不 trim:完整性(终止换行)由 resolver 判定。提前 trim 会把
+      // O_EXCL 回退里写到一半的 "Cindy"(= "CindyDev\n" 前 5 字节)洗成完整
+      // 的默认身份标记,并发读端据此分裂身份(review 反馈 P1 第十八轮)。
+      // 只接受普通文件 + 有界读取:裸覆写目录可能存在同名**外来文件**——
+      // 巨型文件无界读会耗尽内存,FIFO / 设备(或指向它们的符号链接)会把
+      // main 启动永久阻塞(review 反馈 P2 第二十八轮)。O_NOFOLLOW 拒符号
+      // 链接、O_NONBLOCK 防 FIFO 在 open 挂起;非普通文件与超限一律按
+      // unreadable → abort(fail-safe 方向不变)。上限远大于词表最长合法
+      // 内容("CindyDev\n" 9 字节),不影响任何正常标记。
+      const fd = fs.openSync(
+        markerPath,
+        fs.constants.O_RDONLY |
+          (fs.constants.O_NOFOLLOW ?? 0) |
+          (fs.constants.O_NONBLOCK ?? 0),
+      );
+      try {
+        const opened = fs.fstatSync(fd);
+        if (!opened.isFile()) return { kind: 'unreadable' };
+        const maxBytes = 256;
+        const buf = Buffer.alloc(maxBytes + 1);
+        let total = 0;
+        while (total < buf.length) {
+          const n = fs.readSync(fd, buf, total, buf.length - total, total);
+          if (n <= 0) break;
+          total += n;
+        }
+        if (total > maxBytes) return { kind: 'unreadable' };
+        const value = buf.subarray(0, total).toString('utf8');
+        // 接受前把刚读到的内容自 fsync 落盘:O_EXCL 回退里写者的 fsync 可能
+        // 尚未成功甚至失败,读者只做目录 fsync 就按内容接受的话,断电后可能
+        // 「凭证已按该身份写入、标记内容却没落盘」(review 反馈 P1 第二十三轮)。
+        // 自 fsync 成功 = 内容持久,与写者命运解耦。仅 Windows 因只读句柄平台性
+        // fsync 受限保持 best-effort(与 flushProfileDir 的既有例外同款)。
+        try {
+          fs.fsyncSync(fd);
+        } catch {
+          if (process.platform !== 'win32') return { kind: 'unreadable' };
+        }
+        // 重校验:路径仍指向读取时的同一 inode。fd 打开后标记可能被并发认领 /
+        // 手工修复替换或删除,旧 inode 内容与盘上真值分叉(review 反馈 P1 第
+        // 三十二轮)。dev+ino 任一变化按 'changed' 交给外层重试。
+        try {
+          const now = statPath(markerPath);
+          if (now.dev !== opened.dev || now.ino !== opened.ino) return 'changed';
+        } catch {
+          return 'changed';
+        }
+        return { kind: 'present', value };
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch (err) {
+      return (err as NodeJS.ErrnoException)?.code === 'ENOENT'
+        ? { kind: 'absent' }
+        : { kind: 'unreadable' };
+    }
+  };
+
   return {
     // 把已观察到的标记目录项持久化;仅 Windows 因平台性打不开目录 fd 保持
     // best-effort(NTFS 日志语义不同,身份分离主要服务 macOS 钥匙串)。
     flushProfileDir: flushProfileDirImpl,
+    // 读取以「打开 → 读 → 自 fsync → 重校验路径仍指向同一 inode」为一次尝试:
+    // 并发 --passive 认领或用户按指引手工修复都可能在本进程持有 fd 期间替换/删除
+    // 标记,旧 inode 的内容与盘上真值分叉——按旧内容启动会写入与下次启动所读
+    // 标记不符的密文(review 反馈 P1 第三十二轮)。路径变化重试有限次,仍不稳定
+    // 按 unreadable → abort(fail-safe 方向)。
     readMarker: () => {
-      try {
-        // 原始内容不 trim:完整性(终止换行)由 resolver 判定。提前 trim 会把
-        // O_EXCL 回退里写到一半的 "Cindy"(= "CindyDev\n" 前 5 字节)洗成完整
-        // 的默认身份标记,并发读端据此分裂身份(review 反馈 P1 第十八轮)。
-        // 只接受普通文件 + 有界读取:裸覆写目录可能存在同名**外来文件**——
-        // 巨型文件无界读会耗尽内存,FIFO / 设备(或指向它们的符号链接)会把
-        // main 启动永久阻塞(review 反馈 P2 第二十八轮)。O_NOFOLLOW 拒符号
-        // 链接、O_NONBLOCK 防 FIFO 在 open 挂起;非普通文件与超限一律按
-        // unreadable → abort(fail-safe 方向不变)。上限远大于词表最长合法
-        // 内容("CindyDev\n" 9 字节),不影响任何正常标记。
-        const fd = fs.openSync(
-          markerPath,
-          fs.constants.O_RDONLY |
-            (fs.constants.O_NOFOLLOW ?? 0) |
-            (fs.constants.O_NONBLOCK ?? 0),
-        );
-        try {
-          if (!fs.fstatSync(fd).isFile()) return { kind: 'unreadable' };
-          const maxBytes = 256;
-          const buf = Buffer.alloc(maxBytes + 1);
-          let total = 0;
-          while (total < buf.length) {
-            const n = fs.readSync(fd, buf, total, buf.length - total, total);
-            if (n <= 0) break;
-            total += n;
-          }
-          if (total > maxBytes) return { kind: 'unreadable' };
-          const value = buf.subarray(0, total).toString('utf8');
-          // 接受前把刚读到的内容自 fsync 落盘:O_EXCL 回退里写者的 fsync 可能
-          // 尚未成功甚至失败,读者只做目录 fsync 就按内容接受的话,断电后可能
-          // 「凭证已按该身份写入、标记内容却没落盘」(review 反馈 P1 第二十三轮)。
-          // 自 fsync 成功 = 内容持久,与写者命运解耦。仅 Windows 因只读句柄平台性
-          // fsync 受限保持 best-effort(与 flushProfileDir 的既有例外同款)。
-          try {
-            fs.fsyncSync(fd);
-          } catch {
-            if (process.platform !== 'win32') return { kind: 'unreadable' };
-          }
-          return { kind: 'present', value };
-        } finally {
-          fs.closeSync(fd);
-        }
-      } catch (err) {
-        return (err as NodeJS.ErrnoException)?.code === 'ENOENT'
-          ? { kind: 'absent' }
-          : { kind: 'unreadable' };
+      const MAX_READ_ATTEMPTS = 3;
+      for (let attempt = 0; attempt < MAX_READ_ATTEMPTS; attempt += 1) {
+        const result = readMarkerOnce();
+        if (result !== 'changed') return result;
       }
+      return { kind: 'unreadable' };
     },
     claimMarker: (name) => {
       // 原子发布完整标记:先写临时文件并 fsync,再 hard link 独占落位,最后 fsync
