@@ -80,6 +80,12 @@ export function createKeychainMarkerIo(deps: KeychainMarkerIoDeps): KeychainIden
       // 链接、O_NONBLOCK 防 FIFO 在 open 挂起;非普通文件与超限一律按
       // unreadable → abort(fail-safe 方向不变)。上限远大于词表最长合法
       // 内容("CindyDev\n" 9 字节),不影响任何正常标记。
+      // Windows 上 O_NOFOLLOW 不可用(undefined → 0),open 会跟随符号链接,
+      // fstat 检查的是链接目标——profile 外部可独立替换的文件将决定 safeStorage
+      // 身份(review 反馈 P1 第三十五轮,Windows CI 实测符号链接用例失败)。
+      // 显式 lstat 拒链接,跨平台统一;POSIX 上与 O_NOFOLLOW 双保险。ENOENT
+      // 由外层 catch 归入 absent。
+      if (fs.lstatSync(markerPath).isSymbolicLink()) return { kind: 'unreadable' };
       const fd = fs.openSync(
         markerPath,
         fs.constants.O_RDONLY |
