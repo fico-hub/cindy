@@ -11,6 +11,22 @@ import {
   shouldRequestSingleInstanceLock,
 } from '../devCliFlags';
 
+
+// Windows 上创建 symlink 需要管理员或开发者模式;拿不到权限时(EPERM)按仓内
+// endpointManifestCache.test.ts 同款探测一次并降级 symlink 相关断言,其余检查照跑
+// (review 反馈第三十六轮)。
+const canSymlink = (() => {
+  const probeDir = mkdtempSync(join(tmpdir(), 'cindy-symlink-probe-'));
+  try {
+    symlinkSync(join(probeDir, 'target'), join(probeDir, 'link'));
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(probeDir, { recursive: true, force: true });
+  }
+})();
+
 const base = {
   argv: ['electron', '.'] as readonly string[],
   isPackaged: false,
@@ -178,18 +194,20 @@ describe('resolveDevCliFlags', () => {
       // 祖先是符号链接:canonical 以链接目标(realpath)为基,链接写法与真身
       // 写法收敛到同一纪元路径(卷语义也按目标卷探测,#912 review P1 第二十四轮)。
       const linkAncestor = join(dirname(ancestor), `${basename(ancestor)}-link`);
-      symlinkSync(ancestor, linkAncestor);
-      try {
-        const viaLink = resolveDevCliFlags({
-          ...base,
-          defaultUserDataDir: join(ancestor, 'xdt-maker'),
-          envIsolated: '1',
-          envUserDataDir: join(linkAncestor, 'xdt-maker-dev2'),
-      envUserDataDirEpoch: '1',
-        });
-        expect(viaLink.isolatedDirIsEpochDerived).toBe(true);
-      } finally {
-        rmSync(linkAncestor, { force: true });
+      if (canSymlink) {
+        symlinkSync(ancestor, linkAncestor);
+        try {
+          const viaLink = resolveDevCliFlags({
+            ...base,
+            defaultUserDataDir: join(ancestor, 'xdt-maker'),
+            envIsolated: '1',
+            envUserDataDir: join(linkAncestor, 'xdt-maker-dev2'),
+            envUserDataDirEpoch: '1',
+          });
+          expect(viaLink.isolatedDirIsEpochDerived).toBe(true);
+        } finally {
+          rmSync(linkAncestor, { force: true });
+        }
       }
       // TOCTOU 稳定性:目录被并发进程创建前后,同一写法的判定结果一致——
       // 存在与不存在分支产出同一种规范形式(#912 review P1 第二十六轮)。

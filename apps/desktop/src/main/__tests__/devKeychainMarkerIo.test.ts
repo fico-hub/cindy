@@ -13,6 +13,22 @@ import { join } from 'node:path';
 import { createKeychainMarkerIo } from '../devKeychainMarkerIo';
 import { KEYCHAIN_IDENTITY_MARKER_FILE } from '../devKeychainName';
 
+
+// Windows 上创建 symlink 需要管理员或开发者模式;拿不到权限时(EPERM)按仓内
+// endpointManifestCache.test.ts 同款探测一次并降级 symlink 相关断言,其余检查照跑
+// (review 反馈第三十六轮)。
+const canSymlink = (() => {
+  const probeDir = fs.mkdtempSync(join(tmpdir(), 'cindy-symlink-probe-'));
+  try {
+    fs.symlinkSync(join(probeDir, 'target'), join(probeDir, 'link'));
+    return true;
+  } catch {
+    return false;
+  } finally {
+    fs.rmSync(probeDir, { recursive: true, force: true });
+  }
+})();
+
 let profileDir: string;
 let markerPath: string;
 
@@ -82,11 +98,13 @@ describe('createKeychainMarkerIo', () => {
     const io = makeIo();
     expect(io.readMarker()).toEqual({ kind: 'absent' });
     // 符号链接(O_NOFOLLOW 拒绝)
-    const realFile = join(profileDir, 'real.txt');
-    fs.writeFileSync(realFile, 'CindyDev\n');
-    fs.symlinkSync(realFile, markerPath);
-    expect(io.readMarker()).toEqual({ kind: 'unreadable' });
-    fs.unlinkSync(markerPath);
+    if (canSymlink) {
+      const realFile = join(profileDir, 'real.txt');
+      fs.writeFileSync(realFile, 'CindyDev\n');
+      fs.symlinkSync(realFile, markerPath);
+      expect(io.readMarker()).toEqual({ kind: 'unreadable' });
+      fs.unlinkSync(markerPath);
+    }
     // 超过 256B 上限的外来文件
     fs.writeFileSync(markerPath, `${'x'.repeat(300)}\n`);
     expect(io.readMarker()).toEqual({ kind: 'unreadable' });
