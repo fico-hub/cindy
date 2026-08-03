@@ -153,6 +153,22 @@ describe('createKeychainMarkerIo', () => {
     expect(io.readMarker()).toEqual({ kind: 'present', value: 'CindyDev\n' });
   });
 
+  it('读后重校验:路径在读取期间被换成符号链接 → 重试耗尽按 unreadable(#912 review 37)', () => {
+    const io = makeIo();
+    expect(io.claimMarker('CindyDev')).toBe('claimed');
+    // 注入 lstat 语义的 statSync:模拟 open 后路径项被换成符号链接——即使链接
+    // 目标内容与 fd 一致,路径项本身是链接就必须拒。
+    const linkNow = (p: string): fs.Stats => {
+      const real = fs.lstatSync(p);
+      return Object.assign(Object.create(Object.getPrototypeOf(real) as object), real, {
+        isSymbolicLink: () => true,
+      }) as fs.Stats;
+    };
+    const swapped = makeIo({ statSync: linkNow });
+    expect(swapped.readMarker()).toEqual({ kind: 'unreadable' });
+    expect(io.readMarker()).toEqual({ kind: 'present', value: 'CindyDev\n' });
+  });
+
   it('profileHasData:标记与 .tmp 半成品不算数据,真实文件算', () => {
     const io = makeIo();
     expect(io.profileHasData()).toBe(false);

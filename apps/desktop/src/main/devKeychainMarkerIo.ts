@@ -24,7 +24,11 @@ export interface KeychainMarkerIoDeps {
   fsOverrides?: {
     linkSync?: typeof fs.linkSync;
     writeSync?: typeof fs.writeSync;
-    /** readMarker 读后重校验用的路径 stat(测试注入模拟"读取期间被替换")。 */
+    /**
+     * readMarker 读后重校验用的路径 stat(测试注入模拟"读取期间被替换")。
+     * 语义为 **lstat**(不跟随符号链接):路径项若在读取期间被换成链接,跟随式
+     * stat 会拿到链接目标、与 fd 同源,校验形同虚设(review 第三十七轮)。
+     */
     statSync?: (path: string) => fs.Stats;
     /** readMarker 的有界读(测试注入模拟"同 inode 原地改写")。 */
     readSync?: typeof fs.readSync;
@@ -35,7 +39,7 @@ export function createKeychainMarkerIo(deps: KeychainMarkerIoDeps): KeychainIden
   const { markerPath, profileDir } = deps;
   const linkSync = deps.fsOverrides?.linkSync ?? fs.linkSync;
   const writeSync = deps.fsOverrides?.writeSync ?? fs.writeSync;
-  const statPath = deps.fsOverrides?.statSync ?? ((p: string) => fs.statSync(p));
+  const statPath = deps.fsOverrides?.statSync ?? ((p: string) => fs.lstatSync(p));
   const readSync = deps.fsOverrides?.readSync ?? fs.readSync;
 
   // fsync profile 目录(claimMarker 与 flushProfileDir 共用同一实现)。
@@ -122,8 +126,14 @@ export function createKeychainMarkerIo(deps: KeychainMarkerIoDeps): KeychainIden
         // 重校验:路径仍指向读取时的同一 inode。fd 打开后标记可能被并发认领 /
         // 手工修复替换或删除,旧 inode 内容与盘上真值分叉(review 反馈 P1 第
         // 三十二轮)。dev+ino 任一变化按 'changed' 交给外层重试。
+        // 用 **lstat**(不跟随链接)把路径项绑定到已打开的 fd:Windows 无
+        // O_NOFOLLOW 语义,前置 lstat 与 open 之间路径可能被换成指向外部文件的
+        // 符号链接——open/fstat 与跟随式 stat 都会看到链接目标,校验全部通过
+        // (review 反馈 P1 第三十七轮)。lstat 下:路径当前是链接 → 拒;是普通
+        // 文件但 inode 与 fd 不同(换回来的另一个文件)→ 拒。
         try {
           const now = statPath(markerPath);
+          if (now.isSymbolicLink()) return 'changed';
           if (now.dev !== opened.dev || now.ino !== opened.ino) return 'changed';
         } catch {
           return 'changed';
