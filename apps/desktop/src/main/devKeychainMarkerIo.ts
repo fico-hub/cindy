@@ -26,6 +26,8 @@ export interface KeychainMarkerIoDeps {
     writeSync?: typeof fs.writeSync;
     /** readMarker 读后重校验用的路径 stat(测试注入模拟"读取期间被替换")。 */
     statSync?: (path: string) => fs.Stats;
+    /** readMarker 的有界读(测试注入模拟"同 inode 原地改写")。 */
+    readSync?: typeof fs.readSync;
   };
 }
 
@@ -34,6 +36,7 @@ export function createKeychainMarkerIo(deps: KeychainMarkerIoDeps): KeychainIden
   const linkSync = deps.fsOverrides?.linkSync ?? fs.linkSync;
   const writeSync = deps.fsOverrides?.writeSync ?? fs.writeSync;
   const statPath = deps.fsOverrides?.statSync ?? ((p: string) => fs.statSync(p));
+  const readSync = deps.fsOverrides?.readSync ?? fs.readSync;
 
   // fsync profile 目录(claimMarker 与 flushProfileDir 共用同一实现)。
   const flushProfileDirImpl = (): boolean => {
@@ -87,15 +90,19 @@ export function createKeychainMarkerIo(deps: KeychainMarkerIoDeps): KeychainIden
         const opened = fs.fstatSync(fd);
         if (!opened.isFile()) return { kind: 'unreadable' };
         const maxBytes = 256;
-        const buf = Buffer.alloc(maxBytes + 1);
-        let total = 0;
-        while (total < buf.length) {
-          const n = fs.readSync(fd, buf, total, buf.length - total, total);
-          if (n <= 0) break;
-          total += n;
-        }
-        if (total > maxBytes) return { kind: 'unreadable' };
-        const value = buf.subarray(0, total).toString('utf8');
+        const boundedRead = (): Buffer | null => {
+          const buf = Buffer.alloc(maxBytes + 1);
+          let total = 0;
+          while (total < buf.length) {
+            const n = readSync(fd, buf, total, buf.length - total, total);
+            if (n <= 0) break;
+            total += n;
+          }
+          return total > maxBytes ? null : buf.subarray(0, total);
+        };
+        const first = boundedRead();
+        if (first === null) return { kind: 'unreadable' };
+        const value = first.toString('utf8');
         // 接受前把刚读到的内容自 fsync 落盘:O_EXCL 回退里写者的 fsync 可能
         // 尚未成功甚至失败,读者只做目录 fsync 就按内容接受的话,断电后可能
         // 「凭证已按该身份写入、标记内容却没落盘」(review 反馈 P1 第二十三轮)。
@@ -115,6 +122,12 @@ export function createKeychainMarkerIo(deps: KeychainMarkerIoDeps): KeychainIden
         } catch {
           return 'changed';
         }
+        // 同 inode 原地改写(如 shell 重定向截断重写)不换 dev/ino,上面的校验挡
+        // 不住——同 fd 的 pread 能看到当前 inode 内容,二次读取逐字节比对,变了按
+        // 'changed' 重试(review 反馈 P1 第三十四轮)。仍属 TOCTOU 缓解而非根除,
+        // 处置指引已要求修复在退出所有实例后原子替换进行。
+        const second = boundedRead();
+        if (second === null || !second.equals(first)) return 'changed';
         return { kind: 'present', value };
       } finally {
         fs.closeSync(fd);

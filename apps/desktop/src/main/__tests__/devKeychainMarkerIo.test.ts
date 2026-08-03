@@ -114,6 +114,27 @@ describe('createKeychainMarkerIo', () => {
     expect(io.readMarker()).toEqual({ kind: 'present', value: 'CindyDev\n' });
   });
 
+  it('读后重校验:同 inode 原地改写(内容变化)→ 重试耗尽按 unreadable(#912 review 34)', () => {
+    const io = makeIo();
+    expect(io.claimMarker('CindyDev')).toBe('claimed');
+    // 注入 readSync:每个读取 pass 返回不同内容,模拟两次读取之间被原地改写。
+    // 每 pass 两次调用(数据 + EOF);奇数 pass 给 "CindyDev\n",偶数 pass 给 "Cindy\n"。
+    let call = 0;
+    const flipping = ((_fd: number, buffer: NodeJS.ArrayBufferView, offset: number) => {
+      const pass = Math.floor(call / 2);
+      const isData = call % 2 === 0;
+      call += 1;
+      if (!isData) return 0;
+      const content = Buffer.from(pass % 2 === 0 ? 'CindyDev\n' : 'Cindy\n', 'utf8');
+      content.copy(buffer as Buffer, offset);
+      return content.length;
+    }) as typeof fs.readSync;
+    const unstable = makeIo({ readSync: flipping });
+    expect(unstable.readMarker()).toEqual({ kind: 'unreadable' });
+    // 稳定内容照常 present(真实 readSync 两次 pass 相同)。
+    expect(io.readMarker()).toEqual({ kind: 'present', value: 'CindyDev\n' });
+  });
+
   it('profileHasData:标记与 .tmp 半成品不算数据,真实文件算', () => {
     const io = makeIo();
     expect(io.profileHasData()).toBe(false);
