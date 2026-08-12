@@ -700,6 +700,14 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toBeNull();
   });
 
+  it('still hits when a leak dedents out of an empty-marker HTML block after a heading', () => {
+    // 空标记识别不限于空行之后(第三十轮 Codex review):标题等块边界后无
+    // 空行的 `-` 同样建立列表项,项内未闭合 HTML 块随 dedent 终止。
+    expect(
+      detectLeakedToolCallMarkup(`# 标题\n-\n  <script>\n  示例内容\n${CLASS_B_LEAK}`),
+    ).toEqual({ category: 'invoke-with-parameter' });
+  });
+
   it('still hits when a leak dedents out of an empty-marker list HTML block', () => {
     // stripHtmlBlocks 的列表上下文同样识别空标记行(第二十九轮 Codex
     // review):`-` 项内的未闭合 <script> 随 dedent 终止,列表外真实泄漏不被

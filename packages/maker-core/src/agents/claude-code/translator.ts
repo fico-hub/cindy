@@ -1844,8 +1844,11 @@ function handleResult(
     queue.push({
       type: 'error',
       data: {
+        // 不承诺自动重试:是否自动续跑由下游 guard(开关/额度/补发结果)决定,
+        // 这里看不到结论 —— 只陈述事实与始终存在的人工重试入口(第三十轮
+        // Codex review)。
         message:
-          '模型输出了格式错误的工具调用块,未能解析为结构化调用,本轮工具未执行。将自动请求模型重试。',
+          '模型输出了格式错误的工具调用块,未能解析为结构化调用,本轮工具未执行,可重新发送重试。',
         isTerminal: true,
         reason: 'malformed-tool-markup',
       },

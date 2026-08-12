@@ -433,11 +433,13 @@ function stripHtmlBlocks(lines: string[]): string[] {
   // review):低于内容列的非空行按普通行重新处理,块外的真实泄漏不被吞掉。
   let blockIndent = 0;
   let listContentCol = 0;
-  // prevBlank 近似「不在段落内」:段落内的单独 `-` 是 setext 下划线不是空
-  // 列表项,只有空行(或文首)之后的空标记才建立列表上下文(第二十九轮
-  // Codex review,镜像围栏状态机的空标记处理;本状态机不跟踪段落,取
-  // 空行近似)。
-  let prevBlank = true;
+  // 段落/引用状态(镜像围栏状态机,第三十轮 Codex review:只用「空行之后」
+  // 近似会漏掉标题等块边界后无空行的空标记 —— `# 标题\n-\n  <script>` 的
+  // 空标记同样建立列表项):空列表标记只在段落外成立(段落内的 `-` 是
+  // setext 下划线),段落延续的非 1 有序标记不建列表上下文,引用惰性区不建
+  // 段落。
+  let inPara = false;
+  let quoteLazy = false;
   for (const line of lines) {
     const blank = /^[ \t]*$/.test(line);
     if (inComment) {
@@ -489,6 +491,8 @@ function stripHtmlBlocks(lines: string[]): string[] {
           ? listContentCol
           : 0;
         if (isListOpener) listContentCol = prefixCols;
+        inPara = false;
+        quoteLazy = false;
         if (t1) {
           const close = new RegExp(`</${t1[2]}>`, 'i');
           if (!close.test(line)) closeTag = close;
@@ -526,18 +530,41 @@ function stripHtmlBlocks(lines: string[]): string[] {
           ? listContentCol
           : 0;
         if (isListOpener) listContentCol = prefixCols;
+        inPara = false;
+        quoteLazy = false;
         inComment = true;
         continue;
       }
     }
     if (!blank) {
-      const lm = LIST_MARKER_LINE_RE.exec(line);
-      const emptyLm = !lm && prevBlank ? EMPTY_LIST_MARKER_LINE_RE.exec(line) : null;
-      if (lm) listContentCol = widthInColumns(lm[1]);
+      const isThematicBreak = THEMATIC_BREAK_RE.test(line);
+      const lm = isThematicBreak ? null : LIST_MARKER_LINE_RE.exec(line);
+      const lmOrdered = lm ? /^ {0,3}(\d{1,9})[.)]/.exec(line) : null;
+      const lmIsParagraphText =
+        lm !== null && inPara && listContentCol === 0 && lmOrdered !== null && lmOrdered[1] !== '1';
+      const emptyLm = lm !== null || inPara ? null : EMPTY_LIST_MARKER_LINE_RE.exec(line);
+      if (lm && !lmIsParagraphText) listContentCol = widthInColumns(lm[1]);
       else if (emptyLm) listContentCol = widthInColumns(emptyLm[1]) + 1;
       else if (indentDefinitelyBelow(line, listContentCol)) listContentCol = 0;
+      if (BLOCKQUOTE_LINE_RE.test(line)) {
+        inPara = false;
+        quoteLazy = true;
+      } else if (
+        isThematicBreak ||
+        (lm !== null && !lmIsParagraphText) ||
+        emptyLm !== null ||
+        ATX_HEADING_RE.test(line) ||
+        (inPara && SETEXT_UNDERLINE_RE.test(line))
+      ) {
+        inPara = false;
+        quoteLazy = false;
+      } else if (!quoteLazy) {
+        inPara = true;
+      }
+    } else {
+      inPara = false;
+      quoteLazy = false;
     }
-    prevBlank = blank;
     out.push(line);
   }
   return out;
