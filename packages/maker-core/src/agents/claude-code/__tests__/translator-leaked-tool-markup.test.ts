@@ -257,6 +257,19 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toEqual({ category: 'invoke-with-parameter' });
   });
 
+  it('does not hit when a list fence indents its contents with tabs', () => {
+    // tab 按列宽展开(CommonMark):tab 缩进的围栏内容不能被数成零缩进而提前
+    // 隐式闭栏。
+    const listFence = `示例:\n- \`\`\`xml\n\tinvoke name="Bash">\n\t<parameter name="command">ls</parameter>\n\t\`\`\`\n完。`;
+    expect(detectLeakedToolCallMarkup(listFence)).toBeNull();
+  });
+
+  it('does not hit when the fence sits on a nested list item', () => {
+    // 嵌套列表(- - ```xml):列表标记可叠加。
+    const nested = `示例:\n- - \`\`\`xml\n    invoke name="Bash">\n    <parameter name="command">ls</parameter>\n    \`\`\`\n完。`;
+    expect(detectLeakedToolCallMarkup(nested)).toBeNull();
+  });
+
   it('still hits when an unclosed list-item fence ends with the list (implicit close)', () => {
     // CommonMark:列表围栏内容必须缩进到列表项内容列,低于该缩进的非空行结束
     // 列表项与其中未闭合的围栏 —— 列表外的真实泄漏不能被吞掉。

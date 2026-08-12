@@ -25,14 +25,34 @@
 
 /**
  * 围栏开栏(行级判定,CommonMark 语义):行首 0-3 个**空格**缩进(tab 缩进的
- * 是缩进代码不是围栏,Codex review)+ 可选的列表项标记(`- ` / `1. ` 等 ——
- * 列表项内的围栏示例是合法文档形态,第八轮 Codex review)+ 3 个及以上同字符
+ * 是缩进代码不是围栏,Codex review)+ 可叠加的列表项标记(`- ` / `1. ` /
+ * 嵌套 `- - ` 等 —— 列表项内的围栏示例是合法文档形态,第八、十轮 review)
+ * + 3 个及以上同字符
  * 运行;反引号开栏的 info string 不得含反引号(含则整行不是开栏),波浪线
  * 开栏无此限制。捕获组:m[1]=运行前的全部前缀,m[2]=围栏运行,m[3]=info。
  */
-const FENCE_OPEN_RE = /^( {0,3}(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})?)(`{3,}|~{3,})(.*)$/;
-/** 闭栏行:纯缩进 + 围栏运行 + 尾随空白;缩进上限由开栏的容器边距决定。 */
-const FENCE_CLOSE_RE = /^( *)(`{3,}|~{3,})[ \t]*$/;
+const FENCE_OPEN_RE = /^( {0,3}(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})*)(`{3,}|~{3,})(.*)$/;
+/** 闭栏行:纯缩进 + 围栏运行 + 尾随空白;缩进上限(按列宽)由开栏的容器边距决定。 */
+const FENCE_CLOSE_RE = /^([ \t]*)(`{3,}|~{3,})[ \t]*$/;
+
+/**
+ * 字符串的列宽(tab 按 CommonMark 展开到下一个 4 的倍数列)。用于容器边距与
+ * 缩进比较 —— 只数空格会把 tab 缩进的围栏内容当成零缩进,提前隐式闭栏造成
+ * 误报(第十轮 review)。
+ */
+function widthInColumns(prefix: string): number {
+  let col = 0;
+  for (const ch of prefix) {
+    col = ch === '\t' ? col + 4 - (col % 4) : col + 1;
+  }
+  return col;
+}
+
+/** 行首空白的列宽(遇到第一个非空白字符停)。 */
+function leadingIndentColumns(line: string): number {
+  const ws = /^[ \t]*/.exec(line)?.[0] ?? '';
+  return widthInColumns(ws);
+}
 
 /**
  * 剥离围栏代码块 —— 行级状态机替代正则(第五、七轮 review 后正则已不可维护):
@@ -57,7 +77,7 @@ function stripFencedBlocks(lines: string[]): string[] {
       const c = FENCE_CLOSE_RE.exec(line);
       if (
         c &&
-        c[1].length <= fence.maxCloseIndent &&
+        widthInColumns(c[1]) <= fence.maxCloseIndent &&
         c[2][0] === fence.char &&
         c[2].length >= fence.len
       ) {
@@ -65,8 +85,7 @@ function stripFencedBlocks(lines: string[]): string[] {
         continue;
       }
       if (fence.contentIndent > 0 && !/^[ \t]*$/.test(line)) {
-        const indent = /^ */.exec(line)?.[0].length ?? 0;
-        if (indent < fence.contentIndent) {
+        if (leadingIndentColumns(line) < fence.contentIndent) {
           fence = null; // 隐式闭栏:该行不属于列表项,落下去按普通行处理。
         } else {
           continue;
@@ -82,11 +101,12 @@ function stripFencedBlocks(lines: string[]): string[] {
       const validOpen = char === '~' || !info.includes('`');
       if (validOpen) {
         const isListOpener = /\S/.test(m[1]);
+        const prefixCols = widthInColumns(m[1]);
         fence = {
           char,
           len: m[2].length,
-          maxCloseIndent: m[1].length + 3,
-          contentIndent: isListOpener ? m[1].length : 0,
+          maxCloseIndent: prefixCols + 3,
+          contentIndent: isListOpener ? prefixCols : 0,
         };
         continue;
       }
