@@ -35,6 +35,18 @@ import { fingerprintReviewCappedWorkspaceFiles } from './reviewCappedWorkspaceFi
 const MAX_SUBMODULE_RECURSION_DEPTH = 5;
 /** 单个子仓 dirty 条目上限;超过按无法完整表达处理(fail closed)。 */
 const MAX_SUBMODULE_DIRTY_ENTRIES = 10_000;
+/**
+ * 整次 manifest 构建(全部子仓 + 嵌套递归)**共享**的内容哈希预算。上限与
+ * capped 指纹器单次调用相同,但这里跨子仓累计扣减 —— 否则 N 个大型 dirty
+ * 子仓各自重置 512MB 额度,快照总读取量没有上限。耗尽 fail closed。
+ */
+const MAX_MANIFEST_CONTENT_BYTES = 512 * 1024 * 1024;
+const MAX_MANIFEST_CONTENT_PATHS = 10_000;
+
+interface ManifestContentBudget {
+  remainingBytes: number;
+  remainingPaths: number;
+}
 
 export class ReviewSubmoduleIdentityError extends Error {}
 
@@ -165,6 +177,7 @@ async function readOneSubmoduleIdentity(
   repoRoot: string,
   subPath: string,
   depth: number,
+  budget: ManifestContentBudget,
 ): Promise<{ identity: ReviewSubmoduleIdentity; hashedContent: boolean }> {
   if (depth > MAX_SUBMODULE_RECURSION_DEPTH) {
     throw new ReviewSubmoduleIdentityError(
@@ -246,13 +259,22 @@ async function readOneSubmoduleIdentity(
   let dirtyContentFingerprint: string | null = null;
   let hashedContent = false;
   if (worktreePaths.length > 0) {
-    dirtyContentFingerprint = await fingerprintReviewCappedWorkspaceFiles(subRoot, worktreePaths);
+    // 字节与路径预算都从整次构建的共享额度里扣,不按子仓重置。
+    budget.remainingPaths -= worktreePaths.length;
+    if (budget.remainingPaths < 0) {
+      throw new ReviewSubmoduleIdentityError(
+        `Review submodule manifest exceeds the shared content-path budget of ${MAX_MANIFEST_CONTENT_PATHS}`,
+      );
+    }
+    dirtyContentFingerprint = await fingerprintReviewCappedWorkspaceFiles(subRoot, worktreePaths, {
+      byteBudget: budget,
+    });
     hashedContent = true;
   }
 
   const nested: ReviewSubmoduleIdentity[] = [];
   for (const nestedPath of nestedPaths) {
-    const child = await readOneSubmoduleIdentity(subRoot, nestedPath, depth + 1);
+    const child = await readOneSubmoduleIdentity(subRoot, nestedPath, depth + 1, budget);
     nested.push(child.identity);
     hashedContent = hashedContent || child.hashedContent;
   }
@@ -280,14 +302,22 @@ async function readOneSubmoduleIdentity(
 export async function readReviewSubmoduleIdentity(
   repoRoot: string,
   rawPaths: readonly string[],
+  limits?: { maxContentBytes?: number; maxContentPaths?: number },
 ): Promise<ReviewSubmoduleIdentityResult> {
+  // 不做字符过滤:pathspec 经 argv 传递、输出全部走 -z(NUL 分隔、无引号
+  // 转义),含 \n / \r 的合法 submodule 路径同样必须绑定身份 —— 静默丢弃
+  // 就是绕过口(与 indexIdentityReader 同一裁决)。
   const paths = [...new Set(rawPaths)]
-    .filter((p) => p.length > 0 && !p.includes('\n') && !p.includes('\r'))
+    .filter((p) => p.length > 0)
     .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const budget: ManifestContentBudget = {
+    remainingBytes: limits?.maxContentBytes ?? MAX_MANIFEST_CONTENT_BYTES,
+    remainingPaths: limits?.maxContentPaths ?? MAX_MANIFEST_CONTENT_PATHS,
+  };
   const identities: ReviewSubmoduleIdentity[] = [];
   let hashedContent = false;
   for (const subPath of paths) {
-    const one = await readOneSubmoduleIdentity(repoRoot, subPath, 1);
+    const one = await readOneSubmoduleIdentity(repoRoot, subPath, 1, budget);
     identities.push(one.identity);
     hashedContent = hashedContent || one.hashedContent;
   }
