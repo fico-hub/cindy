@@ -445,6 +445,44 @@ describe('readReviewSubmoduleIdentity 路径边界 (#2463 review)', () => {
   );
 });
 
+describe('readReviewSubmoduleIdentity 路径边界:尾随回车 (#2463 review)', () => {
+  // Windows 文件名不可能含 \r,该形态仅在 POSIX 侧存在。git 的 submodule
+  // porcelain 会规范掉路径尾随 \r,所以用「直接 clone + update-index 手工
+  // 注册 gitlink」构造:身份读取只依赖 index 里的 gitlink 记录与目录自身的
+  // git toplevel 归属,不依赖 .gitmodules。
+  it.skipIf(process.platform === 'win32')(
+    'binds a submodule whose directory name ends with a carriage return',
+    async () => {
+      const upstream = path.join(workRoot, 'lib-upstream-cr');
+      await initRepo(upstream);
+      await fs.writeFile(path.join(upstream, 'inner.txt'), 'inner-v1\n');
+      await runGit(['add', 'inner.txt'], { cwd: upstream });
+      await runGit(['commit', '--no-gpg-sign', '-m', 'inner seed'], { cwd: upstream });
+      const { stdout: headOut } = await runGit(['rev-parse', 'HEAD'], { cwd: upstream });
+      const innerHead = headOut.trim();
+
+      const parent = path.join(workRoot, 'parent-cr');
+      await initRepo(parent);
+      await fs.writeFile(path.join(parent, 'root.txt'), 'root\n');
+      await runGit(['add', 'root.txt'], { cwd: parent });
+      await runGit(['commit', '--no-gpg-sign', '-m', 'parent seed'], { cwd: parent });
+      const subName = 'vendor/lib\r';
+      const sub = path.join(parent, 'vendor', 'lib\r');
+      await runGit(['clone', upstream, sub], { cwd: parent });
+      await configureRepo(sub);
+      await runGit(['update-index', '--add', '--cacheinfo', `160000,${innerHead},${subName}`], {
+        cwd: parent,
+      });
+      await fs.writeFile(path.join(sub, 'inner.txt'), 'inner-dirty\n');
+
+      const result = await readReviewSubmoduleIdentity(parent, [subName]);
+      expect(result.identities).toHaveLength(1);
+      expect(result.identities[0].subHead).not.toBe('uninitialized');
+      expect(result.identities[0].dirtyContentFingerprint).not.toBeNull();
+    },
+  );
+});
+
 describe('readReviewSubmoduleIdentity 无身份目录 (#2463 review)', () => {
   it('fails closed when the gitlink path is a non-empty plain directory without git identity', async () => {
     // .git 被移除、路径被普通目录 + 任意文件替换:porcelain 仍是同一条 S 记录,
