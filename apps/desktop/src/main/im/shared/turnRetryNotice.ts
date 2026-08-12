@@ -120,6 +120,27 @@ export function overloadFailureNotice(
 }
 
 /**
+ * 会话记忆的 model 与当前来源不匹配 -> 可执行的恢复指引; 非该类错误返回 null。
+ *
+ * 场景(#2141): 渠道默认 provider 切到 BYOM 后, 旧 IM 会话仍带着老 model +
+ * 新 provider 的组合, 路由权威直接拒绝(如 `pi: BYOM provider 'deepseek'
+ * cannot serve model 'claude-...'`)。不做静默降级 —— 换 model/来源会同时改变
+ * 上下文语义、凭证来源与计费 endpoint; 这里只把底层术语换成用户能执行的两条
+ * 恢复动作。/new 与富卡片 /model 都是渠道既有能力, 文案必须说清 /new 会开新
+ * 上下文, 不伪装成无损恢复。上游原文由调用方留在本地日志。
+ */
+const PROVIDER_MODEL_MISMATCH_RE = /provider '[^']+' cannot serve model/i;
+
+export function providerModelMismatchNotice(message: string): string | null {
+  if (!PROVIDER_MODEL_MISMATCH_RE.test(message)) return null;
+  return (
+    '⚠️ 无法继续:这个任务记忆的模型不在当前模型来源里(渠道默认设置可能已变更)。' +
+    '发送 /model 可以在当前来源支持的模型里重新选择;' +
+    '或发送 /new 按渠道当前默认设置开始新任务(会另起上下文,不保留本任务的对话)。'
+  );
+}
+
+/**
  * 终态 error 事件的 data -> 渠道要展示的失败文案: 过载类换成上面那条可操作说明,
  * 其它错误沿用上游原文。
  *
@@ -144,5 +165,9 @@ export function terminalErrorText(data: unknown): string {
   const errorStatus = typeof record?.errorStatus === 'number' ? record.errorStatus : undefined;
   const codexErrorInfo =
     typeof record?.codexErrorInfo === 'string' ? record.codexErrorInfo : undefined;
-  return overloadFailureNotice(message, errorStatus, codexErrorInfo) ?? message;
+  return (
+    overloadFailureNotice(message, errorStatus, codexErrorInfo) ??
+    providerModelMismatchNotice(message) ??
+    message
+  );
 }

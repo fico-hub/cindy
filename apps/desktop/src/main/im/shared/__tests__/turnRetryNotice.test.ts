@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import {
   overloadFailureNotice,
   overloadRetryNotice,
+  providerModelMismatchNotice,
   terminalErrorText,
   turnRetryNotice,
 } from '../turnRetryNotice';
@@ -233,5 +234,40 @@ describe('terminalErrorText', () => {
     // 值存在就照常取值(含非字符串)。
     expect(terminalErrorText({ message: 0 })).toBe('0');
     expect(terminalErrorText({ message: 'boom' })).toBe('boom');
+  });
+});
+
+// 会话 model 与当前来源不匹配的恢复指引(#2141):渠道默认 provider 切 BYOM 后,
+// 旧会话的路由拒绝不能以底层术语透传 —— 用户需要的是能执行的下一步。
+describe('providerModelMismatchNotice (#2141)', () => {
+  const PI_SHAPE =
+    "pi: BYOM provider 'deepseek' cannot serve model 'claude-opus-4-7' in this session's route";
+
+  it('命中 cannot-serve-model 形态时给出 /model 与 /new 两条恢复动作', () => {
+    const notice = providerModelMismatchNotice(PI_SHAPE);
+    expect(notice).toContain('/model');
+    expect(notice).toContain('/new');
+    // /new 必须说清会另起上下文,不伪装成无损恢复。
+    expect(notice).toContain('另起上下文');
+    // 底层术语不外发。
+    expect(notice).not.toContain('BYOM');
+    expect(notice).not.toContain('cannot serve');
+  });
+
+  it('terminalErrorText 对该类终态错误输出恢复指引而不是原文', () => {
+    const text = terminalErrorText({ message: PI_SHAPE });
+    expect(text).toContain('/model');
+    expect(text).not.toContain('cannot serve');
+  });
+
+  it('非该类错误保持原文透传(不误判)', () => {
+    for (const message of [
+      'Selected model is at capacity. Please try a different model.',
+      'thread not found',
+      '讨论 provider 与 model 的普通句子 cannot serve 不带引号形态',
+      'provider misconfigured: check settings',
+    ]) {
+      expect(providerModelMismatchNotice(message)).toBeNull();
+    }
   });
 });
