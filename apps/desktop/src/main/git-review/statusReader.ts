@@ -179,6 +179,12 @@ export function parsePorcelainV2Status(stdout: string, baseScope: ReviewScope): 
     if (tag === 'u') {
       const parsed = splitFixedFields(record, 10);
       if (!parsed) continue;
+      // u 记录同样携带 XY 与 sub 字段(porcelain=2:u <XY> <sub> <m1..mW>
+      // <h1..h3> <path>)。sub 不能丢:顶层 gitlink 的合并冲突(如 UU 的
+      // submodule)必须保留 submodule 身份,否则不会被路由进 submodule
+      // reader,gitlink 目录会被普通文件指纹器拒绝、合法冲突无法启动
+      // Review(Codex review #2515)。
+      const [, xy, sub] = parsed.fields;
       files.push({
         path: parsed.rest,
         oldPath: null,
@@ -186,9 +192,9 @@ export function parsePorcelainV2Status(stdout: string, baseScope: ReviewScope): 
         worktreeStatus: 'unmerged',
         isUntracked: false,
         isUnmerged: true,
-        isSubmodule: false,
+        isSubmodule: isSubmoduleField(sub),
         sources: ['staged', 'unstaged'],
-        rawXY: 'UU',
+        rawXY: xy,
       });
     }
   }

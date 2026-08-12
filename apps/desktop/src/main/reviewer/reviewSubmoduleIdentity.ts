@@ -285,7 +285,10 @@ async function readOneSubmoduleIdentity(
     maxStdoutBytes: 4096,
   });
   const [toplevelReal, subRootReal] = await Promise.all([
-    fsRealpath(toplevelOut.trim()),
+    // 只剥 git 追加的行终止符,不 trim:目录名允许以空格/制表符结尾(macOS
+    // 文件系统与 git 均合法),trim 会把路径本身裁掉导致 realpath 查错路径
+    // (Codex review #2515)。
+    fsRealpath(toplevelOut.replace(/\r?\n$/, '')),
     fsRealpath(subRoot),
   ]);
   if (toplevelReal !== subRootReal) return uninitialized;
