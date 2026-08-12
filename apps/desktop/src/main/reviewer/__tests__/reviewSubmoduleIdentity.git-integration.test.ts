@@ -165,6 +165,43 @@ describe('readReviewSubmoduleIdentity (#2463)', () => {
     expect(result.identities[0].subHead).toBe('uninitialized');
   });
 
+  it('shares one content-hash budget across submodules instead of resetting per repo', async () => {
+    // 两个子仓各有一个 6 字节 dirty 文件:预算 8 字节 —— 单个子仓够用,两个
+    // 合计超限。共享预算必须在第二个子仓 fail closed;按子仓重置则两个都过。
+    const upstream = path.join(workRoot, 'lib-upstream');
+    await initRepo(upstream);
+    await fs.writeFile(path.join(upstream, 'inner.txt'), 'seed\n');
+    await runGit(['add', 'inner.txt'], { cwd: upstream });
+    await runGit(['commit', '--no-gpg-sign', '-m', 'inner seed'], { cwd: upstream });
+
+    const parent = path.join(workRoot, 'parent');
+    await initRepo(parent);
+    await fs.writeFile(path.join(parent, 'root.txt'), 'root\n');
+    await runGit(['add', 'root.txt'], { cwd: parent });
+    await runGit(['commit', '--no-gpg-sign', '-m', 'parent seed'], { cwd: parent });
+    for (const name of ['vendor/a', 'vendor/b']) {
+      await runGit(
+        ['-c', 'protocol.file.allow=always', 'submodule', 'add', upstream, name],
+        { cwd: parent },
+      );
+      await configureRepo(path.join(parent, ...name.split('/')));
+    }
+    await runGit(['commit', '--no-gpg-sign', '-m', 'add submodules'], { cwd: parent });
+    parentPath = parent;
+    await fs.writeFile(path.join(parent, 'vendor', 'a', 'inner.txt'), 'dirtyA\n');
+    await fs.writeFile(path.join(parent, 'vendor', 'b', 'inner.txt'), 'dirtyB\n');
+
+    await expect(
+      readReviewSubmoduleIdentity(parentPath, ['vendor/a'], { maxContentBytes: 8 }),
+    ).resolves.toBeTruthy();
+    await expect(
+      readReviewSubmoduleIdentity(parentPath, ['vendor/b'], { maxContentBytes: 8 }),
+    ).resolves.toBeTruthy();
+    await expect(
+      readReviewSubmoduleIdentity(parentPath, ['vendor/a', 'vendor/b'], { maxContentBytes: 8 }),
+    ).rejects.toThrow();
+  });
+
   it('fails closed when the parent repository cannot be read', async () => {
     await expect(
       readReviewSubmoduleIdentity(path.join(workRoot, 'no-such-repo'), ['vendor/lib']),

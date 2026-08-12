@@ -14,6 +14,12 @@ const NOFOLLOW_FLAG = typeof constants.O_NOFOLLOW === 'number' ? constants.O_NOF
 export interface ReviewCappedWorkspaceFingerprintOptions {
   /** Test seam; production remains bounded and fails closed above the limit. */
   maxTotalBytes?: number;
+  /**
+   * 跨多次调用共享的字节预算(如 submodule manifest 的整次构建):以当前
+   * remainingBytes 为本次上限,结束后按实际哈希字节**原地扣减**。与
+   * maxTotalBytes 互斥,同时给时以本字段为准。预算耗尽按超限 fail closed。
+   */
+  byteBudget?: { remainingBytes: number };
 }
 
 export class ReviewCappedWorkspaceFingerprintError extends Error {}
@@ -153,8 +159,14 @@ export async function fingerprintReviewCappedWorkspaceFiles(
   rawPaths: readonly string[],
   options: ReviewCappedWorkspaceFingerprintOptions = {},
 ): Promise<string> {
-  const maxTotalBytes = options.maxTotalBytes ?? MAX_CAPPED_WORKSPACE_BYTES;
+  const budget = options.byteBudget;
+  const maxTotalBytes = budget ? budget.remainingBytes : (options.maxTotalBytes ?? MAX_CAPPED_WORKSPACE_BYTES);
   if (!Number.isSafeInteger(maxTotalBytes) || maxTotalBytes <= 0) {
+    if (budget) {
+      throw new ReviewCappedWorkspaceFingerprintLimitError(
+        'Capped Review shared content-byte budget is exhausted',
+      );
+    }
     throw new TypeError('maxTotalBytes must be a positive safe integer');
   }
   const repoRootReal = await fs.realpath(repoRoot);
@@ -196,5 +208,6 @@ export async function fingerprintReviewCappedWorkspaceFiles(
       remainingBytes: maxTotalBytes - totalBytes,
     });
   }
+  if (budget) budget.remainingBytes -= totalBytes;
   return hash.digest('hex');
 }
