@@ -486,9 +486,9 @@ describe('readReviewWorkspaceSnapshot', () => {
   it('does not hand a dirty submodule to the file fingerprinter', async () => {
     // A gitlink is a directory and the fingerprinter accepts only regular
     // files, so including it would abort evidence loading and make the whole
-    // dirty workspace unreviewable. The cost of excluding it — edits inside
-    // the submodule are not bound — is stated at the call site and tracked in
-    // #2463; it is not offset by the porcelain status, which keeps no oid.
+    // dirty workspace unreviewable. Its identity is bound by the submodule
+    // reader instead (#2463) — stubbed here because this fixture directory is
+    // not a real Git repository.
     const repoRoot = await tempDir();
     const submodulePath = 'vendor/lib';
     await fs.mkdir(path.join(repoRoot, submodulePath), { recursive: true });
@@ -507,7 +507,88 @@ describe('readReviewWorkspaceSnapshot', () => {
       },
     });
 
-    await expect(readReviewWorkspaceSnapshot('source')).resolves.toBeTruthy();
+    await expect(
+      readReviewWorkspaceSnapshot('source', {
+        readSubmoduleIdentity: async () => ({ identities: [], hashedContent: false }),
+      }),
+    ).resolves.toBeTruthy();
+  });
+
+  it('routes submodule evidence to the identity reader and binds the manifest (#2463)', async () => {
+    const repoRoot = await tempDir();
+    const submodulePath = 'vendor/lib';
+    await fs.mkdir(path.join(repoRoot, submodulePath), { recursive: true });
+    const data = binaryReviewData(repoRoot, submodulePath);
+    readReviewDataMock.mockResolvedValue({
+      ...data,
+      diffs: {
+        ...data.diffs,
+        unstaged: data.diffs.unstaged.map((diff) => ({
+          ...diff,
+          kind: 'unrenderable' as const,
+          isBinary: false,
+          isSubmodule: true,
+          error: null,
+        })),
+      },
+    });
+    const manifest = (subHead: string) => ({
+      identities: [
+        {
+          path: submodulePath,
+          indexRecord: `160000 0 ${'c'.repeat(40)}`,
+          headRecord: `160000 commit ${'c'.repeat(40)}`,
+          subHead,
+          stagedIdentity: [],
+          dirtyContentFingerprint: null,
+          nested: [],
+        },
+      ],
+      hashedContent: false,
+    });
+
+    const before = await readReviewWorkspaceSnapshot('source', {
+      readSubmoduleIdentity: async (_repoRoot, paths) => {
+        expect(paths).toEqual([submodulePath]);
+        return manifest('a'.repeat(40));
+      },
+    });
+    const after = await readReviewWorkspaceSnapshot('source', {
+      readSubmoduleIdentity: async () => manifest('b'.repeat(40)),
+    });
+
+    expect(after?.workspace).toEqual(before?.workspace);
+    expect(before?.fingerprint).toMatch(/^[a-f0-9]{64}$/);
+    expect(after?.fingerprint).not.toBe(before?.fingerprint);
+  });
+
+  it('fails closed when the submodule identity cannot be read (#2463)', async () => {
+    const repoRoot = await tempDir();
+    const submodulePath = 'vendor/lib';
+    await fs.mkdir(path.join(repoRoot, submodulePath), { recursive: true });
+    const data = binaryReviewData(repoRoot, submodulePath);
+    readReviewDataMock.mockResolvedValue({
+      ...data,
+      diffs: {
+        ...data.diffs,
+        unstaged: data.diffs.unstaged.map((diff) => ({
+          ...diff,
+          kind: 'unrenderable' as const,
+          isBinary: false,
+          isSubmodule: true,
+          error: null,
+        })),
+      },
+    });
+    const failure = new Error('submodule identity unreadable');
+
+    await expect(
+      readReviewWorkspaceSnapshot('source', {
+        readSubmoduleIdentity: async () => {
+          throw failure;
+        },
+      }),
+    ).rejects.toBe(failure);
   });
 
   it('marks prepared Git evidence stale when the workspace changes before launch', async () => {

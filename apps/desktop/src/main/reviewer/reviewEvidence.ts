@@ -43,6 +43,7 @@ import {
   ReviewCappedWorkspaceChangedError,
 } from './reviewCappedWorkspaceFingerprint.js';
 import { readStagedIndexIdentity } from '../git-review/indexIdentityReader.js';
+import { readReviewSubmoduleIdentity } from './reviewSubmoduleIdentity.js';
 
 export interface ReviewAttachmentInput {
   name: string;
@@ -196,12 +197,14 @@ interface ReviewWorkspaceSnapshotDeps {
   readReviewData: typeof readReviewData;
   fingerprintCappedWorkspaceFiles: typeof fingerprintReviewCappedWorkspaceFiles;
   readStagedIndexIdentity: typeof readStagedIndexIdentity;
+  readSubmoduleIdentity: typeof readReviewSubmoduleIdentity;
 }
 
 const defaultReviewWorkspaceSnapshotDeps: ReviewWorkspaceSnapshotDeps = {
   readReviewData,
   fingerprintCappedWorkspaceFiles: fingerprintReviewCappedWorkspaceFiles,
   readStagedIndexIdentity,
+  readSubmoduleIdentity: readReviewSubmoduleIdentity,
 };
 
 /**
@@ -224,27 +227,14 @@ function workspacePathsWithoutContent(workspace: ReviewWorkspaceEvidence): strin
     // Submodules are excluded on purpose: a gitlink is a directory, and the
     // content fingerprinter only accepts regular files, so passing one would
     // abort evidence loading outright — an initialized submodule anywhere in
-    // the workspace would make Review refuse to run at all.
+    // the workspace would make Review refuse to run at all. Do not "fix" the
+    // binding gap by feeding the directory back in, which is that crash.
     //
-    // The accepted cost, stated plainly: edits living *inside* a dirty
-    // submodule are not bound. Porcelain v2 spends one boolean on "the
-    // submodule has modified content" and FileStatus keeps neither that flag
-    // nor any object id, so replacing one internal edit with another leaves
-    // every value this digest sees unchanged. Closing it needs an identity
-    // read this layer does not have — the gitlink oid plus a recursive digest
-    // of the inner worktree — which is a submodule-aware reader, not another
-    // path added to the file fingerprinter. That reader is out of scope here
-    // and tracked in #2463; do not "fix" this by feeding the directory back
-    // in, which is the crash described above.
-    //
-    // What bounds the exposure meanwhile: inner content is never part of the
-    // evidence (diffReader classifies every submodule entry as `submodule`
-    // with an empty patch, so no inner bytes reach the prompt), and a file
-    // inside a submodule that is explicitly attached lands in reviewReadPaths
-    // and is fully content-hashed by fingerprintReviewArtifacts. The unbound
-    // case is the reviewer opening an inner file that is neither — the same
-    // class as opening any unchanged tracked file, which no fingerprint here
-    // covers either.
+    // Their identity is bound elsewhere: submoduleEvidencePaths() routes every
+    // submodule evidence entry to the submodule-aware reader (#2463), which
+    // binds the gitlink oids, the inner HEAD, the inner staged index identity
+    // and a bounded content hash of inner dirty regular files — the identity
+    // read this file-path digest cannot express.
     .filter((diff) => !diff.rawPatch && !diff.isSubmodule)
     .flatMap((diff) => [diff.path, diff.oldPath].filter(Boolean) as string[]);
   return [...new Set([...capped, ...contentless])];
@@ -274,20 +264,33 @@ function stagedEvidencePaths(workspace: ReviewWorkspaceEvidence): string[] {
   return [...new Set([...staged, ...capped])];
 }
 
+/**
+ * Sanitized evidence paths that are submodules and need an identity manifest
+ * (#2463). The file fingerprinter cannot bind them (a gitlink is a directory)
+ * and porcelain keeps only a dirty boolean, so a submodule-aware reader binds
+ * the gitlink oids, the inner HEAD and the inner dirty file identities.
+ */
+function submoduleEvidencePaths(workspace: ReviewWorkspaceEvidence): string[] {
+  const capped = [workspace.diffs.capped?.staged, workspace.diffs.capped?.unstaged].flatMap(
+    (bucket) => (bucket ? bucket.files.filter((file) => file.isSubmodule).map((file) => file.path) : []),
+  );
+  const diffs = [...workspace.diffs.staged, ...workspace.diffs.unstaged]
+    .filter((diff) => diff.isSubmodule)
+    .map((diff) => diff.path);
+  return [...new Set([...diffs, ...capped])];
+}
+
 async function buildReviewWorkspaceSnapshot(
   reviewData: Awaited<ReturnType<typeof readReviewData>>,
   deps: Pick<
     ReviewWorkspaceSnapshotDeps,
-    'fingerprintCappedWorkspaceFiles' | 'readStagedIndexIdentity'
+    'fingerprintCappedWorkspaceFiles' | 'readStagedIndexIdentity' | 'readSubmoduleIdentity'
   >,
 ): Promise<ReviewWorkspaceSnapshot> {
   const workspace = mapReviewWorkspace(reviewData);
   const contentlessPaths = workspacePathsWithoutContent(workspace);
-  // Whichever files needed their own content hash also need the stability
-  // re-read below: both are answering "did these bytes hold still?".
-  const hasCappedDiff = contentlessPaths.length > 0;
   const cappedContentFingerprint =
-    hasCappedDiff && reviewData.scope.repoRoot
+    contentlessPaths.length > 0 && reviewData.scope.repoRoot
       ? await deps.fingerprintCappedWorkspaceFiles(reviewData.scope.repoRoot, contentlessPaths)
       : null;
   const stagedPaths = stagedEvidencePaths(workspace);
@@ -297,6 +300,15 @@ async function buildReviewWorkspaceSnapshot(
     stagedPaths.length > 0 && reviewData.scope.repoRoot
       ? await deps.readStagedIndexIdentity(reviewData.scope.repoRoot, stagedPaths)
       : null;
+  const submodulePaths = submoduleEvidencePaths(workspace);
+  const submoduleIdentity =
+    submodulePaths.length > 0 && reviewData.scope.repoRoot
+      ? await deps.readSubmoduleIdentity(reviewData.scope.repoRoot, submodulePaths)
+      : null;
+  // Whichever files needed their own content hash also need the stability
+  // re-read below: both are answering "did these bytes hold still?". Inner
+  // submodule file hashes (#2463) join the same window.
+  const hasCappedDiff = contentlessPaths.length > 0 || submoduleIdentity?.hashedContent === true;
   return {
     workspace,
     // A clean tree is not proof that the reviewer saw the same code: changing
@@ -321,6 +333,7 @@ async function buildReviewWorkspaceSnapshot(
               workspace,
               cappedContentFingerprint,
               stagedIndexIdentity,
+              submoduleIdentity: submoduleIdentity?.identities ?? null,
             }),
           )
           .digest('hex')
