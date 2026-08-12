@@ -151,7 +151,11 @@ interface SubStatusEntry {
 
 async function readSubStatus(subRoot: string): Promise<SubStatusEntry[]> {
   const { stdout } = await runGit(
-    ['status', '--porcelain', '-z', '--untracked-files=all', '--no-renames'],
+    // --ignore-submodules=none 显式覆盖仓库配置:.gitmodules / 本地配置里的
+    // submodule.<name>.ignore=all/dirty 会让 status 省略脏的嵌套子仓,内层
+    // 内容替换不进 nested manifest,旧结论照样通过新鲜度门(Codex review
+    // #2515,已实仓验证 ignore=all 会移除 dirty child)。
+    ['status', '--porcelain', '-z', '--untracked-files=all', '--no-renames', '--ignore-submodules=none'],
     { cwd: subRoot, maxStdoutBytes: 16 * 1024 * 1024 },
   );
   const entries: SubStatusEntry[] = [];

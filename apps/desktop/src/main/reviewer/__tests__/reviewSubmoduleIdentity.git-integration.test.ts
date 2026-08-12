@@ -471,3 +471,24 @@ describe('readReviewSubmoduleIdentity 无身份目录 (#2463 review)', () => {
     expect(result.identities[0].subHead).toBe('uninitialized');
   });
 });
+
+describe('readReviewSubmoduleIdentity ignore 配置 (#2463 review)', () => {
+  it('binds nested dirty content even when submodule.ignore=all is configured', async () => {
+    // 子仓配置 submodule.<name>.ignore=all 会让 status 省略脏的嵌套子仓 ——
+    // 身份绑定必须显式 --ignore-submodules=none 无视该配置,否则内层内容
+    // 替换不进 nested manifest,旧结论照样通过新鲜度门。
+    const { parent, innermost } = await setupNestedChain(2);
+    parentPath = parent;
+    const outerSub = path.join(parent, 'vendor', 'lib');
+    await runGit(['config', 'submodule.child.ignore', 'all'], { cwd: outerSub });
+    const leaf = path.join(innermost, 'leaf.txt');
+
+    await fs.writeFile(leaf, 'leaf-vA\n');
+    const withEditA = await readReviewSubmoduleIdentity(parentPath, ['vendor/lib']);
+    await fs.writeFile(leaf, 'leaf-vB\n');
+    const withEditB = await readReviewSubmoduleIdentity(parentPath, ['vendor/lib']);
+
+    expect(withEditA.identities[0].nested).toHaveLength(1);
+    expect(withEditB.identities).not.toEqual(withEditA.identities);
+  });
+});
