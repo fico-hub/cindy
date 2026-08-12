@@ -426,6 +426,21 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toBeNull();
   });
 
+  it('does not hit when a raw HTML block opens on the list marker line itself', () => {
+    // `- <script>`:HTML 块直接开在列表项标记行上,块内示例整块隐藏。
+    expect(
+      detectLeakedToolCallMarkup(
+        `- <script>\n  invoke name="Bash">\n  <parameter name="command">ls</parameter>\n  </script>\n完。`,
+      ),
+    ).toBeNull();
+  });
+
+  it('still hits after an unclosed list-marker HTML block ends with the list', () => {
+    expect(
+      detectLeakedToolCallMarkup(`- <script>\n  demo\n${CLASS_B_LEAK}`),
+    ).toEqual({ category: 'invoke-with-parameter' });
+  });
+
   it('does not treat a mixed-character line as a closing fence', () => {
     // CommonMark 闭栏必须与开栏同字符:``` 栏内出现 ```~~~ 行不是闭栏,块内
     // 后续的标记示例仍在围栏里,不命中。

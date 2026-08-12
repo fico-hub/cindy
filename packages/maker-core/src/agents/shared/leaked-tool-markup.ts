@@ -228,10 +228,13 @@ const BLOCKQUOTE_MARKER_RE = /^ {0,3}(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})?> ?/;
  * 块级标签已由 type 6 覆盖。
  */
 // 前缀空白放开由代码按列宽校验(与围栏开栏同规则,第十六轮 Codex review:
-// 内容列超过 3 的列表续行上的 HTML 块也要识别)。
-const HTML_BLOCK_TYPE1_OPEN_RE = /^[ \t]*<(script|pre|style|textarea)\b/i;
+// 内容列超过 3 的列表续行上的 HTML 块也要识别);并允许可选列表标记前缀
+// (- <script> 直接开在列表项标记行上,第十七轮 Codex review)。捕获组:
+// m[1]=前缀,m[2]=标签名。
+const HTML_BLOCK_TYPE1_OPEN_RE =
+  /^([ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})*)<(script|pre|style|textarea)\b/i;
 const HTML_BLOCK_TYPE6_RE =
-  /^[ \t]*<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?:[ \t/>]|$)/i;
+  /^([ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})*)<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?:[ \t/>]|$)/i;
 
 function stripHtmlBlocks(lines: string[]): string[] {
   const out: string[] = [];
@@ -263,28 +266,36 @@ function stripHtmlBlocks(lines: string[]): string[] {
         continue;
       }
     }
-    // 开栏缩进合法性与围栏同规则:≤3 列(顶层),或落在列表续行区间
-    // [内容列, 内容列 + 3];更深的缩进是缩进代码,不是 HTML 块。
-    const openerIndentOk = (): boolean => {
-      const cols = leadingIndentColumns(line);
-      return (
-        cols <= 3 ||
-        (listContentCol > 0 && cols >= listContentCol && cols <= listContentCol + 3)
-      );
-    };
+    // 开栏缩进合法性与围栏同规则:标记开栏的前导空白 ≤3 列或(嵌套)
+    // ≤ 内容列 + 3;纯空白开栏 ≤3 列或落在列表续行区间 [内容列, 内容列+3];
+    // 更深的缩进是缩进代码,不是 HTML 块。
     const t1 = HTML_BLOCK_TYPE1_OPEN_RE.exec(line);
-    if (t1 && openerIndentOk()) {
-      const close = new RegExp(`</${t1[1]}>`, 'i');
-      blockIndent =
-        listContentCol > 0 && !indentDefinitelyBelow(line, listContentCol) ? listContentCol : 0;
-      if (!close.test(line)) closeTag = close;
-      continue;
-    }
-    if (HTML_BLOCK_TYPE6_RE.test(line) && openerIndentOk()) {
-      blockIndent =
-        listContentCol > 0 && !indentDefinitelyBelow(line, listContentCol) ? listContentCol : 0;
-      inType6 = true;
-      continue;
+    const t6 = t1 ? null : HTML_BLOCK_TYPE6_RE.exec(line);
+    const opener = t1 ?? t6;
+    if (opener) {
+      const prefix = opener[1] ?? '';
+      const isListOpener = /\S/.test(prefix);
+      const prefixCols = widthInColumns(prefix);
+      const leadWsCols = widthInColumns(/^[ \t]*/.exec(prefix)?.[0] ?? '');
+      const ok = isListOpener
+        ? leadWsCols <= 3 || (listContentCol > 0 && leadWsCols <= listContentCol + 3)
+        : prefixCols <= 3 ||
+          (listContentCol > 0 && prefixCols >= listContentCol && prefixCols <= listContentCol + 3);
+      if (ok) {
+        blockIndent = isListOpener
+          ? prefixCols
+          : listContentCol > 0 && !indentDefinitelyBelow(line, listContentCol)
+          ? listContentCol
+          : 0;
+        if (isListOpener) listContentCol = prefixCols;
+        if (t1) {
+          const close = new RegExp(`</${t1[2]}>`, 'i');
+          if (!close.test(line)) closeTag = close;
+        } else {
+          inType6 = true;
+        }
+        continue;
+      }
     }
     if (!blank) {
       const lm = LIST_MARKER_LINE_RE.exec(line);
