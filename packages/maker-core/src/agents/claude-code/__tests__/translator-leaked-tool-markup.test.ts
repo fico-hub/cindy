@@ -682,6 +682,24 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     expect(detectLeakedToolCallMarkup(`<div/>\n${CLASS_B_LEAK}以上是说明。`)).toBeNull();
   });
 
+  it('still hits when a leak dedents out of an empty-marker list fence', () => {
+    // 单独成行的 `-` 是空列表项(内容列 = 标记末列 + 1,第二十八轮 Codex
+    // review):其下缩进的未闭合围栏随 dedent 隐式闭栏,列表外的真实泄漏
+    // 不被吞到输入末尾。
+    expect(detectLeakedToolCallMarkup(`-\n  \`\`\`xml\n  示例内容\n${CLASS_B_LEAK}`)).toEqual({
+      category: 'invoke-with-parameter',
+    });
+  });
+
+  it('does not hit when the markers sit inside an empty-marker list fence', () => {
+    // 对照组:空标记项内正常闭合的围栏照常剥离。
+    expect(
+      detectLeakedToolCallMarkup(
+        `-\n  \`\`\`xml\n  invoke name="Bash">\n  <parameter name="command">ls</parameter>\n  \`\`\`\n完。`,
+      ),
+    ).toBeNull();
+  });
+
   it('does not treat a mixed-character line as a closing fence', () => {
     // CommonMark 闭栏必须与开栏同字符:``` 栏内出现 ```~~~ 行不是闭栏,块内
     // 后续的标记示例仍在围栏里,不命中。

@@ -80,6 +80,13 @@ function indentDefinitelyBelow(line: string, cols: number): boolean {
 /** 纯列表标记行(不带围栏):用于维护「当前列表项内容列」上下文。 */
 const LIST_MARKER_LINE_RE = /^( {0,3}(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})+)/;
 
+// 单独成行的空列表标记(`-` / `2.`,第二十八轮 Codex review):内容列 =
+// 标记末列 + 1(CommonMark 空列表项的内容缩进),其下缩进的围栏属于该列表
+// 项,随 dedent 隐式闭栏。空列表项不能打断段落(打断要求首行非空),段落
+// 内的单独 `-` 行是 setext 下划线、单独 `2.` 行是段落延续 —— 由调用方按
+// 段落状态先行排除。
+const EMPTY_LIST_MARKER_LINE_RE = /^( {0,3}(?:[-*+]|\d{1,9}[.)]))[ \t]*$/;
+
 // 段落状态只由真正的段落文本行建立(第二十四轮 Codex review):ATX 标题、
 // 分隔线是独立块,setext 下划线行收束其上方段落 —— 它们之后的有序围栏没有
 // 段落可打断,是合法开栏。
@@ -279,8 +286,16 @@ function stripFencedBlocks(lines: string[]): string[] {
         listContentCol === 0 &&
         lmOrdered !== null &&
         lmOrdered[1] !== '1';
+      // 空标记行只在段落外算列表项(段落内的 `-` 是 setext 下划线、`2.` 是
+      // 段落延续,空列表项不能打断段落)。
+      const emptyLm =
+        isThematicBreak || lm !== null || inParagraph
+          ? null
+          : EMPTY_LIST_MARKER_LINE_RE.exec(line);
       if (lm && !lmIsParagraphText) {
         listContentCol = widthInColumns(lm[1]);
+      } else if (emptyLm) {
+        listContentCol = widthInColumns(emptyLm[1]) + 1;
       } else if (indentDefinitelyBelow(line, listContentCol)) {
         listContentCol = 0;
       }
@@ -304,6 +319,7 @@ function stripFencedBlocks(lines: string[]): string[] {
       } else if (
         isThematicBreak ||
         (lm !== null && !lmIsParagraphText) ||
+        emptyLm !== null ||
         ATX_HEADING_RE.test(line) ||
         (inParagraph && SETEXT_UNDERLINE_RE.test(line))
       ) {
