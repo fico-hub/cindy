@@ -316,6 +316,16 @@ describe('readReviewSubmoduleIdentity (#2463)', () => {
     }
   });
 
+  it('records an initialized checkout with unborn HEAD as unborn', async () => {
+    const { parent, sub } = await setupParentWithSubmodule();
+    parentPath = parent;
+    // orphan checkout:HEAD 指向尚不存在的 ref —— 已初始化空仓的合法形态。
+    await runGit(['checkout', '--orphan', 'fresh'], { cwd: sub });
+
+    const result = await readReviewSubmoduleIdentity(parentPath, ['vendor/lib']);
+    expect(result.identities[0].subHead).toBe('unborn');
+  });
+
   it('fails closed when the parent repository cannot be read', async () => {
     await expect(
       readReviewSubmoduleIdentity(path.join(workRoot, 'no-such-repo'), ['vendor/lib']),

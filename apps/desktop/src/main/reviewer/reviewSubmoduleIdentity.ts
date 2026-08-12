@@ -289,15 +289,16 @@ async function readOneSubmoduleIdentity(
     fsRealpath(subRoot),
   ]);
   if (toplevelReal !== subRootReal) return uninitialized;
-  try {
-    const { stdout } = await runGit(['rev-parse', 'HEAD'], {
+  // --verify --quiet 让「HEAD 不是合法 ref(已初始化的空仓)」确定性地表现为
+  // exit 1 + 空输出;超时、进程启动失败等其余错误仍由 runGit 抛出 fail
+  // closed —— 无条件 catch 会把读取失败伪装成稳定的 'unborn' 身份。
+  {
+    const { stdout } = await runGit(['rev-parse', '--verify', '--quiet', 'HEAD'], {
       cwd: subRoot,
       maxStdoutBytes: 1024,
+      allowedExitCodes: [0, 1],
     });
-    subHead = stdout.trim();
-  } catch {
-    // toplevel 归属已确认是子仓自身,HEAD 解析不出 = 已初始化的空仓。
-    subHead = 'unborn';
+    subHead = stdout.trim() || 'unborn';
   }
 
   const entries = await readSubStatus(subRoot);
