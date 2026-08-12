@@ -1734,3 +1734,55 @@ describe('OrcaTeamService worker queued message control', () => {
     });
   });
 });
+
+// 团队关闭 fence(#2093):关闭意图存续期间,派发/发送入口结构化拒绝,不复活 runtime。
+describe('team closing fence (#2093)', () => {
+  it('dispatchWorkerTask 在关闭意图下拒绝且不 resume(disable-first 排列)', async () => {
+    const { deps, service } = createDeps({ isTeamClosing: () => true });
+
+    const result = await service.dispatchWorkerTask({
+      targetSessionId: 'worker-session-1',
+      message: 'task after end_team started',
+      dispatchMeta: { source: 'test', context: 'fence' },
+    });
+
+    expect(result.dispatched).toBe(false);
+    expect(result.dispatchOutcome).toMatchObject({ kind: 'host-send', code: 'SEND_FAILED' });
+    expect(String((result.dispatchOutcome as { message?: string }).message)).toContain('closing');
+    // 关键不变量:被拒的派发绝不 lazy-resume 已关闭的 runtime,也不改 worker 状态。
+    expect(deps.resumeWorkerSession).not.toHaveBeenCalled();
+    expect(deps.dispatchWorkerMessage).not.toHaveBeenCalled();
+    expect(deps.updateWorkerStatus).not.toHaveBeenCalled();
+  });
+
+  it('sendToWorker 外部边界按既有 ARCHIVED 语义结构化拒绝', async () => {
+    const { deps, service } = createDeps({ isTeamClosing: () => true });
+
+    const result = await service.sendToWorker({
+      callerLeadSessionId: 'lead-1',
+      targetSessionId: 'worker-session-1',
+      message: '继续',
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errorCode).toBe('ARCHIVED');
+    }
+    expect(deps.resumeWorkerSession).not.toHaveBeenCalled();
+  });
+
+  it('未提供 isTeamClosing dep(旧接线)时行为不变:照常派发', async () => {
+    const { deps, service } = createDeps();
+    (deps.getLiveSession as ReturnType<typeof vi.fn>).mockReturnValue(null);
+
+    const result = await service.dispatchWorkerTask({
+      targetSessionId: 'worker-session-1',
+      message: 'normal dispatch',
+      dispatchMeta: { source: 'test', context: 'no-fence' },
+    });
+
+    expect(deps.resumeWorkerSession).toHaveBeenCalledTimes(1);
+    expect(deps.dispatchWorkerMessage).toHaveBeenCalledTimes(1);
+    expect(result.dispatched).toBe(true);
+  });
+});

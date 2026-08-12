@@ -195,6 +195,11 @@ export interface OrcaTeamServiceDeps {
   hasPendingWorkerInput(sessionId: string): Promise<boolean>;
   /** send_to_session 的恢复/直发锁覆盖 bootstrap 到 Session.send reservation 的窗口。 */
   hasSendToSessionLock(sessionId: string): boolean;
+  /**
+   * 团队关闭 fence(#2093):该 Lead 的 end_team 正在进行(或上次失败后意图
+   * 保留)时返回 true —— 派发入口必须结构化拒绝,不得 resume/lazy-bootstrap。
+   */
+  isTeamClosing?(leadSessionId: string): boolean;
   archiveWorkerSession(sessionId: string): Promise<void>;
   getManualInterrupt(sessionId: string): OrcaManualInterruptSnapshot | null;
   clearManualInterrupt(sessionId: string): void;
@@ -558,6 +563,23 @@ export function createOrcaTeamService(deps: OrcaTeamServiceDeps): OrcaTeamServic
       };
     }
 
+    // 团队关闭 fence(#2093):关闭意图优先于 runtime 状态。close→archive 窗口
+    // 内到达的派发直接拒绝 —— 往下走会经 resumeWorkerSession 把刚关掉的
+    // runtime 复活成孤儿。
+    if (deps.isTeamClosing?.(link.leadSessionId)) {
+      return {
+        dispatched: false,
+        dispatchOutcome: {
+          ...createHostSendFailure(
+            'SEND_FAILED',
+            `worker session ${params.targetSessionId} belongs to a team that is closing`,
+          ),
+          source: params.dispatchMeta.source,
+          context: params.dispatchMeta.context,
+        },
+      };
+    }
+
     const workers = await deps.listWorkersByLead(link.leadSessionId);
     const target = workers.find((worker) => worker.sessionId === params.targetSessionId);
     if (!target) {
@@ -679,6 +701,14 @@ export function createOrcaTeamService(deps: OrcaTeamServiceDeps): OrcaTeamServic
       };
     }
     const callerWorker = resolved.worker;
+    // 团队关闭 fence(#2093):外部边界给出与既有 ARCHIVED 一致的结构化拒绝。
+    if (deps.isTeamClosing?.(params.callerLeadSessionId)) {
+      return {
+        ok: false,
+        errorCode: 'ARCHIVED',
+        message: `worker session ${params.targetSessionId} 所属团队正在关闭(end_team 进行中)`,
+      };
+    }
 
     const dispatchResult = await dispatchWorkerTask({
       targetSessionId: callerWorker.sessionId,

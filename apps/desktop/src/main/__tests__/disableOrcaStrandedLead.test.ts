@@ -84,3 +84,46 @@ describe('disableOrcaInternal stranded-lead recovery', () => {
     expect(calls.length).toBeGreaterThanOrEqual(2);
   });
 });
+
+// 团队关闭 fence(#2093)的时序不变量,同样以源码断言锁定(理由同文件头)。
+describe('disableOrcaInternal team-closing fence (#2093)', () => {
+  const disableBlock = registerSource.slice(
+    registerSource.indexOf('async function disableOrcaInternal'),
+    registerSource.indexOf('ipcMain.handle(MAKER_INVOKE.SESSION_DISABLE_ORCA'),
+  );
+
+  it('关闭意图在动手关 worker 之前登记(begin 在 close 循环前)', () => {
+    const beginIndex = disableBlock.indexOf('beginOrcaTeamClose(');
+    const closeLoopIndex = disableBlock.indexOf('for (const w of activeWorkers)');
+    expect(beginIndex).toBeGreaterThan(-1);
+    expect(closeLoopIndex).toBeGreaterThan(-1);
+    expect(beginIndex).toBeLessThan(closeLoopIndex);
+  });
+
+  it('worker 关闭持有其 send route lock(与在途发送串行)', () => {
+    expect(disableBlock).toContain('await withSendToSessionLock(w.sessionId, async () => {');
+  });
+
+  it('fence 只在终态写盘全部完成后释放(release 在 archive 与清 Lead 角色之后)', () => {
+    const archiveIndex = disableBlock.indexOf('archiveWorkersByTeam(team.id)');
+    const clearRoleIndex = disableBlock.indexOf('await clearLeadOrcaRoleState(leadSessionId);', archiveIndex);
+    const releaseIndex = disableBlock.indexOf('releaseTeamClose();');
+    expect(archiveIndex).toBeGreaterThan(-1);
+    expect(clearRoleIndex).toBeGreaterThan(archiveIndex);
+    expect(releaseIndex).toBeGreaterThan(clearRoleIndex);
+    // 失败路径不 release:块内不得出现 finally 里的 release(意图保留由重试收敛)。
+    expect(disableBlock).not.toMatch(/finally[\s\S]{0,120}releaseTeamClose/);
+  });
+
+  it('复活入口挂上 fence 检查(resume 与 lazy-bootstrap)', () => {
+    expect(registerSource).toContain(
+      'if (isOrcaWorkerSessionTeamClosing(target.sessionId)) {',
+    );
+    expect(registerSource).toContain(
+      'if (isOrcaWorkerSessionTeamClosing(targetSessionId)) {',
+    );
+    expect(registerSource).toContain(
+      'isTeamClosing: (leadSessionId) => isOrcaTeamClosingForLead(leadSessionId),',
+    );
+  });
+});

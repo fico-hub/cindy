@@ -242,6 +242,9 @@ Worktree 现状：Orca 与普通 session 对齐，worktree 是可选项，不强
 2. **done 确认与派活必须互斥（状态：不变量）**<br>
    `done` worker 的隐式 `idle_worker(expectedStatus='done')` 确认不得与同一 worker 的派活交错：派活从 pre-resume reservation 起至 host dispatch settle 期间持有 active dispatch 计数，done 确认必须在每 worker transition 队列中串行执行，并在计数非零时拒绝。确认还必须在 DB CAS 前后检查 live turn、`send_to_session` 锁与 pending 输入；close 必须使用 `Session.closeIfIdle` 原子地与 send reservation 互斥。任一检查失败或 close 失败时，若已 CAS 为 `idle`，必须只恢复仍为 `idle` 的记录到 `done`，不得覆盖新终态。实现指针：`orcaTeamService.ts` 的 `withWorkerTransition`、`activeWorkerDispatches`、`dispatchWorkerTask`、`idleWorker`。
 
+2b. **团队关闭意图优先于 runtime 状态（状态：不变量，#2093）**<br>
+   `end_team`（`disableOrcaInternal`）是多步串行写：逐 worker abort/close → `markTeamEnded` → `markWorkersStatusByTeam` → `archiveWorkersByTeam` → 清 Lead `orca_role`。动手前必须先在团队关闭 fence（`orcaTeamClosingFence.ts`）登记关闭意图（lead + worker session 快照集）；意图存续期间，一切派发 / resume / lazy-bootstrap 入口（`orcaTeamService.dispatchWorkerTask` / `sendToWorker`、`resumeOrcaWorkerSessionIfMissing`、`sendToSessionInternal` 的懒创建分支）必须结构化拒绝，不得复活刚关掉的 runtime。逐 worker 的 close 须持有该 worker 的 `send_to_session` 锁与在途发送串行。fence **只在终态写盘全部完成后显式释放**：失败/卡住不自动清除（超时清 fence 等于把 worker 重新标成可恢复），由显式重试或重启后的 `orcaStrandedLeadReconcile` 收敛；release 采用闩锁语义，任一次成功完成即解除，保证「失败一次 + 重试成功」能收敛。它与 `rehydrateCloseSuppression` 是两种独立的生命周期标记，不得混用（后者只表达「这次 close 是替换不是拆除」）。实现指针：`orcaTeamClosingFence.ts`、`register.ts` 的 `disableOrcaInternal`、`orcaTeamService.ts` 的 `isTeamClosing` dep。
+
 3. **idle worker 恢复必须保留 extraDirs（状态：不变量）**<br>
    idle worker 被 `switch_focus` 或 `send_to_worker` 唤醒时，要从 DB 读取 `extra_dirs` 并带回 `bootstrapSession`，否则恢复后的 worker 会丢附加目录上下文。实现指针：`register.ts` 的 idle worker resume helper。
 

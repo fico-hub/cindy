@@ -623,6 +623,11 @@ import {
   synthesizeOrcaVendorOptionsFromDb,
 } from './orcaSessionStartOptions.js';
 import {
+  beginOrcaTeamClose,
+  isOrcaTeamClosingForLead,
+  isOrcaWorkerSessionTeamClosing,
+} from './orcaTeamClosingFence.js';
+import {
   clearManualInterrupt,
   forgetKnownOrcaWorkerSession,
   getManualInterrupt,
@@ -6478,6 +6483,15 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     leadSessionId: string;
     sessionId: string;
   }): Promise<boolean> {
+    // 团队关闭 fence(#2093):关闭意图存续期间不得复活 worker runtime ——
+    // switch_focus 等入口在 close→archive 的窗口内到达时直接拒绝恢复。
+    if (isOrcaWorkerSessionTeamClosing(target.sessionId)) {
+      log.warn('resumeOrcaWorkerSessionIfMissing refused: team closing', {
+        sessionId: target.sessionId,
+        leadSessionId: target.leadSessionId,
+      });
+      return false;
+    }
     const live = maker.getSession(target.sessionId);
     if (live) return false;
 
@@ -8149,6 +8163,16 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           message: `session ${targetSessionId} is archived`,
         };
       }
+      // 团队关闭 fence(#2093):end_team 的 close→archive 窗口内,session 行还
+      // 没标 archived,上面的守卫拦不住 —— 意图存续期间同样按 ARCHIVED 拒绝,
+      // 不得走后面的 lazy-bootstrap 把刚关掉的 worker runtime 复活。
+      if (isOrcaWorkerSessionTeamClosing(targetSessionId)) {
+        return {
+          ok: false as const,
+          errorCode: 'ARCHIVED' as const,
+          message: `session ${targetSessionId} belongs to an Orca team that is closing`,
+        };
+      }
       if (dbRow.status === 'deleted') {
         return {
           ok: false as const,
@@ -8996,11 +9020,22 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
 
     const workers = await listWorkersByLead(leadSessionId);
     const activeWorkers = workers.filter((w) => w.teamId === team.id);
+    // 团队关闭 fence(#2093):动手前先登记关闭意图 —— close 与 archive 之间的
+    // 窗口里,并发的派活/resume/lazy-bootstrap 会把刚关掉的 runtime 原地复活。
+    // 意图存续期间所有复活入口结构化拒绝;**失败路径不 release**(意图保留,由
+    // 显式重试或重启 reconcile 收敛),只有终态写盘全部完成后才释放。
+    const releaseTeamClose = beginOrcaTeamClose(
+      leadSessionId,
+      activeWorkers.map((w) => w.sessionId),
+    );
     for (const w of activeWorkers) {
       orcaTeamService.clearAutoBridgeState(w.sessionId);
       await cancelIOSSimulatorSessionOperations(w.sessionId);
-      const sess = maker.getSession(w.sessionId);
-      if (sess) {
+      // 与在途发送串行(#2093):持有该 worker 的 send route lock 再关 ——
+      // 正在飞的 send 完成后才轮到 close;之后到达的发送在入口就被 fence 拒绝。
+      await withSendToSessionLock(w.sessionId, async () => {
+        const sess = maker.getSession(w.sessionId);
+        if (!sess) return;
         try {
           if (sess.isTurnRunning?.()) {
             await sess.abort();
@@ -9019,7 +9054,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             err: err instanceof Error ? err.message : String(err),
           });
         }
-      }
+      });
       cleanupPendingInteractionsForSession(w.sessionId, 'orca_disable');
       forgetKnownOrcaWorkerSession(w.sessionId);
     }
@@ -9035,6 +9070,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     );
 
     await clearLeadOrcaRoleState(leadSessionId);
+    // 终态(团队/worker/session 状态 + Lead 角色)全部落盘,复活窗口不复存在。
+    releaseTeamClose();
 
     log.info('disableOrca done', {
       leadSessionId,
@@ -9218,6 +9255,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       );
     },
     hasSendToSessionLock: (sessionId) => sendToSessionLocks.has(sessionId),
+    isTeamClosing: (leadSessionId) => isOrcaTeamClosingForLead(leadSessionId),
     archiveWorkerSession: async (sessionId) => {
       const workerRecycleScope = captureSessionRecycleScope();
       await archiveSingleWorkerSession(sessionId);
