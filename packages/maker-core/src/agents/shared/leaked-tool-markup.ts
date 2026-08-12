@@ -95,6 +95,10 @@ function stripFencedBlocks(lines: string[]): string[] {
   // 跨行上下文把它绑回列表项,低缩进行仍能隐式闭栏(第十二轮 Codex review)。
   // 标记行建立上下文;低于内容列的非空行清除;空行不清(列表项内允许空行)。
   let listContentCol = 0;
+  // 段落状态:CommonMark 只允许起始编号为 1 的有序列表打断段落 —— 紧跟非空
+  // 段落行的 `2. ```xml` 是段落延续文本不是围栏,进围栏态会把其后的真实
+  // 泄漏吞掉(第二十三轮 Codex review)。
+  let inParagraph = false;
   for (const line of lines) {
     if (fence) {
       const c = FENCE_CLOSE_RE.exec(line);
@@ -109,11 +113,13 @@ function stripFencedBlocks(lines: string[]): string[] {
         c[2].length >= fence.len
       ) {
         fence = null; // 闭栏行本身也剥掉
+        inParagraph = false;
         continue;
       }
       if (fence.contentIndent > 0 && !/^[ \t]*$/.test(line)) {
         if (indentDefinitelyBelow(line, fence.contentIndent)) {
           fence = null; // 隐式闭栏:该行不属于列表项,落下去按普通行处理。
+          inParagraph = false;
         } else {
           continue;
         }
@@ -128,6 +134,13 @@ function stripFencedBlocks(lines: string[]): string[] {
       const validOpen = char === '~' || !info.includes('`');
       if (validOpen) {
         const isListOpener = /\S/.test(m[1]);
+        // 起始编号 ≠1 的有序列表不能打断段落:紧跟非空段落行时该行是段落延续
+        // 文本,不是围栏开栏,保留给后续正常处理。
+        const orderedStart = /^[ \t]*(\d{1,9})[.)]/.exec(m[1]);
+        if (isListOpener && inParagraph && orderedStart && orderedStart[1] !== '1') {
+          out.push(line);
+          continue;
+        }
         const prefixCols = widthInColumns(m[1]);
         // 缩进合法性按列宽校验(正则前缀已放开):
         //  - 标记开栏:标记前的纯空白 ≤3 列,或(嵌套列表)≤ 内容列 + 3;
@@ -153,6 +166,7 @@ function stripFencedBlocks(lines: string[]): string[] {
           };
           if (isListOpener) listContentCol = prefixCols;
           else if (contentIndent === 0 && prefixCols < listContentCol) listContentCol = 0;
+          inParagraph = false;
           continue;
         }
       }
@@ -164,6 +178,9 @@ function stripFencedBlocks(lines: string[]): string[] {
       } else if (indentDefinitelyBelow(line, listContentCol)) {
         listContentCol = 0;
       }
+      inParagraph = true;
+    } else {
+      inParagraph = false;
     }
     out.push(line);
   }
@@ -389,14 +406,6 @@ function stripBlockStructures(text: string, depth = 0): string {
  * 无闭合的 backtick 运行按字面量保留。按空行分段处理:CommonMark 的 code
  * span 不跨段落,空行屏障避免两段各自的孤立 backtick 把中间真实泄漏吞掉。
  */
-function stripInlineCodeSpans(text: string): string {
-  if (!text.includes('`')) return text;
-  return text
-    .split(/\n[ \t]*\n/)
-    .map(stripInlineCodeSpansInParagraph)
-    .join('\n\n');
-}
-
 function stripInlineCodeSpansInParagraph(segment: string): string {
   if (!segment.includes('`')) return segment;
   let out = '';
@@ -483,8 +492,13 @@ export function detectLeakedToolCallMarkup(rawText: string): LeakedToolMarkupHit
   // inline code span 先于注释/实体处理(CommonMark 优先级:code span 先于
   // 原始 HTML)—— 否则 \`<!--\` 与 \`-->\` 两个字面量之间的真实泄漏会被
   // 误当一段注释吞掉(第二十二轮 Codex review)。
-  const text = stripInlineCodeSpans(stripBlockStructures(rawText))
-    .replace(HTML_COMMENT_RE, '')
+  // 行内注释按**段落**为界配对:行内 <!-- 不能跨空行与后续段落里的 -->
+  // 组成注释(第二十三轮 Codex review);跨空行的块级注释由 stripHtmlBlocks
+  // 的行首形态处理。
+  const text = stripBlockStructures(rawText)
+    .split(/\n[ \t]*\n/)
+    .map((para) => stripInlineCodeSpansInParagraph(para).replace(HTML_COMMENT_RE, ''))
+    .join('\n\n')
     .replace(LT_CHAR_REF_RE, '&lt;');
   const invoke = INVOKE_MARKER_RE.exec(text);
   if (!invoke) return null;

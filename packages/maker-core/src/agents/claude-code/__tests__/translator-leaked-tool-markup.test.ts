@@ -493,6 +493,31 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toEqual({ category: 'invoke-with-parameter' });
   });
 
+  it('still hits when an ordered-list fence opener cannot interrupt the paragraph', () => {
+    // CommonMark:起始编号 ≠1 的有序列表不能打断段落 —— 紧跟段落行的
+    // `2. \`\`\`xml` 是段落延续文本,不是围栏,不能吞掉其后的真实泄漏。
+    expect(
+      detectLeakedToolCallMarkup(`前面是一段说明文字\n2. \`\`\`xml\n随后模型泄漏了调用:\n${CLASS_B_LEAK}`),
+    ).toEqual({ category: 'invoke-with-parameter' });
+  });
+
+  it('does not hit when an ordered-list fence follows a blank line (valid list)', () => {
+    expect(
+      detectLeakedToolCallMarkup(
+        `说明:\n\n2. \`\`\`xml\n   invoke name="Bash">\n   <parameter name="command">ls</parameter>\n   \`\`\`\n完。`,
+      ),
+    ).toBeNull();
+  });
+
+  it('still hits when an inline comment opener and closer sit in different paragraphs', () => {
+    // 行内 <!-- 不能跨空行与后续段落的 --> 组成注释,中间段落的真实泄漏可见。
+    expect(
+      detectLeakedToolCallMarkup(
+        `前文提到 <!-- 这个开头。\n\n${CLASS_B_LEAK}\n尾部提到 --> 这个结束。`,
+      ),
+    ).toEqual({ category: 'invoke-with-parameter' });
+  });
+
   it('does not treat a mixed-character line as a closing fence', () => {
     // CommonMark 闭栏必须与开栏同字符:``` 栏内出现 ```~~~ 行不是闭栏,块内
     // 后续的标记示例仍在围栏里,不命中。
