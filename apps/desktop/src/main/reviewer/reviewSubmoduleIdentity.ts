@@ -28,7 +28,11 @@ import path from 'node:path';
 import { promises as fsPromises } from 'node:fs';
 
 import { runGit } from '../git-review/gitRunner.js';
-import { readStagedIndexIdentity } from '../git-review/indexIdentityReader.js';
+import {
+  readStagedIndexIdentity,
+  splitIntoBatches,
+  type IndexIdentityBatchLimits,
+} from '../git-review/indexIdentityReader.js';
 import { fingerprintReviewCappedWorkspaceFiles } from './reviewCappedWorkspaceFingerprint.js';
 
 /** 嵌套 submodule 的递归深度封顶;超过按无法完整表达处理(fail closed)。 */
@@ -155,20 +159,30 @@ async function readSubStatus(subRoot: string): Promise<SubStatusEntry[]> {
   return entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 }
 
-/** 子仓 index 里 mode 160000 的路径集合(区分嵌套 submodule 与普通文件)。 */
-async function readGitlinkPaths(subRoot: string, candidates: readonly string[]): Promise<Set<string>> {
+/**
+ * 子仓 index 里 mode 160000 的路径集合(区分嵌套 submodule 与普通文件)。
+ * pathspec 与 indexIdentityReader 同规则分批(Windows ~32K 命令行上限),
+ * 批间合并集合,语义与单次调用一致。
+ */
+async function readGitlinkPaths(
+  subRoot: string,
+  candidates: readonly string[],
+  batch?: IndexIdentityBatchLimits,
+): Promise<Set<string>> {
   if (candidates.length === 0) return new Set();
-  const { stdout } = await runGit(
-    ['ls-files', '--stage', '-z', '--', ...candidates.map(literalPathspec)],
-    { cwd: subRoot, maxStdoutBytes: Math.max(1024 * 1024, candidates.length * 512) },
-  );
   const gitlinks = new Set<string>();
-  for (const record of stdout.split('\0')) {
-    if (!record) continue;
-    const tab = record.indexOf('\t');
-    if (tab < 0) continue;
-    const mode = record.slice(0, tab).trim().split(/\s+/)[0];
-    if (mode === '160000') gitlinks.add(record.slice(tab + 1));
+  for (const group of splitIntoBatches(candidates, batch)) {
+    const { stdout } = await runGit(
+      ['ls-files', '--stage', '-z', '--', ...group.map(literalPathspec)],
+      { cwd: subRoot, maxStdoutBytes: Math.max(1024 * 1024, group.length * 512) },
+    );
+    for (const record of stdout.split('\0')) {
+      if (!record) continue;
+      const tab = record.indexOf('\t');
+      if (tab < 0) continue;
+      const mode = record.slice(0, tab).trim().split(/\s+/)[0];
+      if (mode === '160000') gitlinks.add(record.slice(tab + 1));
+    }
   }
   return gitlinks;
 }
@@ -178,6 +192,7 @@ async function readOneSubmoduleIdentity(
   subPath: string,
   depth: number,
   budget: ManifestContentBudget,
+  batch?: IndexIdentityBatchLimits,
 ): Promise<{ identity: ReviewSubmoduleIdentity; hashedContent: boolean }> {
   if (depth > MAX_SUBMODULE_RECURSION_DEPTH) {
     throw new ReviewSubmoduleIdentityError(
@@ -208,13 +223,44 @@ async function readOneSubmoduleIdentity(
   // 自身)。除这两种外的任何读取失败(权限、git 异常、realpath 失败)都必须
   // 向上抛 fail closed —— 把读取错误降级成稳定的 'uninitialized' 身份,会让
   // 不同的内层内容映射到同一 manifest,新鲜度门形同虚设。
+  let subEntry;
   try {
-    await fsPromises.stat(subRoot);
+    subEntry = await fsPromises.lstat(subRoot);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return uninitialized;
     throw new ReviewSubmoduleIdentityError(
       `Review cannot stat submodule worktree ${subPath}: ${err instanceof Error ? err.message : String(err)}`,
     );
+  }
+  if (!subEntry.isDirectory()) {
+    // gitlink 被普通文件 / 符号链接替换(typechange):porcelain 的 sub 字段仍
+    // 标 S,statusReader 把它当 submodule 路由到这里;把 rev-parse 的 cwd 指到
+    // 普通文件只会 ENOTDIR。这类条目的新鲜度真身就是那份文件字节 —— 交给
+    // capped 指纹器绑定内容(同一套路径守卫、敏感过滤与共享预算);符号链接
+    // 指向目录等超出表达能力的形态由指纹器 fail closed。
+    budget.remainingPaths -= 1;
+    if (budget.remainingPaths < 0) {
+      throw new ReviewSubmoduleIdentityError(
+        `Review submodule manifest exceeds the shared content-path budget of ${MAX_MANIFEST_CONTENT_PATHS}`,
+      );
+    }
+    const typechangeFingerprint = await fingerprintReviewCappedWorkspaceFiles(
+      repoRoot,
+      [subPath],
+      { byteBudget: budget },
+    );
+    return {
+      identity: {
+        path: subPath,
+        indexRecord,
+        headRecord,
+        subHead: 'typechange',
+        stagedIdentity: [],
+        dirtyContentFingerprint: typechangeFingerprint,
+        nested: [],
+      },
+      hashedContent: true,
+    };
   }
   const { stdout: toplevelOut } = await runGit(['rev-parse', '--show-toplevel'], {
     cwd: subRoot,
@@ -240,6 +286,7 @@ async function readOneSubmoduleIdentity(
   const gitlinkPaths = await readGitlinkPaths(
     subRoot,
     entries.filter((entry) => !entry.untracked).map((entry) => entry.path),
+    batch,
   );
 
   const stagedPaths = entries
@@ -252,7 +299,7 @@ async function readOneSubmoduleIdentity(
     entries.filter((entry) => gitlinkPaths.has(entry.path)).map((entry) => entry.path),
   )];
 
-  const stagedIdentity = await readStagedIndexIdentity(subRoot, stagedPaths);
+  const stagedIdentity = await readStagedIndexIdentity(subRoot, stagedPaths, batch);
   // 工作树 dirty 普通文件走 capped 指纹器:同一套路径守卫、敏感路径过滤、
   // 字节上限与「哈希期间文件变了就抛 ChangedError」的稳定性语义。目录形态
   // (如 untracked 的内嵌仓库)会被它拒绝 —— 即 fail closed,不静默跳过。
@@ -274,7 +321,7 @@ async function readOneSubmoduleIdentity(
 
   const nested: ReviewSubmoduleIdentity[] = [];
   for (const nestedPath of nestedPaths) {
-    const child = await readOneSubmoduleIdentity(subRoot, nestedPath, depth + 1, budget);
+    const child = await readOneSubmoduleIdentity(subRoot, nestedPath, depth + 1, budget, batch);
     nested.push(child.identity);
     hashedContent = hashedContent || child.hashedContent;
   }
@@ -302,7 +349,7 @@ async function readOneSubmoduleIdentity(
 export async function readReviewSubmoduleIdentity(
   repoRoot: string,
   rawPaths: readonly string[],
-  limits?: { maxContentBytes?: number; maxContentPaths?: number },
+  limits?: { maxContentBytes?: number; maxContentPaths?: number; batch?: IndexIdentityBatchLimits },
 ): Promise<ReviewSubmoduleIdentityResult> {
   // 不做字符过滤:pathspec 经 argv 传递、输出全部走 -z(NUL 分隔、无引号
   // 转义),含 \n / \r 的合法 submodule 路径同样必须绑定身份 —— 静默丢弃
@@ -317,7 +364,7 @@ export async function readReviewSubmoduleIdentity(
   const identities: ReviewSubmoduleIdentity[] = [];
   let hashedContent = false;
   for (const subPath of paths) {
-    const one = await readOneSubmoduleIdentity(repoRoot, subPath, 1, budget);
+    const one = await readOneSubmoduleIdentity(repoRoot, subPath, 1, budget, limits?.batch);
     identities.push(one.identity);
     hashedContent = hashedContent || one.hashedContent;
   }

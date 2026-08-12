@@ -202,6 +202,40 @@ describe('readReviewSubmoduleIdentity (#2463)', () => {
     ).rejects.toThrow();
   });
 
+  it('binds a gitlink-to-regular-file typechange to the file bytes instead of erroring', async () => {
+    const { parent, sub } = await setupParentWithSubmodule();
+    parentPath = parent;
+    // 用户把整个 submodule 目录换成同名普通文件(porcelain 仍标 S,statusReader
+    // 会把它当 submodule 送进来)。
+    await fs.rm(sub, { recursive: true, force: true });
+    await fs.writeFile(sub, 'file-vA\n');
+
+    const withA = await readReviewSubmoduleIdentity(parentPath, ['vendor/lib']);
+    expect(withA.identities[0].subHead).toBe('typechange');
+    expect(withA.identities[0].dirtyContentFingerprint).not.toBeNull();
+    expect(withA.hashedContent).toBe(true);
+
+    // 同尺寸另一份字节必须被身份变化捕获。
+    await fs.writeFile(sub, 'file-vB\n');
+    const withB = await readReviewSubmoduleIdentity(parentPath, ['vendor/lib']);
+    expect(withB.identities).not.toEqual(withA.identities);
+  });
+
+  it('queries inner paths in pathspec batches identically to a single call', async () => {
+    const { parent, sub } = await setupParentWithSubmodule();
+    parentPath = parent;
+    for (const name of ['d1.txt', 'd2.txt', 'd3.txt']) {
+      await fs.writeFile(path.join(sub, name), `${name}\n`);
+    }
+    await runGit(['add', '--', 'd1.txt', 'd2.txt'], { cwd: sub });
+
+    const single = await readReviewSubmoduleIdentity(parentPath, ['vendor/lib']);
+    const batched = await readReviewSubmoduleIdentity(parentPath, ['vendor/lib'], {
+      batch: { maxBatchPaths: 1, maxBatchPathspecBytes: 8 },
+    });
+    expect(batched).toEqual(single);
+  });
+
   it('fails closed when the parent repository cannot be read', async () => {
     await expect(
       readReviewSubmoduleIdentity(path.join(workRoot, 'no-such-repo'), ['vendor/lib']),
