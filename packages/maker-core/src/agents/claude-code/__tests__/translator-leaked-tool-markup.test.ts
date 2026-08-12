@@ -588,6 +588,47 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toBeNull();
   });
 
+  it('does not hit when an ordered fence follows a block quote (round 26)', () => {
+    // 实测(micromark,与渲染端一致):引用行(含惰性延续行)之后的非 1 有序
+    // 围栏会结束引用并合法开栏 —— 引用段落不算「可被打断的段落」。
+    expect(
+      detectLeakedToolCallMarkup(
+        `> 说明引文\n2. \`\`\`xml\n   invoke name="Bash">\n   <parameter name="command">ls</parameter>\n   \`\`\`\n完。`,
+      ),
+    ).toBeNull();
+    expect(
+      detectLeakedToolCallMarkup(
+        `> 说明引文\n惰性延续行\n2. \`\`\`xml\n   invoke name="Bash">\n   <parameter name="command">ls</parameter>\n   \`\`\`\n完。`,
+      ),
+    ).toBeNull();
+  });
+
+  it('does not hit when a valid fence follows a dedent out of a list-item HTML block', () => {
+    // 段落视角的 HTML 块状态同样随列表项终止(第二十六轮 Codex review):
+    // `- <script>` 的抑制不能越过 dedent 边界,其后的标题 + `2.` 围栏是
+    // 合法结构,围栏内容要剥掉。
+    expect(
+      detectLeakedToolCallMarkup(
+        `- <script>\n# 标题\n2. \`\`\`xml\n   invoke name="Bash">\n   <parameter name="command">ls</parameter>\n   \`\`\`\n完。`,
+      ),
+    ).toBeNull();
+  });
+
+  it('still hits when a leak dedents out of a list-item HTML block', () => {
+    // 容器边界的另一面:dedent 出列表项后的真实泄漏不被未闭合块吞掉。
+    expect(detectLeakedToolCallMarkup(`- <script>\n  块内内容\n${CLASS_B_LEAK}`)).toEqual({
+      category: 'invoke-with-parameter',
+    });
+  });
+
+  it('does not hit when the markers only appear inside a lowercase declaration block', () => {
+    // CommonMark 0.30 起 type 4 允许任意 ASCII 字母(渲染端 micromark 的
+    // declarationOpen 即 asciiAlpha):`<!doctype` 等小写声明同样整块隐藏。
+    expect(
+      detectLeakedToolCallMarkup(`<!doctype 示例\n${CLASS_B_LEAK}以上是说明。`),
+    ).toBeNull();
+  });
+
   it('still hits when a fence-looking line sits inside an HTML block before a real leak', () => {
     // HTML 块内容是 raw 文本:块内的 \`2. \`\`\`xml\` 不是围栏开栏,不能把
     // 块外的真实泄漏吞进围栏态。

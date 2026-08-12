@@ -90,33 +90,51 @@ const SETEXT_UNDERLINE_RE = /^ {0,3}(?:=+|-+)[ \t]*$/;
 /**
  * 供 stripFencedBlocks 维护段落状态的轻量 HTML 块判定(第二十五轮 Codex
  * review):围栏剥离先于 HTML 块剥离跑,`<script></script>` 之类的原始 HTML
- * 块行不是段落文本,其后的有序围栏没有段落可打断。返回该块的闭合条件:
- * 'closed' = 开启行内已闭合(单行块),'blank' = type 6 到空行为止,RegExp =
- * 到匹配行(含)为止;null = 不是 HTML 块开启行。缩进校验取近似(上界与
- * stripHtmlBlocks 同规则,略去纯空白开栏的下界)—— 近似方向是多认块少建
- * 段落,fail-open。引用的开启正则声明在本函数之后,仅在检测调用期执行,
+ * 块行不是段落文本,其后的有序围栏没有段落可打断。返回该块的闭合条件与
+ * 容器边距:close 'closed' = 开启行内已闭合(单行块),'blank' = type 6 到
+ * 空行为止,RegExp = 到匹配行(含)为止;indent = 所属列表项内容列(0 =
+ * 顶层),块随列表项结束而终止(第二十六轮 Codex review,与 stripHtmlBlocks
+ * 的 blockIndent 同规则);null = 不是 HTML 块开启行。缩进校验取近似(上界
+ * 与 stripHtmlBlocks 同规则,略去纯空白开栏的下界)—— 近似方向是多认块少
+ * 建段落,fail-open。引用的开启正则声明在本函数之后,仅在检测调用期执行,
  * 模块初始化顺序无影响。
  */
 function htmlBlockCloseForParagraph(
   line: string,
   listContentCol: number,
-): RegExp | 'blank' | 'closed' | null {
+): { close: RegExp | 'blank' | 'closed'; indent: number } | null {
   if (!line.includes('<')) return null;
   const leadWsCols = leadingIndentColumns(line);
   if (leadWsCols > 3 && !(listContentCol > 0 && leadWsCols <= listContentCol + 3)) return null;
+  const withIndent = (
+    close: RegExp | 'blank' | 'closed',
+    prefix: string,
+  ): { close: RegExp | 'blank' | 'closed'; indent: number } => {
+    const isListOpener = /\S/.test(prefix);
+    const prefixCols = widthInColumns(prefix);
+    const indent = isListOpener
+      ? prefixCols
+      : listContentCol > 0 && !indentDefinitelyBelow(line, listContentCol)
+      ? listContentCol
+      : 0;
+    return { close, indent };
+  };
   const t1 = HTML_BLOCK_TYPE1_OPEN_RE.exec(line);
   if (t1) {
     const close = new RegExp(`</${t1[2]}>`, 'i');
-    return close.test(line.slice(t1[0].length)) ? 'closed' : close;
+    return withIndent(close.test(line.slice(t1[0].length)) ? 'closed' : close, t1[1] ?? '');
   }
-  if (HTML_BLOCK_TYPE6_RE.test(line)) return 'blank';
+  const t6 = HTML_BLOCK_TYPE6_RE.exec(line);
+  if (t6) return withIndent('blank', t6[1] ?? '');
   const t345 = HTML_BLOCK_TYPE345_OPEN_RE.exec(line);
   if (t345) {
     const closeRe = t345[2] === '?' ? /\?>/ : t345[2] === '![CDATA[' ? /\]\]>/ : />/;
-    return closeRe.test(line.slice(t345[0].length)) ? 'closed' : closeRe;
+    return withIndent(closeRe.test(line.slice(t345[0].length)) ? 'closed' : closeRe, t345[1] ?? '');
   }
   const cm = HTML_COMMENT_OPEN_RE.exec(line);
-  if (cm) return line.slice(cm[0].length).includes('-->') ? 'closed' : /-->/;
+  if (cm) {
+    return withIndent(line.slice(cm[0].length).includes('-->') ? 'closed' : /-->/, cm[1] ?? '');
+  }
   return null;
 }
 
@@ -140,8 +158,16 @@ function stripFencedBlocks(lines: string[]): string[] {
   // 泄漏吞掉(第二十三轮 Codex review)。
   let inParagraph = false;
   // 段落视角的 HTML 块状态(第二十五轮 Codex review):块内行是 raw 文本,
-  // 不建段落也不当围栏开栏,整块留给 stripHtmlBlocks 剥离。
+  // 不建段落也不当围栏开栏,整块留给 stripHtmlBlocks 剥离。htmlIndent 是块
+  // 所属列表项的内容列(0 = 顶层):开在列表项里的未闭合块随列表项结束终止,
+  // 与 stripHtmlBlocks 的 blockIndent 同规则 —— 否则这层的围栏抑制会越过
+  // 容器边界,把列表外的合法围栏留给检测造成误报(第二十六轮 Codex review)。
   let htmlClose: RegExp | 'blank' | null = null;
+  let htmlIndent = 0;
+  // 引用惰性延续区:引用行敞开的段落属于引用容器,实测(micromark,与渲染端
+  // 一致)其后的非 1 起始有序围栏会结束引用并合法开栏 —— 引用段落不算「可被
+  // 打断的段落」,惰性延续的普通行同样不建段落状态(第二十六轮 Codex review)。
+  let quoteLazy = false;
   for (const line of lines) {
     if (fence) {
       const c = FENCE_CLOSE_RE.exec(line);
@@ -157,12 +183,14 @@ function stripFencedBlocks(lines: string[]): string[] {
       ) {
         fence = null; // 闭栏行本身也剥掉
         inParagraph = false;
+        quoteLazy = false;
         continue;
       }
       if (fence.contentIndent > 0 && !/^[ \t]*$/.test(line)) {
         if (indentDefinitelyBelow(line, fence.contentIndent)) {
           fence = null; // 隐式闭栏:该行不属于列表项,落下去按普通行处理。
           inParagraph = false;
+          quoteLazy = false;
         } else {
           continue;
         }
@@ -171,13 +199,17 @@ function stripFencedBlocks(lines: string[]): string[] {
       }
     }
     if (htmlClose) {
-      // HTML 块内容行:保留给 stripHtmlBlocks 剥离,不建段落、不开围栏
-      // (CommonMark 的 HTML 块内容是 raw 文本)。
       const blankInBlock = /^[ \t]*$/.test(line);
-      if (htmlClose === 'blank' ? blankInBlock : htmlClose.test(line)) htmlClose = null;
-      inParagraph = false;
-      out.push(line);
-      continue;
+      if (htmlIndent > 0 && !blankInBlock && indentDefinitelyBelow(line, htmlIndent)) {
+        htmlClose = null; // 块随列表项终止,该行落下去按普通行重新处理。
+      } else {
+        // HTML 块内容行:保留给 stripHtmlBlocks 剥离,不建段落、不开围栏
+        // (CommonMark 的 HTML 块内容是 raw 文本)。
+        if (htmlClose === 'blank' ? blankInBlock : htmlClose.test(line)) htmlClose = null;
+        inParagraph = false;
+        out.push(line);
+        continue;
+      }
     }
     const m = FENCE_OPEN_RE.exec(line);
     if (m) {
@@ -228,6 +260,7 @@ function stripFencedBlocks(lines: string[]): string[] {
           if (isListOpener) listContentCol = prefixCols;
           else if (contentIndent === 0 && prefixCols < listContentCol) listContentCol = 0;
           inParagraph = false;
+          quoteLazy = false;
           continue;
         }
       }
@@ -243,19 +276,35 @@ function stripFencedBlocks(lines: string[]): string[] {
       }
       // 标题/分隔线之后没有敞开的段落;setext 下划线只在紧跟段落时是标题
       // (否则 `====` 本身就是段落文本);原始 HTML 块开启行同样不是段落
-      // 文本(第二十五轮 Codex review)。
+      // 文本(第二十五轮 Codex review);引用行与其惰性延续行的段落属于引用
+      // 容器,不建段落状态(第二十六轮 Codex review)。缩进代码行**不**清
+      // 段落:实测缩进代码块后的非 1 有序行仍按段落文本解析,惰性延续行则
+      // 本就在段落里 —— 两种形态都维持现状即正确。
       const hc = htmlBlockCloseForParagraph(line, listContentCol);
       if (hc) {
-        if (hc !== 'closed') htmlClose = hc;
+        if (hc.close !== 'closed') {
+          htmlClose = hc.close;
+          htmlIndent = hc.indent;
+        }
         inParagraph = false;
-      } else {
-        inParagraph =
-          !isThematicBreak &&
-          !ATX_HEADING_RE.test(line) &&
-          !(inParagraph && SETEXT_UNDERLINE_RE.test(line));
+        quoteLazy = false;
+      } else if (BLOCKQUOTE_LINE_RE.test(line)) {
+        inParagraph = false;
+        quoteLazy = true;
+      } else if (
+        isThematicBreak ||
+        lm !== null ||
+        ATX_HEADING_RE.test(line) ||
+        (inParagraph && SETEXT_UNDERLINE_RE.test(line))
+      ) {
+        inParagraph = false;
+        quoteLazy = false;
+      } else if (!quoteLazy) {
+        inParagraph = true;
       }
     } else {
       inParagraph = false;
+      quoteLazy = false;
     }
     out.push(line);
   }
