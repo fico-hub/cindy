@@ -1,0 +1,258 @@
+import { describe, expect, it, vi } from 'vitest';
+
+import { createAsyncQueue } from '../../shared/async-queue.js';
+import { UsageTracker } from '../../shared/usage-tracker.js';
+import { detectLeakedToolCallMarkup } from '../../shared/leaked-tool-markup.js';
+import {
+  newRuntimeState,
+  translateSdkMessage,
+  type TurnState,
+} from '../translator.js';
+import type { AgentEvent } from '../../../types/events.js';
+
+function createTurnState(): TurnState {
+  return {
+    text: '',
+    toolUses: 0,
+    apiCalls: 0,
+    sawCompactBoundary: false,
+    hasEmittedText: false,
+    uiEmittedText: '',
+    pendingApiError: null,
+    interruptRequested: false,
+    generation: 0,
+    interruptGeneration: 0,
+    lastAssistantMsgHadSubstance: true,
+  };
+}
+
+function createCtx(tracker: UsageTracker) {
+  return {
+    rt: newRuntimeState(),
+    turn: createTurnState(),
+    log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn() },
+    getModel: () => 'codex/gpt-5.5',
+    getEffort: () => 'high' as const,
+    getPermissionMode: () => 'auto' as const,
+    onSessionId: vi.fn(),
+    getSdkSessionId: () => undefined,
+    getLogTitle: () => undefined,
+    tracker,
+    getModelContextWindow: () => 272_000,
+  };
+}
+
+async function drain(queue: ReturnType<typeof createAsyncQueue<AgentEvent>>): Promise<AgentEvent[]> {
+  queue.end();
+  const events: AgentEvent[] = [];
+  for await (const event of queue) events.push(event);
+  return events;
+}
+
+/** issue #2518 实测的类 B 形态:invoke 开标签缺失前导 `<`,parameter 标签完好。 */
+const CLASS_B_LEAK =
+  'invoke name="Bash">\n<parameter name="command">python -c "import re; print(re.sub(r\'(\\d{4})\', lambda m: m.group(1), \'x\'))"</parameter>\n';
+
+const NON_EMPTY_USAGE = { input_tokens: 1200, output_tokens: 340 };
+
+function pushMessageStart(queue: ReturnType<typeof createAsyncQueue<AgentEvent>>, ctx: ReturnType<typeof createCtx>): void {
+  translateSdkMessage(
+    {
+      type: 'stream_event',
+      event: { type: 'message_start', message: { model: 'codex/gpt-5.5', usage: { input_tokens: 1200 } } },
+    },
+    queue,
+    ctx,
+  );
+}
+
+function pushResult(queue: ReturnType<typeof createAsyncQueue<AgentEvent>>, ctx: ReturnType<typeof createCtx>): void {
+  translateSdkMessage(
+    {
+      type: 'result',
+      stop_reason: 'end_turn',
+      total_cost_usd: 0.01,
+      usage: NON_EMPTY_USAGE,
+      modelUsage: {
+        'codex/gpt-5.5': { inputTokens: 1200, outputTokens: 340, costUSD: 0.01, contextWindow: 272_000 },
+      },
+    },
+    queue,
+    ctx,
+  );
+}
+
+describe('detectLeakedToolCallMarkup (#2518)', () => {
+  it('hits on class B: invoke opener missing "<" followed by a parameter tag', () => {
+    expect(detectLeakedToolCallMarkup(CLASS_B_LEAK)).toEqual({ category: 'invoke-with-parameter' });
+  });
+
+  it('hits when the invoke opener keeps its "<" but still leaked as text', () => {
+    expect(
+      detectLeakedToolCallMarkup('<invoke name="Bash">\n<parameter name="command">ls</parameter>'),
+    ).toEqual({ category: 'invoke-with-parameter' });
+  });
+
+  it('does not hit on plain English discussion of invoke/parameter', () => {
+    expect(
+      detectLeakedToolCallMarkup(
+        'You can invoke the function with a parameter name of your choosing; invoke it twice.',
+      ),
+    ).toBeNull();
+  });
+
+  it('does not hit on a lone invoke marker without any parameter tag after it', () => {
+    expect(detectLeakedToolCallMarkup('invoke name="Bash"> and nothing else here')).toBeNull();
+  });
+
+  it('does not hit on a lone parameter marker without a preceding invoke marker', () => {
+    expect(detectLeakedToolCallMarkup('<parameter name="command">ls</parameter> appears alone')).toBeNull();
+  });
+
+  it('does not hit when the markers only appear inside fenced code blocks', () => {
+    expect(
+      detectLeakedToolCallMarkup(
+        '工具调用格式示例:\n```xml\ninvoke name="Bash">\n<parameter name="command">ls</parameter>\n```\n以上是语法说明。',
+      ),
+    ).toBeNull();
+  });
+
+  it('does not hit when the markers only appear inside inline code spans', () => {
+    expect(
+      detectLeakedToolCallMarkup(
+        '标记形如 `invoke name="Bash">` 与 `<parameter name="command">`,注意顺序。',
+      ),
+    ).toBeNull();
+  });
+
+  it('does not hit on uppercase variants (canonical wire markup is lowercase)', () => {
+    expect(
+      detectLeakedToolCallMarkup('INVOKE NAME="Bash">\n<PARAMETER NAME="command">ls</PARAMETER>'),
+    ).toBeNull();
+  });
+
+  it('still hits when an unclosed fence swallows the tail but leak precedes the fence', () => {
+    expect(
+      detectLeakedToolCallMarkup(`${CLASS_B_LEAK}\n\`\`\`text truncated...`),
+    ).toEqual({ category: 'invoke-with-parameter' });
+  });
+});
+
+describe('Claude Code translator leaked tool markup guard (#2518)', () => {
+  it('emits a terminal malformed-tool-markup error but keeps Done + done for usage accounting', async () => {
+    const tracker = new UsageTracker();
+    const queue = createAsyncQueue<AgentEvent>();
+    const ctx = createCtx(tracker);
+
+    pushMessageStart(queue, ctx);
+    translateSdkMessage(
+      { type: 'assistant', message: { content: [{ type: 'text', text: CLASS_B_LEAK }] } },
+      queue,
+      ctx,
+    );
+    pushResult(queue, ctx);
+
+    const events = await drain(queue);
+    const err = events.find((e) => e.type === 'error');
+    expect(err?.data).toMatchObject({ reason: 'malformed-tool-markup', isTerminal: true });
+    // 与 empty-response 不同:本轮有真实用量,必须保留 status Done + done 保住记账
+    // (is_error 失败序列同构:error → status Done → done)。
+    expect(events.some((e) => e.type === 'done')).toBe(true);
+    expect(
+      events.some((e) => e.type === 'status' && (e.data as { status?: string }).status === 'Done'),
+    ).toBe(true);
+    // 日志不携带正文,只有类别与长度。
+    const warn = (ctx.log.warn as ReturnType<typeof vi.fn>).mock.calls.find(([m]) =>
+      String(m).includes('leaked malformed tool-call markup'),
+    );
+    expect(warn).toBeDefined();
+    expect(JSON.stringify(warn?.[1])).not.toContain('parameter name=');
+  });
+
+  it('aggregates streaming text deltas for detection', async () => {
+    const tracker = new UsageTracker();
+    const queue = createAsyncQueue<AgentEvent>();
+    const ctx = createCtx(tracker);
+
+    pushMessageStart(queue, ctx);
+    const half = Math.floor(CLASS_B_LEAK.length / 2);
+    for (const chunk of [CLASS_B_LEAK.slice(0, half), CLASS_B_LEAK.slice(half)]) {
+      translateSdkMessage(
+        {
+          type: 'stream_event',
+          event: { type: 'content_block_delta', delta: { type: 'text_delta', text: chunk } },
+        },
+        queue,
+        ctx,
+      );
+    }
+    pushResult(queue, ctx);
+
+    const events = await drain(queue);
+    expect(events.find((e) => e.type === 'error')?.data).toMatchObject({
+      reason: 'malformed-tool-markup',
+      isTerminal: true,
+    });
+  });
+
+  it('does not flag a normal text turn', async () => {
+    const tracker = new UsageTracker();
+    const queue = createAsyncQueue<AgentEvent>();
+    const ctx = createCtx(tracker);
+
+    pushMessageStart(queue, ctx);
+    translateSdkMessage(
+      { type: 'assistant', message: { content: [{ type: 'text', text: '正常回答:用 `(\\d{4})` 匹配年份即可。' }] } },
+      queue,
+      ctx,
+    );
+    pushResult(queue, ctx);
+
+    const events = await drain(queue);
+    expect(events.some((e) => e.type === 'error')).toBe(false);
+    expect(events.some((e) => e.type === 'done')).toBe(true);
+  });
+
+  it('does not flag a turn that executed a structured tool call (discussion context)', async () => {
+    const tracker = new UsageTracker();
+    const queue = createAsyncQueue<AgentEvent>();
+    const ctx = createCtx(tracker);
+
+    pushMessageStart(queue, ctx);
+    translateSdkMessage(
+      {
+        type: 'assistant',
+        message: {
+          content: [
+            { type: 'tool_use', id: 'tool-1', name: 'Read', input: { file_path: '/tmp/a' } },
+            { type: 'text', text: CLASS_B_LEAK },
+          ],
+        },
+      },
+      queue,
+      ctx,
+    );
+    pushResult(queue, ctx);
+
+    const events = await drain(queue);
+    expect(events.some((e) => e.type === 'error')).toBe(false);
+  });
+
+  it('does not flag when the user interrupted the turn', async () => {
+    const tracker = new UsageTracker();
+    const queue = createAsyncQueue<AgentEvent>();
+    const ctx = createCtx(tracker);
+
+    pushMessageStart(queue, ctx);
+    translateSdkMessage(
+      { type: 'assistant', message: { content: [{ type: 'text', text: CLASS_B_LEAK }] } },
+      queue,
+      ctx,
+    );
+    ctx.turn.interruptRequested = true;
+    pushResult(queue, ctx);
+
+    const events = await drain(queue);
+    expect(events.some((e) => e.type === 'error')).toBe(false);
+  });
+});

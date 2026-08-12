@@ -23,6 +23,7 @@ import {
 } from '@cindy/maker-shared/error-redaction';
 import type { createAsyncQueue } from '../shared/async-queue.js';
 import { stripTerminalControlSequences } from '../shared/terminal-output.js';
+import { detectLeakedToolCallMarkup } from '../shared/leaked-tool-markup.js';
 import { formatOverloadRetryMessage, parseOverloadError } from '../shared/overload-error.js';
 import {
   CONTEXT_OVERFLOW_REASON,
@@ -1763,6 +1764,42 @@ function handleResult(
     resetTurnState(ctx.turn);
     ctx.onTurnEnd?.();
     return;
+  }
+  // 泄漏工具调用标记(#2518 类 B):模型把写坏的工具调用块(如缺失前导 < 的
+  // invoke 开标签)当**普通正文**输出,SDK 解析器从未进入工具调用状态,全轮
+  // 没有任何结构化 tool_use —— 不能按成功收口:工具没执行,用户无从分辨
+  // 「做完了」和「压根没跑」。这里推一条带稳定 reason 的 terminal error
+  // (main 的有界自动续跑按 reason 放行,续跑提示让模型基于上下文重发调用),
+  // 然后**继续**走下方 status Done + done —— 本轮有真实用量,砍 done 会丢
+  // 整轮账(与 is_error 失败序列同构;empty-response 只发 error 是因为零用量
+  // 无账可丢)。执行过结构化工具的回合(toolUses > 0)不判:正文里出现类似
+  // 文本属于讨论语境。
+  const leakedMarkupBody = emitted.length > 0 ? emitted : full;
+  const leakedToolMarkup =
+    !msg.is_error &&
+    !ctx.turn.interruptRequested &&
+    !ctx.turn.sawCompactBoundary &&
+    ctx.turn.toolUses === 0
+      ? detectLeakedToolCallMarkup(leakedMarkupBody)
+      : null;
+  if (leakedToolMarkup) {
+    // 只记类别与长度,不记正文 —— 泄漏内容可能含命令参数等敏感信息。
+    ctx.log.warn('SDK ◀ turn leaked malformed tool-call markup as plain text', {
+      category: leakedToolMarkup.category,
+      textLength: leakedMarkupBody.length,
+      apiCalls: ctx.turn.apiCalls,
+      model: currentModel,
+    });
+    queue.push({
+      type: 'error',
+      data: {
+        message:
+          '模型输出了格式错误的工具调用块,未能解析为结构化调用,本轮工具未执行。将自动请求模型重试。',
+        isTerminal: true,
+        reason: 'malformed-tool-markup',
+      },
+      source: 'claude-code',
+    });
   }
   // is_error result 才是 API-error envelope 的权威终态。此前 envelope 会立即推
   // terminal error,即使 SDK 随后自动重试成功也会让下游提前收口；现在成功 result
