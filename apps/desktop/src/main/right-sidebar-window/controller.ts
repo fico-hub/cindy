@@ -76,6 +76,19 @@ function commandHostSessionId(cmd: RsbWindowCommand): string {
   return cmd.type === 'open-turn-review' ? (cmd.hostSessionId ?? cmd.sessionId) : cmd.sessionId;
 }
 
+/**
+ * 队列里最近一条 close-orca-workers-tab **之后**的段。ensure 合并判定只能在
+ * 这个段里做:close 是语义屏障,[显式 ensure, close, generic ensure] 里最后的
+ * generic ensure 是「close 之后重新打开」的最新意图,匹配屏障前的历史 ensure
+ * 会让 flush 终态停在 close、丢掉重开。
+ */
+function segmentAfterLastOrcaClose(queue: readonly RsbWindowCommand[]): readonly RsbWindowCommand[] {
+  for (let i = queue.length - 1; i >= 0; i -= 1) {
+    if (queue[i].type === 'close-orca-workers-tab') return queue.slice(i + 1);
+  }
+  return queue;
+}
+
 export class RsbWindowController {
   private winRef: BrowserWindow | null = null;
   /** BrowserWindow.close() 到 closed 事件之间仍未 destroyed，不能继续当活 host。 */
@@ -301,25 +314,41 @@ export class RsbWindowController {
     const queue = this.deferredCommands.get(hostSessionId);
     // Orca 既有优先规则:队列里已有 ensure-orca intent(带定位与否都算)时,
     // 后到的**无定位** generic ensure 忽略 —— 它既是重复帧去重,也保护更具体
-    // 的旧 intent(focusWorkerSessionId / searchJump)不被稀释。
+    // 的旧 intent(focusWorkerSessionId / searchJump)不被稀释。判定止于最近的
+    // close 屏障(segmentAfterLastOrcaClose),不匹配屏障前的历史 ensure。
     if (
       command.type === 'ensure-orca-workers-tab' &&
       command.focusWorkerSessionId === undefined &&
       command.searchJump === undefined &&
-      queue?.some((queued) => queued.type === 'ensure-orca-workers-tab')
+      queue &&
+      segmentAfterLastOrcaClose(queue).some(
+        (queued) => queued.type === 'ensure-orca-workers-tab',
+      )
     ) {
       return;
     }
-    // 完全等价的重复登记合并(幂等帧,如同一挂载路径的重复静默登记)。
+    // 完全等价的重复登记只做**相邻**合并(幂等帧,如同一挂载路径的重复静默
+    // 登记必然连续到达)。隔着其他命令的等价帧不合并 —— 中间命令(如 close)
+    // 可能已改变重放语义。
     const serialized = JSON.stringify(command);
-    if (queue?.some((queued) => JSON.stringify(queued) === serialized)) {
+    if (queue && queue.length > 0 && JSON.stringify(queue[queue.length - 1]) === serialized) {
       return;
     }
     if (!queue && this.deferredCommands.size >= MAX_DEFERRED_SESSIONS) {
       const oldest = this.deferredCommands.keys().next().value as string | undefined;
       if (oldest) this.deferredCommands.delete(oldest);
     }
-    const next = queue ?? [];
+    let next = queue ?? [];
+    // open-turn-review 是同目标 last-write-wins 的载荷帧(同 session 的 review
+    // tab 是单例):同目标旧帧被新帧**取代**而不是并存 —— flush 后 renderer 对
+    // 命令是并发处理的,两帧同时在途时完成顺序不保证,旧载荷可能覆盖新载荷;
+    // 队列里同目标只留最新一帧,竞态源头即消失。
+    if (command.type === 'open-turn-review') {
+      next = next.filter(
+        (queued) =>
+          !(queued.type === 'open-turn-review' && queued.sessionId === command.sessionId),
+      );
+    }
     if (next.length >= MAX_DEFERRED_COMMANDS_PER_SESSION) {
       const dropped = next.shift();
       this.deps.log.warn(

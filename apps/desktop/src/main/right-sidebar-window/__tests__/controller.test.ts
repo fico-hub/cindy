@@ -708,4 +708,74 @@ describe('setContext / routeCommand', () => {
     expect(delivered).toEqual([explicit, close]);
   });
 
+  it('close 之后的 generic ensure 不与屏障前的 ensure 合并,重开意图保留(#2511 review)', async () => {
+    const h = makeHarness({ detached: true });
+    h.controller.setContext(ctx);
+    const explicit = {
+      type: 'ensure-orca-workers-tab' as const,
+      sessionId: 's1',
+      focusWorkerSessionId: 'worker-s1',
+      focusTab: false,
+    };
+    const close = { type: 'close-orca-workers-tab' as const, sessionId: 's1' };
+    const reopen = { type: 'ensure-orca-workers-tab' as const, sessionId: 's1', focusTab: false };
+    await h.controller.routeCommand({ command: explicit, allowOpen: false });
+    await h.controller.routeCommand({ command: close, allowOpen: false });
+    await h.controller.routeCommand({ command: reopen, allowOpen: false });
+
+    h.controller.open();
+    h.controller.markReady();
+    const delivered = h.sends.filter((entry) => entry.channel === 'cmd-channel').map((entry) => entry.payload);
+    expect(delivered).toEqual([explicit, close, reopen]);
+  });
+
+  it('隔着 close 的等价 ensure 帧不做跨屏障合并(#2511 review)', async () => {
+    const h = makeHarness({ detached: true });
+    h.controller.setContext(ctx);
+    const ensure = { type: 'ensure-orca-workers-tab' as const, sessionId: 's1', focusTab: false };
+    const close = { type: 'close-orca-workers-tab' as const, sessionId: 's1' };
+    await h.controller.routeCommand({ command: ensure, allowOpen: false });
+    await h.controller.routeCommand({ command: close, allowOpen: false });
+    await h.controller.routeCommand({ command: { ...ensure }, allowOpen: false });
+
+    h.controller.open();
+    h.controller.markReady();
+    const delivered = h.sends.filter((entry) => entry.channel === 'cmd-channel').map((entry) => entry.payload);
+    expect(delivered).toEqual([ensure, close, ensure]);
+  });
+
+  it('同目标 open-turn-review 后帧取代前帧,不同 session 的并存(#2511 review)', async () => {
+    const h = makeHarness({ detached: true });
+    h.controller.setContext(ctx);
+    const stale = {
+      type: 'open-turn-review' as const,
+      sessionId: 'worker-a',
+      changeSetIds: ['cs-old'],
+      requestNonce: 1,
+      hostSessionId: 's1',
+    };
+    const fresh = {
+      type: 'open-turn-review' as const,
+      sessionId: 'worker-a',
+      changeSetIds: ['cs-new'],
+      requestNonce: 2,
+      hostSessionId: 's1',
+    };
+    const other = {
+      type: 'open-turn-review' as const,
+      sessionId: 'worker-b',
+      changeSetIds: ['cs-b'],
+      requestNonce: 3,
+      hostSessionId: 's1',
+    };
+    await h.controller.routeCommand({ command: stale, allowOpen: false });
+    await h.controller.routeCommand({ command: other, allowOpen: false });
+    await h.controller.routeCommand({ command: fresh, allowOpen: false });
+
+    h.controller.open();
+    h.controller.markReady();
+    const delivered = h.sends.filter((entry) => entry.channel === 'cmd-channel').map((entry) => entry.payload);
+    expect(delivered).toEqual([other, fresh]);
+  });
+
 });
