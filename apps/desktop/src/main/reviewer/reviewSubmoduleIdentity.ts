@@ -190,19 +190,28 @@ async function readOneSubmoduleIdentity(
     hashedContent: false,
   };
   let subHead: string;
+  // 「未初始化」只有两种合法形态:工作树目录整个缺席(gitlink 在、目录被清),
+  // 或 deinit 后留下的空目录(rev-parse 静默落到父仓 → toplevel 归属不是子仓
+  // 自身)。除这两种外的任何读取失败(权限、git 异常、realpath 失败)都必须
+  // 向上抛 fail closed —— 把读取错误降级成稳定的 'uninitialized' 身份,会让
+  // 不同的内层内容映射到同一 manifest,新鲜度门形同虚设。
   try {
-    const { stdout: toplevelOut } = await runGit(['rev-parse', '--show-toplevel'], {
-      cwd: subRoot,
-      maxStdoutBytes: 4096,
-    });
-    const [toplevelReal, subRootReal] = await Promise.all([
-      fsRealpath(toplevelOut.trim()),
-      fsRealpath(subRoot),
-    ]);
-    if (toplevelReal !== subRootReal) return uninitialized;
-  } catch {
-    return uninitialized;
+    await fsPromises.stat(subRoot);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return uninitialized;
+    throw new ReviewSubmoduleIdentityError(
+      `Review cannot stat submodule worktree ${subPath}: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
+  const { stdout: toplevelOut } = await runGit(['rev-parse', '--show-toplevel'], {
+    cwd: subRoot,
+    maxStdoutBytes: 4096,
+  });
+  const [toplevelReal, subRootReal] = await Promise.all([
+    fsRealpath(toplevelOut.trim()),
+    fsRealpath(subRoot),
+  ]);
+  if (toplevelReal !== subRootReal) return uninitialized;
   try {
     const { stdout } = await runGit(['rev-parse', 'HEAD'], {
       cwd: subRoot,
