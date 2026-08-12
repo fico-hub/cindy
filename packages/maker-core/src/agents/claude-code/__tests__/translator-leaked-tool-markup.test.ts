@@ -257,6 +257,14 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toEqual({ category: 'invoke-with-parameter' });
   });
 
+  it('still hits when an unclosed list-item fence ends with the list (implicit close)', () => {
+    // CommonMark:列表围栏内容必须缩进到列表项内容列,低于该缩进的非空行结束
+    // 列表项与其中未闭合的围栏 —— 列表外的真实泄漏不能被吞掉。
+    expect(
+      detectLeakedToolCallMarkup(`示例:\n- \`\`\`xml\n  内容被截断了\n\n${CLASS_B_LEAK}`),
+    ).toEqual({ category: 'invoke-with-parameter' });
+  });
+
   it('does not treat a mixed-character line as a closing fence', () => {
     // CommonMark 闭栏必须与开栏同字符:``` 栏内出现 ```~~~ 行不是闭栏,块内
     // 后续的标记示例仍在围栏里,不命中。

@@ -45,8 +45,13 @@ const FENCE_CLOSE_RE = /^( *)(`{3,}|~{3,})[ \t]*$/;
 function stripFencedBlocks(lines: string[]): string[] {
   const out: string[] = [];
   // maxCloseIndent = 开栏容器边距 + 3(CommonMark:闭栏缩进相对容器至多 3 空格
-  // —— 列表项内的闭栏随列表边距整体右移)。
-  let fence: { char: string; len: number; maxCloseIndent: number } | null = null;
+  // —— 列表项内的闭栏随列表边距整体右移)。contentIndent 仅列表开栏时非零:
+  // 围栏内容必须缩进到列表项内容列,低于该缩进的非空行意味着列表项(连同其中
+  // 未闭合的围栏)已经结束 —— 隐式闭栏并按普通行重新处理,未闭合的列表围栏
+  // 不再把列表外的真实泄漏吞到输入末尾(第九轮 Codex review)。顶层围栏
+  // contentIndent 为 0,保持「未闭合吞到段末」的既有语义。
+  let fence: { char: string; len: number; maxCloseIndent: number; contentIndent: number } | null =
+    null;
   for (const line of lines) {
     if (fence) {
       const c = FENCE_CLOSE_RE.exec(line);
@@ -57,8 +62,18 @@ function stripFencedBlocks(lines: string[]): string[] {
         c[2].length >= fence.len
       ) {
         fence = null; // 闭栏行本身也剥掉
+        continue;
       }
-      continue; // 围栏内容整行剥掉
+      if (fence.contentIndent > 0 && !/^[ \t]*$/.test(line)) {
+        const indent = /^ */.exec(line)?.[0].length ?? 0;
+        if (indent < fence.contentIndent) {
+          fence = null; // 隐式闭栏:该行不属于列表项,落下去按普通行处理。
+        } else {
+          continue;
+        }
+      } else {
+        continue; // 围栏内容整行剥掉(块内空行不终结围栏)。
+      }
     }
     const m = FENCE_OPEN_RE.exec(line);
     if (m) {
@@ -66,7 +81,13 @@ function stripFencedBlocks(lines: string[]): string[] {
       const info = m[3] ?? '';
       const validOpen = char === '~' || !info.includes('`');
       if (validOpen) {
-        fence = { char, len: m[2].length, maxCloseIndent: m[1].length + 3 };
+        const isListOpener = /\S/.test(m[1]);
+        fence = {
+          char,
+          len: m[2].length,
+          maxCloseIndent: m[1].length + 3,
+          contentIndent: isListOpener ? m[1].length : 0,
+        };
         continue;
       }
     }
