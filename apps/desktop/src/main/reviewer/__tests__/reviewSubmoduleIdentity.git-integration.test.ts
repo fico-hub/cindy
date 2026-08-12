@@ -138,6 +138,33 @@ describe('readReviewSubmoduleIdentity (#2463)', () => {
     expect(result.hashedContent).toBe(false);
   });
 
+  // Windows 无 POSIX 权限位,chmod 000 制造不出读取失败。
+  it.skipIf(process.platform === 'win32')(
+    'fails closed (not uninitialized) when the submodule worktree is unreadable',
+    async () => {
+      const { parent, sub } = await setupParentWithSubmodule();
+      parentPath = parent;
+      try {
+        await fs.chmod(sub, 0o000);
+        await expect(
+          readReviewSubmoduleIdentity(parentPath, ['vendor/lib']),
+        ).rejects.toThrow();
+      } finally {
+        await fs.chmod(sub, 0o755);
+      }
+    },
+  );
+
+  it('treats a fully removed submodule worktree as uninitialized', async () => {
+    const { parent, sub } = await setupParentWithSubmodule();
+    parentPath = parent;
+    await runGit(['submodule', 'deinit', '-f', 'vendor/lib'], { cwd: parent });
+    await fs.rm(sub, { recursive: true, force: true });
+
+    const result = await readReviewSubmoduleIdentity(parentPath, ['vendor/lib']);
+    expect(result.identities[0].subHead).toBe('uninitialized');
+  });
+
   it('fails closed when the parent repository cannot be read', async () => {
     await expect(
       readReviewSubmoduleIdentity(path.join(workRoot, 'no-such-repo'), ['vendor/lib']),
