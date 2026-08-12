@@ -332,3 +332,79 @@ describe('readReviewSubmoduleIdentity (#2463)', () => {
     ).rejects.toThrow();
   });
 });
+
+/**
+ * 自底向上构造 levels 层子仓链:chain-l{levels} 是最内层普通仓(含 leaf.txt),
+ * 每一层把下一层作为 child 子仓;父仓把 chain-l1 挂在 vendor/lib,随后
+ * `submodule update --init --recursive` 初始化全链。返回最内层 worktree 路径。
+ * 注意:嵌套子仓只有**脏了**才会出现在上层 status 里、才会被递归绑定 ——
+ * 用例都先改脏最内层再读 manifest。
+ */
+async function setupNestedChain(levels: number): Promise<{ parent: string; innermost: string }> {
+  let upstream = path.join(workRoot, `chain-l${levels}`);
+  await initRepo(upstream);
+  await fs.writeFile(path.join(upstream, 'leaf.txt'), 'leaf-v1\n');
+  await runGit(['add', 'leaf.txt'], { cwd: upstream });
+  await runGit(['commit', '--no-gpg-sign', '-m', 'leaf seed'], { cwd: upstream });
+  for (let i = levels - 1; i >= 1; i -= 1) {
+    const repo = path.join(workRoot, `chain-l${i}`);
+    await initRepo(repo);
+    await fs.writeFile(path.join(repo, `file-l${i}.txt`), `l${i}\n`);
+    await runGit(['add', '.'], { cwd: repo });
+    await runGit(['commit', '--no-gpg-sign', '-m', `l${i} seed`], { cwd: repo });
+    await runGit(['-c', 'protocol.file.allow=always', 'submodule', 'add', upstream, 'child'], {
+      cwd: repo,
+    });
+    await runGit(['commit', '--no-gpg-sign', '-m', 'add child'], { cwd: repo });
+    upstream = repo;
+  }
+  const parent = path.join(workRoot, 'parent-nested');
+  await initRepo(parent);
+  await fs.writeFile(path.join(parent, 'root.txt'), 'root\n');
+  await runGit(['add', 'root.txt'], { cwd: parent });
+  await runGit(['commit', '--no-gpg-sign', '-m', 'parent seed'], { cwd: parent });
+  await runGit(['-c', 'protocol.file.allow=always', 'submodule', 'add', upstream, 'vendor/lib'], {
+    cwd: parent,
+  });
+  await runGit(['commit', '--no-gpg-sign', '-m', 'add submodule'], { cwd: parent });
+  await runGit(
+    ['-c', 'protocol.file.allow=always', 'submodule', 'update', '--init', '--recursive'],
+    { cwd: parent },
+  );
+  const innermost = path.join(parent, 'vendor', 'lib', ...Array(levels - 1).fill('child'));
+  return { parent, innermost };
+}
+
+describe('readReviewSubmoduleIdentity 嵌套递归 (#2463 维护者 review)', () => {
+  it('binds nested submodule content: an innermost edit changes the outer manifest', async () => {
+    const { parent, innermost } = await setupNestedChain(2);
+    parentPath = parent;
+    const leaf = path.join(innermost, 'leaf.txt');
+
+    await fs.writeFile(leaf, 'leaf-vA\n');
+    const withEditA = await readReviewSubmoduleIdentity(parentPath, ['vendor/lib']);
+    await fs.writeFile(leaf, 'leaf-vB\n');
+    const withEditB = await readReviewSubmoduleIdentity(parentPath, ['vendor/lib']);
+
+    // 递归确实展开了内层:外层身份携带 nested 子身份,且内层内容参与指纹。
+    expect(withEditA.identities).toHaveLength(1);
+    expect(withEditA.identities[0].nested).toHaveLength(1);
+    expect(withEditA.identities[0].nested[0].path).toBe('child');
+    expect(withEditA.identities[0].nested[0].dirtyContentFingerprint).not.toBeNull();
+    expect(withEditA.hashedContent).toBe(true);
+    // 内层同尺寸字节替换必须改变外层 manifest —— #2463 攻击形态的嵌套版。
+    expect(withEditB.identities).not.toEqual(withEditA.identities);
+  });
+
+  it('fails closed when the dirty chain nests deeper than the recursion cap', async () => {
+    // 6 层脏链:vendor/lib 为深度 1,最内层为深度 6 > MAX(5) —— 必须整体拒绝,
+    // 不允许静默截断(截断会让更深处的内容变化映射到同一 manifest)。
+    const { parent, innermost } = await setupNestedChain(6);
+    parentPath = parent;
+    await fs.writeFile(path.join(innermost, 'leaf.txt'), 'leaf-dirty\n');
+
+    await expect(readReviewSubmoduleIdentity(parentPath, ['vendor/lib'])).rejects.toThrow(
+      /nested deeper than 5/,
+    );
+  });
+});
