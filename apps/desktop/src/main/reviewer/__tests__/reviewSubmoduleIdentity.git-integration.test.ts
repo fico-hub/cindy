@@ -530,3 +530,25 @@ describe('readReviewSubmoduleIdentity ignore 配置 (#2463 review)', () => {
     expect(withEditB.identities).not.toEqual(withEditA.identities);
   });
 });
+
+describe('readReviewSubmoduleIdentity index 已删的嵌套 gitlink (#2463 review)', () => {
+  it('binds a nested checkout whose gitlink was removed from the index (git rm --cached)', async () => {
+    // 外层子仓 git rm --cached child 保留内层 checkout:status 为 D child +
+    // ?? child/。gitlink 判定须并入 HEAD tree,否则保留目录被当普通 worktree
+    // 路径喂给文件指纹器抛错、Review 无法启动。
+    const { parent, innermost } = await setupNestedChain(2);
+    parentPath = parent;
+    const outerSub = path.join(parent, 'vendor', 'lib');
+    await runGit(['rm', '--cached', 'child'], { cwd: outerSub });
+    await fs.writeFile(path.join(innermost, 'leaf.txt'), 'leaf-dirty\n');
+
+    const result = await readReviewSubmoduleIdentity(parentPath, ['vendor/lib']);
+    expect(result.identities).toHaveLength(1);
+    const nested = result.identities[0].nested;
+    expect(nested).toHaveLength(1);
+    expect(nested[0].path).toBe('child');
+    // index 里已无 gitlink:indexRecord 记 absent,但 HEAD 记录与内层身份仍绑定。
+    expect(nested[0].indexRecord).toBe('absent');
+    expect(nested[0].subHead).not.toBe('uninitialized');
+  });
+});
