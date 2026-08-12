@@ -270,6 +270,32 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     expect(detectLeakedToolCallMarkup(nested)).toBeNull();
   });
 
+  it('does not hit when a dedented fence line reopens at top level after a list fence', () => {
+    // 低于列表内容列的围栏行不是内层闭栏:它已退出列表项,是新的顶层开栏 ——
+    // 其后的标记在新围栏里,渲染为代码,不是泄漏。
+    expect(
+      detectLeakedToolCallMarkup(
+        `示例:\n- \`\`\`xml\n  demo\n\`\`\`\ninvoke name="Bash">\n<parameter name="command">ls</parameter>`,
+      ),
+    ).toBeNull();
+  });
+
+  it('does not hit on entity-escaped marker demonstrations (&lt;invoke)', () => {
+    expect(
+      detectLeakedToolCallMarkup(
+        '协议形态是 &lt;invoke name="Bash"> 后跟 &lt;parameter name="command">ls</parameter> 这样的结构。',
+      ),
+    ).toBeNull();
+  });
+
+  it('does not hit on backslash-escaped marker demonstrations (\\<invoke)', () => {
+    expect(
+      detectLeakedToolCallMarkup(
+        '写成 \\<invoke name="Bash"> 与 \\<parameter name="command">ls</parameter> 时是转义示例。',
+      ),
+    ).toBeNull();
+  });
+
   it('still hits when an unclosed list-item fence ends with the list (implicit close)', () => {
     // CommonMark:列表围栏内容必须缩进到列表项内容列,低于该缩进的非空行结束
     // 列表项与其中未闭合的围栏 —— 列表外的真实泄漏不能被吞掉。

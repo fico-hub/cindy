@@ -78,6 +78,10 @@ function stripFencedBlocks(lines: string[]): string[] {
       if (
         c &&
         widthInColumns(c[1]) <= fence.maxCloseIndent &&
+        // 列表围栏的闭栏必须保持在列表项内容列上(下界):缩进低于容器边距的
+        // 围栏行已经退出列表项,是**新的顶层开栏**而不是内层闭栏 —— 走下方
+        // 隐式退出后按普通行重新处理(第十一轮 Codex review)。
+        widthInColumns(c[1]) >= fence.contentIndent &&
         c[2][0] === fence.char &&
         c[2].length >= fence.len
       ) {
@@ -235,10 +239,16 @@ function stripInlineCodeSpansInParagraph(segment: string): string {
   return out;
 }
 
-/** invoke 开标记:类 B 的典型形态缺失前导 `<`,两种都认。 */
-const INVOKE_MARKER_RE = /<?invoke\s+name="[^"\n]{1,128}"\s*>/;
-/** parameter 开标记(通常保留 `<`,同样允许缺失)。 */
-const PARAMETER_MARKER_RE = /<?parameter\s+name="[^"\n]{1,128}"\s*>/;
+/**
+ * invoke 开标记:类 B 的典型形态缺失前导 `<`,两种都认。刻意转义的示例不算
+ * 泄漏(第十一轮 Codex review):`\<invoke`(CommonMark 反斜杠转义)与
+ * `&lt;invoke`(HTML 实体)都是作者在散文里演示协议的写法 —— 带 `<` 的分支
+ * 要求 `<` 未被反斜杠转义;裸 `invoke` 分支要求前面既不是 `&lt;` 也不是 `<`
+ * (后者已由带 `<` 分支处理)。
+ */
+const INVOKE_MARKER_RE = /(?:(?<!\\)<|(?<!&lt;)(?<![<\\]))invoke\s+name="[^"\n]{1,128}"\s*>/;
+/** parameter 开标记(通常保留 `<`,同样允许缺失;转义规则同上)。 */
+const PARAMETER_MARKER_RE = /(?:(?<!\\)<|(?<!&lt;)(?<![<\\]))parameter\s+name="[^"\n]{1,128}"\s*>/;
 
 export interface LeakedToolMarkupHit {
   /** 命中类别,进结构化日志用;当前只有一类。 */
