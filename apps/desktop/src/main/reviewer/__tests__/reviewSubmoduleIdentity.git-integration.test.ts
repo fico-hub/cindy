@@ -236,6 +236,53 @@ describe('readReviewSubmoduleIdentity (#2463)', () => {
     expect(batched).toEqual(single);
   });
 
+  it('counts staged identity records against the shared path budget', async () => {
+    const { parent, sub } = await setupParentWithSubmodule();
+    parentPath = parent;
+    await fs.writeFile(path.join(sub, 's1.txt'), 'one\n');
+    await fs.writeFile(path.join(sub, 's2.txt'), 'two\n');
+    await runGit(['add', '--', 's1.txt', 's2.txt'], { cwd: sub });
+
+    // 预算按「子仓条目 1 + staged 记录 2 = 3」消耗:2 不够,3 恰好。
+    await expect(
+      readReviewSubmoduleIdentity(parentPath, ['vendor/lib'], { maxContentPaths: 2 }),
+    ).rejects.toThrow(/content-path budget/);
+    await expect(
+      readReviewSubmoduleIdentity(parentPath, ['vendor/lib'], { maxContentPaths: 3 }),
+    ).resolves.toBeTruthy();
+  });
+
+  it('allows the shared byte budget to be exactly exhausted by earlier submodules', async () => {
+    const upstream = path.join(workRoot, 'lib-upstream');
+    await initRepo(upstream);
+    await fs.writeFile(path.join(upstream, 'inner.txt'), 'seed\n');
+    await runGit(['add', 'inner.txt'], { cwd: upstream });
+    await runGit(['commit', '--no-gpg-sign', '-m', 'inner seed'], { cwd: upstream });
+
+    const parent = path.join(workRoot, 'parent');
+    await initRepo(parent);
+    await fs.writeFile(path.join(parent, 'root.txt'), 'root\n');
+    await runGit(['add', 'root.txt'], { cwd: parent });
+    await runGit(['commit', '--no-gpg-sign', '-m', 'parent seed'], { cwd: parent });
+    for (const name of ['vendor/a', 'vendor/b']) {
+      await runGit(
+        ['-c', 'protocol.file.allow=always', 'submodule', 'add', upstream, name],
+        { cwd: parent },
+      );
+      await configureRepo(path.join(parent, ...name.split('/')));
+    }
+    await runGit(['commit', '--no-gpg-sign', '-m', 'add submodules'], { cwd: parent });
+    parentPath = parent;
+    // vendor/a 的 7 字节文件恰好吃满预算;vendor/b 只有零字节 dirty 文件,
+    // 不需要再读任何字节 —— 不允许恰好用尽会在这里误报超限。
+    await fs.writeFile(path.join(parent, 'vendor', 'a', 'inner.txt'), 'dirtyA\n');
+    await fs.writeFile(path.join(parent, 'vendor', 'b', 'zero.txt'), '');
+
+    await expect(
+      readReviewSubmoduleIdentity(parentPath, ['vendor/a', 'vendor/b'], { maxContentBytes: 7 }),
+    ).resolves.toBeTruthy();
+  });
+
   it('records every index stage for an unmerged gitlink instead of keeping only the last', async () => {
     const { parent, sub } = await setupParentWithSubmodule();
     parentPath = parent;
