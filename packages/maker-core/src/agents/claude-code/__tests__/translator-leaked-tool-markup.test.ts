@@ -323,6 +323,26 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toBeNull();
   });
 
+  it('does not hit when the list content column exceeds 3 and the fence sits on a continuation line', () => {
+    // `-   Example:` 的内容列为 4:续行围栏缩进 4 列仍是列表项内的合法围栏,
+    // 开栏缩进上限是「内容列 + 3」而非固定 3。
+    expect(
+      detectLeakedToolCallMarkup(
+        `-   Example:\n    \`\`\`xml\n    invoke name="Bash">\n    <parameter name="command">ls</parameter>\n    \`\`\`\n完。`,
+      ),
+    ).toBeNull();
+  });
+
+  it('does not hit when tab-indented example lines follow a deep list fence (ambiguous columns)', () => {
+    // 内容列 5(三空格 + `- `)+ tab 缩进内容(展开 4 列):tab 停靠位歧义,
+    // fail-open 按「缩进足够」留在围栏里,不把正常示例误报成泄漏。
+    expect(
+      detectLeakedToolCallMarkup(
+        `   - \`\`\`xml\n\tinvoke name="Bash">\n\t<parameter name="command">ls</parameter>\n\t\`\`\`\n完。`,
+      ),
+    ).toBeNull();
+  });
+
   it('still hits when an unclosed continuation-line list fence ends with the list', () => {
     // 续行围栏未闭合:低于列表内容列的非空行结束列表项与围栏,其后的真实
     // 泄漏保持可检出。

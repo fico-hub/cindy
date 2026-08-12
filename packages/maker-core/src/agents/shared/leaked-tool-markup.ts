@@ -31,7 +31,10 @@
  * 运行;反引号开栏的 info string 不得含反引号(含则整行不是开栏),波浪线
  * 开栏无此限制。捕获组:m[1]=运行前的全部前缀,m[2]=围栏运行,m[3]=info。
  */
-const FENCE_OPEN_RE = /^( {0,3}(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})*)(`{3,}|~{3,})(.*)$/;
+// 前缀空白放开由代码按列宽校验:纯空白开栏的缩进上限是「3 列」或「当前列表
+// 内容列 + 3」(列表内容列可超过 3,如 `-   Example:` 的续行围栏缩进 4 列,
+// 第十三轮 Codex review),正则写死 0-3 会在进入列表上下文逻辑前就拒绝。
+const FENCE_OPEN_RE = /^([ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})*)(`{3,}|~{3,})(.*)$/;
 /** 闭栏行:纯缩进 + 围栏运行 + 尾随空白;缩进上限(按列宽)由开栏的容器边距决定。 */
 const FENCE_CLOSE_RE = /^([ \t]*)(`{3,}|~{3,})[ \t]*$/;
 
@@ -52,6 +55,18 @@ function widthInColumns(prefix: string): number {
 function leadingIndentColumns(line: string): number {
   const ws = /^[ \t]*/.exec(line)?.[0] ?? '';
   return widthInColumns(ws);
+}
+
+/**
+ * 行首缩进是否**确定**低于 cols 列。行首空白含 tab 时列数有歧义(tab 停靠位
+ * 依上下文膨胀,不同实现结论不一,第十三轮 Greptile review 的形态即 tab 展开
+ * 4 列 vs 内容列 5)—— fail-open 按「缩进足够」处理:围栏多留在容器里只会
+ * 少判,不会把正常示例误报成泄漏。
+ */
+function indentDefinitelyBelow(line: string, cols: number): boolean {
+  const ws = /^[ \t]*/.exec(line)?.[0] ?? '';
+  if (ws.includes('\t')) return false;
+  return ws.length < cols;
 }
 
 /**
@@ -97,7 +112,7 @@ function stripFencedBlocks(lines: string[]): string[] {
         continue;
       }
       if (fence.contentIndent > 0 && !/^[ \t]*$/.test(line)) {
-        if (leadingIndentColumns(line) < fence.contentIndent) {
+        if (indentDefinitelyBelow(line, fence.contentIndent)) {
           fence = null; // 隐式闭栏:该行不属于列表项,落下去按普通行处理。
         } else {
           continue;
@@ -114,28 +129,39 @@ function stripFencedBlocks(lines: string[]): string[] {
       if (validOpen) {
         const isListOpener = /\S/.test(m[1]);
         const prefixCols = widthInColumns(m[1]);
-        // 列表边界来源二选一:开栏行自带标记,或落在已建立的列表项续行上
-        // (前缀纯空白且缩进不低于当前内容列)。
-        const contentIndent = isListOpener
-          ? prefixCols
-          : listContentCol > 0 && prefixCols >= listContentCol
-          ? listContentCol
-          : 0;
-        fence = {
-          char,
-          len: m[2].length,
-          maxCloseIndent: prefixCols + 3,
-          contentIndent,
-        };
-        if (isListOpener) listContentCol = prefixCols;
-        continue;
+        // 缩进合法性按列宽校验(正则前缀已放开):
+        //  - 标记开栏:标记前的纯空白 ≤3 列,或(嵌套列表)≤ 内容列 + 3;
+        //  - 纯空白开栏:≤3 列(顶层),或落在列表项续行区间
+        //    [内容列, 内容列 + 3](内容列可超过 3,第十三轮 Codex review);
+        //  - 更深的缩进是缩进代码,不是围栏,落到下方普通行处理。
+        const leadWsCols = widthInColumns(/^[ \t]*/.exec(m[1])?.[0] ?? '');
+        const openerValid = isListOpener
+          ? leadWsCols <= 3 || (listContentCol > 0 && leadWsCols <= listContentCol + 3)
+          : prefixCols <= 3 ||
+            (listContentCol > 0 && prefixCols >= listContentCol && prefixCols <= listContentCol + 3);
+        if (openerValid) {
+          const contentIndent = isListOpener
+            ? prefixCols
+            : listContentCol > 0 && prefixCols >= listContentCol
+            ? listContentCol
+            : 0;
+          fence = {
+            char,
+            len: m[2].length,
+            maxCloseIndent: prefixCols + 3,
+            contentIndent,
+          };
+          if (isListOpener) listContentCol = prefixCols;
+          else if (contentIndent === 0 && prefixCols < listContentCol) listContentCol = 0;
+          continue;
+        }
       }
     }
     if (!/^[ \t]*$/.test(line)) {
       const lm = LIST_MARKER_LINE_RE.exec(line);
       if (lm) {
         listContentCol = widthInColumns(lm[1]);
-      } else if (leadingIndentColumns(line) < listContentCol) {
+      } else if (indentDefinitelyBelow(line, listContentCol)) {
         listContentCol = 0;
       }
     }
