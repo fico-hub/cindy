@@ -277,7 +277,11 @@ export async function readStatus(scope: ReviewScope): Promise<ReviewStatus> {
       dirty: false,
     };
   }
-  const { stdout } = await runGit(['status', '--porcelain=2', '-z', '--branch', '--renames', '--untracked-files=all'], {
+  // --ignore-submodules=none:仓库配置 submodule.<name>.ignore=all/dirty 会让
+  // status 直接省略脏的 submodule,dirty 内容根本进不了 Review 发现链 ——
+  // 新鲜度身份绑定必须无视该配置(与 reviewSubmoduleIdentity 的子仓 status
+  // 同一裁决,Codex review #2515)。
+  const { stdout } = await runGit(['status', '--porcelain=2', '-z', '--branch', '--renames', '--untracked-files=all', '--ignore-submodules=none'], {
     cwd: scope.repoRoot,
     maxStdoutBytes: STATUS_MAX_STDOUT_BYTES,
   });
