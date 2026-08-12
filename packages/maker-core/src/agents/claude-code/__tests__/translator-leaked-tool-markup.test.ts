@@ -361,6 +361,29 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toEqual({ category: 'invoke-with-parameter' });
   });
 
+  it('does not hit when the markers only appear inside a <script> raw HTML block', () => {
+    // 渲染端 skipHtml:script 容器整块隐藏。
+    expect(
+      detectLeakedToolCallMarkup(
+        `示例:\n<script type="text/plain">\ninvoke name="Bash">\n<parameter name="command">ls</parameter>\n</script>\n完。`,
+      ),
+    ).toBeNull();
+  });
+
+  it('does not hit when the markers only appear inside a <div> HTML block (until blank line)', () => {
+    expect(
+      detectLeakedToolCallMarkup(
+        `示例:\n<div class="demo">\ninvoke name="Bash">\n<parameter name="command">ls</parameter>\n</div>\n\n以上。`,
+      ),
+    ).toBeNull();
+  });
+
+  it('still hits when the leak follows a closed HTML block after a blank line', () => {
+    expect(
+      detectLeakedToolCallMarkup(`<div>说明</div>\n\n${CLASS_B_LEAK}`),
+    ).toEqual({ category: 'invoke-with-parameter' });
+  });
+
   it('does not treat a mixed-character line as a closing fence', () => {
     // CommonMark 闭栏必须与开栏同字符:``` 栏内出现 ```~~~ 行不是闭栏,块内
     // 后续的标记示例仍在围栏里,不命中。

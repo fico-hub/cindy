@@ -212,8 +212,56 @@ const BLOCKQUOTE_MARKER_RE = /^ {0,3}> ?/;
  * 多判不会漏判 —— 但标记正则要求裸形态,残留的 `>` 前缀行不会命中 invoke
  * 行首形态之外的内容,误报面可忽略)。
  */
+/**
+ * CommonMark 原始 HTML 块(渲染端 skipHtml 下整块不展示,块内的协议示例
+ * 用户看不到,不算泄漏 —— 第十四轮 Codex review):
+ *  - type 1 容器(script / pre / style / textarea):到含闭合标签的行(含)
+ *    为止,未闭合吞到段末(渲染端同样整段隐藏);
+ *  - type 6(标准块级标签开头,如 <div> / <table>):到空行为止。
+ * type 7(任意成对标签独立成行)**刻意不剥**:类 B 泄漏的 `<parameter …>`
+ * 行本身就是这种形状,剥掉会把真实泄漏藏进「HTML 块」里致盲检测 —— 这里
+ * 取检测优先,代价是「自定义标签块 + 紧随标记」的极端形态可能误报,标准
+ * 块级标签已由 type 6 覆盖。
+ */
+const HTML_BLOCK_TYPE1_OPEN_RE = /^[ \t]{0,3}<(script|pre|style|textarea)\b/i;
+const HTML_BLOCK_TYPE6_RE =
+  /^[ \t]{0,3}<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?:[ \t/>]|$)/i;
+
+function stripHtmlBlocks(lines: string[]): string[] {
+  const out: string[] = [];
+  let closeTag: RegExp | null = null;
+  let inType6 = false;
+  for (const line of lines) {
+    if (closeTag) {
+      if (closeTag.test(line)) closeTag = null;
+      continue;
+    }
+    if (inType6) {
+      if (/^[ \t]*$/.test(line)) {
+        inType6 = false;
+        out.push(line);
+      }
+      continue;
+    }
+    const t1 = HTML_BLOCK_TYPE1_OPEN_RE.exec(line);
+    if (t1) {
+      const close = new RegExp(`</${t1[1]}>`, 'i');
+      if (!close.test(line)) closeTag = close;
+      continue;
+    }
+    if (HTML_BLOCK_TYPE6_RE.test(line)) {
+      inType6 = true;
+      continue;
+    }
+    out.push(line);
+  }
+  return out;
+}
+
 function stripBlockStructures(text: string, depth = 0): string {
-  const afterFences = stripFencedBlocks(text.split('\n'));
+  // 顺序:围栏最先(围栏里的 <script> / <div> 是代码内容),HTML 块其次,
+  // 随后引用容器与缩进代码。
+  const afterFences = stripHtmlBlocks(stripFencedBlocks(text.split('\n')));
   const out: string[] = [];
   let quoteRun: string[] | null = null;
   const flushQuote = (): void => {
