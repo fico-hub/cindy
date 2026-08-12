@@ -105,4 +105,42 @@ describe('readStagedIndexIdentity (#2460)', () => {
       readStagedIndexIdentity(path.join(repoPath, 'no-such-dir'), ['seed.txt']),
     ).rejects.toThrow();
   });
+
+  // Windows 文件名不允许控制字符,该形态只在 POSIX 上可构造。
+  it.skipIf(process.platform === 'win32')(
+    'binds identity for paths containing newline instead of silently skipping them',
+    async () => {
+      const trickyName = 'a\nb.txt';
+      await fs.writeFile(path.join(repoPath, trickyName), 'v1\n');
+      await runGit(['add', '--', trickyName], { cwd: repoPath });
+      const first = await readStagedIndexIdentity(repoPath, [trickyName]);
+      expect(first).toHaveLength(1);
+      expect(first[0]).not.toBe(`absent\t${trickyName}`);
+      expect(first[0].endsWith(`\t${trickyName}`)).toBe(true);
+
+      // #2460 攻击形态在换行路径上同样必须被身份变化捕获。
+      await fs.writeFile(path.join(repoPath, trickyName), 'v2\n');
+      await runGit(['add', '--', trickyName], { cwd: repoPath });
+      const second = await readStagedIndexIdentity(repoPath, [trickyName]);
+      expect(second).not.toEqual(first);
+    },
+  );
+
+  it('merges results across pathspec batches identically to a single call', async () => {
+    const names = Array.from({ length: 7 }, (_, i) => `batch-${i}.txt`);
+    for (const name of names) {
+      await fs.writeFile(path.join(repoPath, name), `${name}\n`);
+    }
+    await runGit(['add', '--', ...names], { cwd: repoPath });
+    const queried = [...names, 'batch-missing.txt'];
+
+    const single = await readStagedIndexIdentity(repoPath, queried);
+    const batched = await readStagedIndexIdentity(repoPath, queried, {
+      maxBatchPaths: 2,
+      maxBatchPathspecBytes: 64,
+    });
+    expect(batched).toEqual(single);
+    expect(batched).toHaveLength(queried.length);
+    expect(batched).toContain('absent\tbatch-missing.txt');
+  });
 });
