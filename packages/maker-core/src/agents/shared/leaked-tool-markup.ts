@@ -312,17 +312,27 @@ function stripHtmlBlocks(lines: string[]): string[] {
     if (cm && !line.slice(cm[0].length).includes('-->')) {
       // 未闭合的行首注释按块处理:容器边界与 type 1/6 同规则 —— 开在列表项内
       // 时随列表项结束终止,不再从 <!-- 一路吞到全文末尾(第十九轮 Codex
-      // review);同一行内闭合的注释留给后续闭合式注释正则。
+      // review);同一行内闭合的注释留给后续闭合式注释正则。开栏缩进合法性
+      // 同样按 type 1/6 的规则校验:缩进代码块里的 <!-- 是展示的代码,不是
+      // 注释开栏(第二十轮 Codex review),不合法时该行留给缩进代码剥离。
       const prefix = cm[1] ?? '';
       const isListOpener = /\S/.test(prefix);
-      blockIndent = isListOpener
-        ? widthInColumns(prefix)
-        : listContentCol > 0 && !indentDefinitelyBelow(line, listContentCol)
-        ? listContentCol
-        : 0;
-      if (isListOpener) listContentCol = widthInColumns(prefix);
-      inComment = true;
-      continue;
+      const prefixCols = widthInColumns(prefix);
+      const leadWsCols = widthInColumns(/^[ \t]*/.exec(prefix)?.[0] ?? '');
+      const ok = isListOpener
+        ? leadWsCols <= 3 || (listContentCol > 0 && leadWsCols <= listContentCol + 3)
+        : prefixCols <= 3 ||
+          (listContentCol > 0 && prefixCols >= listContentCol && prefixCols <= listContentCol + 3);
+      if (ok) {
+        blockIndent = isListOpener
+          ? prefixCols
+          : listContentCol > 0 && !indentDefinitelyBelow(line, listContentCol)
+          ? listContentCol
+          : 0;
+        if (isListOpener) listContentCol = prefixCols;
+        inComment = true;
+        continue;
+      }
     }
     if (!blank) {
       const lm = LIST_MARKER_LINE_RE.exec(line);

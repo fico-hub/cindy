@@ -466,6 +466,14 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toBeNull();
   });
 
+  it('still hits when an unclosed comment opener sits in an indented code block', () => {
+    // 缩进代码块里的 <!-- 是展示的代码不是注释开栏,不能吞掉其后 dedent 的
+    // 真实泄漏。
+    expect(
+      detectLeakedToolCallMarkup(`说明:\n\n    <!-- 缩进代码里的注释开头\n\n${CLASS_B_LEAK}`),
+    ).toEqual({ category: 'invoke-with-parameter' });
+  });
+
   it('does not treat a mixed-character line as a closing fence', () => {
     // CommonMark 闭栏必须与开栏同字符:``` 栏内出现 ```~~~ 行不是闭栏,块内
     // 后续的标记示例仍在围栏里,不命中。
