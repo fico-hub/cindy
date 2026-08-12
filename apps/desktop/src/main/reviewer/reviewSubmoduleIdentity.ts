@@ -291,8 +291,10 @@ async function readOneSubmoduleIdentity(
   const [toplevelReal, subRootReal] = await Promise.all([
     // 只剥 git 追加的行终止符,不 trim:目录名允许以空格/制表符结尾(macOS
     // 文件系统与 git 均合法),trim 会把路径本身裁掉导致 realpath 查错路径
-    // (Codex review #2515)。
-    fsRealpath(toplevelOut.replace(/\r?\n$/, '')),
+    // (Codex review #2515)。\r 按平台区分:Windows 文件名不可能含 \r,行尾
+    // \r\n 整体是终止符;POSIX 上 git 只追加 \n,\n 前的 \r 是目录名自身的
+    // 字节,必须保留(Codex review 第二轮)。
+    fsRealpath(toplevelOut.replace(process.platform === 'win32' ? /\r?\n$/ : /\n$/, '')),
     fsRealpath(subRoot),
   ]);
   if (toplevelReal !== subRootReal) {
