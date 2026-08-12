@@ -231,27 +231,50 @@ function stripHtmlBlocks(lines: string[]): string[] {
   const out: string[] = [];
   let closeTag: RegExp | null = null;
   let inType6 = false;
+  // blockIndent = 当前 HTML 块所属列表项的内容列(0 = 顶层)。开在列表续行上
+  // 的未闭合 HTML 块随列表项结束而终止(与围栏状态机同规则,第十五轮 Codex
+  // review):低于内容列的非空行按普通行重新处理,块外的真实泄漏不被吞掉。
+  let blockIndent = 0;
+  let listContentCol = 0;
   for (const line of lines) {
+    const blank = /^[ \t]*$/.test(line);
     if (closeTag) {
-      if (closeTag.test(line)) closeTag = null;
-      continue;
-    }
-    if (inType6) {
-      if (/^[ \t]*$/.test(line)) {
+      if (blockIndent > 0 && !blank && indentDefinitelyBelow(line, blockIndent)) {
+        closeTag = null; // 列表项结束,块随容器终止;该行落下去按普通行处理。
+      } else {
+        if (closeTag.test(line)) closeTag = null;
+        continue;
+      }
+    } else if (inType6) {
+      if (blank) {
         inType6 = false;
         out.push(line);
+        continue;
       }
-      continue;
+      if (blockIndent > 0 && indentDefinitelyBelow(line, blockIndent)) {
+        inType6 = false; // 同上:随列表项终止,该行重新处理。
+      } else {
+        continue;
+      }
     }
     const t1 = HTML_BLOCK_TYPE1_OPEN_RE.exec(line);
     if (t1) {
       const close = new RegExp(`</${t1[1]}>`, 'i');
+      blockIndent =
+        listContentCol > 0 && !indentDefinitelyBelow(line, listContentCol) ? listContentCol : 0;
       if (!close.test(line)) closeTag = close;
       continue;
     }
     if (HTML_BLOCK_TYPE6_RE.test(line)) {
+      blockIndent =
+        listContentCol > 0 && !indentDefinitelyBelow(line, listContentCol) ? listContentCol : 0;
       inType6 = true;
       continue;
+    }
+    if (!blank) {
+      const lm = LIST_MARKER_LINE_RE.exec(line);
+      if (lm) listContentCol = widthInColumns(lm[1]);
+      else if (indentDefinitelyBelow(line, listContentCol)) listContentCol = 0;
     }
     out.push(line);
   }

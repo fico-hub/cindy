@@ -384,6 +384,22 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toEqual({ category: 'invoke-with-parameter' });
   });
 
+  it('still hits when an unclosed list-item HTML block ends with the list', () => {
+    // 开在列表续行上的未闭合 <script> 随列表项结束而终止(与围栏同规则),
+    // 列表外的真实泄漏保持可检出。
+    expect(
+      detectLeakedToolCallMarkup(`- Example:\n  <script>\n  demo\n${CLASS_B_LEAK}`),
+    ).toEqual({ category: 'invoke-with-parameter' });
+  });
+
+  it('does not hit when a list-item HTML block wraps the markers and stays in the list', () => {
+    expect(
+      detectLeakedToolCallMarkup(
+        `- Example:\n  <script>\n  invoke name="Bash">\n  <parameter name="command">ls</parameter>\n  </script>\n完。`,
+      ),
+    ).toBeNull();
+  });
+
   it('does not treat a mixed-character line as a closing fence', () => {
     // CommonMark 闭栏必须与开栏同字符:``` 栏内出现 ```~~~ 行不是闭栏,块内
     // 后续的标记示例仍在围栏里,不命中。
