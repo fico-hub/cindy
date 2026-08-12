@@ -296,6 +296,43 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toBeNull();
   });
 
+  it('does not hit when the markers only appear inside an HTML comment', () => {
+    // 渲染端 skipHtml:注释里的协议示例用户看不到,不算泄漏。
+    expect(
+      detectLeakedToolCallMarkup(
+        `说明如下。\n<!-- <invoke name="Bash">\n<parameter name="command">ls</parameter> -->\n完。`,
+      ),
+    ).toBeNull();
+  });
+
+  it('does not hit on numeric character reference escapes (&#60; / &#x3c;)', () => {
+    expect(
+      detectLeakedToolCallMarkup(
+        '写法是 &#60;invoke name="Bash"> 后跟 &#x3C;parameter name="command">ls</parameter>。',
+      ),
+    ).toBeNull();
+  });
+
+  it('does not hit when a continuation-line fence in a list item wraps the markers', () => {
+    // 围栏开在列表项续行上(- Example: 换行后缩进 ```xml):列表上下文把它
+    // 绑回列表项,块内示例不命中。
+    expect(
+      detectLeakedToolCallMarkup(
+        `- Example:\n  \`\`\`xml\n  invoke name="Bash">\n  <parameter name="command">ls</parameter>\n  \`\`\`\n完。`,
+      ),
+    ).toBeNull();
+  });
+
+  it('still hits when an unclosed continuation-line list fence ends with the list', () => {
+    // 续行围栏未闭合:低于列表内容列的非空行结束列表项与围栏,其后的真实
+    // 泄漏保持可检出。
+    expect(
+      detectLeakedToolCallMarkup(
+        `- Example:\n  \`\`\`xml\n  内容被截断了\n${CLASS_B_LEAK}`,
+      ),
+    ).toEqual({ category: 'invoke-with-parameter' });
+  });
+
   it('still hits when an unclosed list-item fence ends with the list (implicit close)', () => {
     // CommonMark:列表围栏内容必须缩进到列表项内容列,低于该缩进的非空行结束
     // 列表项与其中未闭合的围栏 —— 列表外的真实泄漏不能被吞掉。

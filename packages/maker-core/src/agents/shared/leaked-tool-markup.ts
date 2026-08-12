@@ -62,16 +62,24 @@ function leadingIndentColumns(line: string): number {
  *    (见 stripBlockStructures),引用里的未闭合围栏只吞到该引用段末尾,
  *    不会把引用外的真实泄漏一并吞掉(Codex review)。
  */
+/** 纯列表标记行(不带围栏):用于维护「当前列表项内容列」上下文。 */
+const LIST_MARKER_LINE_RE = /^( {0,3}(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})+)/;
+
 function stripFencedBlocks(lines: string[]): string[] {
   const out: string[] = [];
   // maxCloseIndent = 开栏容器边距 + 3(CommonMark:闭栏缩进相对容器至多 3 空格
-  // —— 列表项内的闭栏随列表边距整体右移)。contentIndent 仅列表开栏时非零:
+  // —— 列表项内的闭栏随列表边距整体右移)。contentIndent 仅列表语境的开栏非零:
   // 围栏内容必须缩进到列表项内容列,低于该缩进的非空行意味着列表项(连同其中
   // 未闭合的围栏)已经结束 —— 隐式闭栏并按普通行重新处理,未闭合的列表围栏
   // 不再把列表外的真实泄漏吞到输入末尾(第九轮 Codex review)。顶层围栏
   // contentIndent 为 0,保持「未闭合吞到段末」的既有语义。
   let fence: { char: string; len: number; maxCloseIndent: number; contentIndent: number } | null =
     null;
+  // 当前列表项的内容列(0 = 不在列表项上下文)。围栏开在列表项的**续行**上时
+  // (- Example: 换行后缩进的 ```xml),开栏前缀只有空白、不含标记 —— 靠这个
+  // 跨行上下文把它绑回列表项,低缩进行仍能隐式闭栏(第十二轮 Codex review)。
+  // 标记行建立上下文;低于内容列的非空行清除;空行不清(列表项内允许空行)。
+  let listContentCol = 0;
   for (const line of lines) {
     if (fence) {
       const c = FENCE_CLOSE_RE.exec(line);
@@ -106,13 +114,29 @@ function stripFencedBlocks(lines: string[]): string[] {
       if (validOpen) {
         const isListOpener = /\S/.test(m[1]);
         const prefixCols = widthInColumns(m[1]);
+        // 列表边界来源二选一:开栏行自带标记,或落在已建立的列表项续行上
+        // (前缀纯空白且缩进不低于当前内容列)。
+        const contentIndent = isListOpener
+          ? prefixCols
+          : listContentCol > 0 && prefixCols >= listContentCol
+          ? listContentCol
+          : 0;
         fence = {
           char,
           len: m[2].length,
           maxCloseIndent: prefixCols + 3,
-          contentIndent: isListOpener ? prefixCols : 0,
+          contentIndent,
         };
+        if (isListOpener) listContentCol = prefixCols;
         continue;
+      }
+    }
+    if (!/^[ \t]*$/.test(line)) {
+      const lm = LIST_MARKER_LINE_RE.exec(line);
+      if (lm) {
+        listContentCol = widthInColumns(lm[1]);
+      } else if (leadingIndentColumns(line) < listContentCol) {
+        listContentCol = 0;
       }
     }
     out.push(line);
@@ -262,9 +286,26 @@ export interface LeakedToolMarkupHit {
  * 即全文)—— 已正常执行过工具的那段正文里出现类似文本属于讨论语境,不应触发;
  * 之后再出现的泄漏标记(最后一步调用写坏成纯文本)仍需捕获。
  */
+/**
+ * HTML 注释(含未闭合注释吞到结尾 —— CommonMark 的注释块同样延续到 `-->`,
+ * 渲染端 skipHtml 下整段不展示)。注释里的协议示例用户看不到,不算泄漏
+ * (第十二轮 Codex review)。在块结构剥离之后应用:围栏内的 `<!--` 是代码
+ * 内容,已随围栏剥掉,不会在这里误配对。
+ */
+const HTML_COMMENT_RE = /<!--[\s\S]*?(?:-->|$)/g;
+
+/**
+ * `<` 的数字字符引用(十进制 &#60; / 十六进制 &#x3c;,允许前导零与大小写)。
+ * 统一归一成 `&lt;`,由标记正则的实体转义排除分支处理(第十二轮 Codex
+ * review:只排除 &lt; 拼写会漏掉数字引用形式的转义示例)。
+ */
+const LT_CHAR_REF_RE = /&#0{0,6}60;|&#[xX]0{0,6}3[cC];/g;
+
 export function detectLeakedToolCallMarkup(rawText: string): LeakedToolMarkupHit | null {
   if (!rawText || rawText.length < 16) return null;
-  const text = stripInlineCodeSpans(stripBlockStructures(rawText));
+  const text = stripInlineCodeSpans(
+    stripBlockStructures(rawText).replace(HTML_COMMENT_RE, '').replace(LT_CHAR_REF_RE, '&lt;'),
+  );
   const invoke = INVOKE_MARKER_RE.exec(text);
   if (!invoke) return null;
   const afterInvoke = text.slice(invoke.index + invoke[0].length);
