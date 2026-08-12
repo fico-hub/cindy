@@ -19,6 +19,7 @@ function createTurnState(): TurnState {
     hasEmittedText: false,
     uiEmittedText: '',
     uiTextLenAtLastToolUse: 0,
+    leakedMarkupBeforeToolUse: null,
     pendingApiError: null,
     interruptRequested: false,
     generation: 0,
@@ -282,9 +283,9 @@ describe('Claude Code translator leaked tool markup guard (#2518)', () => {
     expect(events.some((e) => e.type === 'done')).toBe(true);
   });
 
-  it('does not flag markup-like text that precedes a successful structured tool call', async () => {
-    // 讨论语境:类标记文本出现在最后一次成功 tool_use **之前** —— 扫描域从该
-    // tool_use 时的已推正文长度起算,之前的文本不参与判定。
+  it('does not flag fenced markup discussion that precedes a successful structured tool call', async () => {
+    // 讨论语境:tool_use 之前的段落在推进偏移时也会单独过一遍检测器,但围栏/
+    // 行内代码里的演示会被剥离 —— 正常的语法讲解不触发。
     const tracker = new UsageTracker();
     const queue = createAsyncQueue<AgentEvent>();
     const ctx = createCtx(tracker);
@@ -295,7 +296,10 @@ describe('Claude Code translator leaked tool markup guard (#2518)', () => {
         type: 'assistant',
         message: {
           content: [
-            { type: 'text', text: `先解释一下这条被截断的调用长什么样:\n${CLASS_B_LEAK}` },
+            {
+              type: 'text',
+              text: `先解释一下这条被截断的调用长什么样:\n\`\`\`\n${CLASS_B_LEAK}\`\`\`\n现在实际执行。`,
+            },
             { type: 'tool_use', id: 'tool-1', name: 'Read', input: { file_path: '/tmp/a' } },
           ],
         },
@@ -312,6 +316,43 @@ describe('Claude Code translator leaked tool markup guard (#2518)', () => {
 
     const events = await drain(queue);
     expect(events.some((e) => e.type === 'error')).toBe(false);
+  });
+
+  it('flags a malformed call that precedes a valid tool_use in the same turn (Codex review)', async () => {
+    // 平行调用形态:模型想发两个调用,第一个写坏成纯文本、第二个正常解析 ——
+    // 坏调用文本落在 tool_use 之前的段里,推进偏移前的分段检测要接住它,
+    // 不能把 tool_use 之前的文本一律当讨论语境。
+    const tracker = new UsageTracker();
+    const queue = createAsyncQueue<AgentEvent>();
+    const ctx = createCtx(tracker);
+
+    pushMessageStart(queue, ctx);
+    translateSdkMessage(
+      {
+        type: 'assistant',
+        message: {
+          content: [
+            { type: 'text', text: CLASS_B_LEAK },
+            { type: 'tool_use', id: 'tool-2', name: 'Read', input: { file_path: '/tmp/b' } },
+          ],
+        },
+      },
+      queue,
+      ctx,
+    );
+    translateSdkMessage(
+      { type: 'assistant', message: { content: [{ type: 'text', text: '第二个调用读完了。' }] } },
+      queue,
+      ctx,
+    );
+    pushResult(queue, ctx);
+
+    const events = await drain(queue);
+    expect(events.find((e) => e.type === 'error')?.data).toMatchObject({
+      reason: 'malformed-tool-markup',
+      isTerminal: true,
+    });
+    expect(events.some((e) => e.type === 'done')).toBe(true);
   });
 
   it('flags a leak that appears after the last successful tool call (Codex review)', async () => {

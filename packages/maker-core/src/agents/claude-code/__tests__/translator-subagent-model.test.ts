@@ -18,6 +18,7 @@ function createTurnState(): TurnState {
     hasEmittedText: false,
     uiEmittedText: '',
     uiTextLenAtLastToolUse: 0,
+    leakedMarkupBeforeToolUse: null,
     pendingApiError: null,
     interruptRequested: false,
     generation: 0,

@@ -23,7 +23,10 @@ import {
 } from '@cindy/maker-shared/error-redaction';
 import type { createAsyncQueue } from '../shared/async-queue.js';
 import { stripTerminalControlSequences } from '../shared/terminal-output.js';
-import { detectLeakedToolCallMarkup } from '../shared/leaked-tool-markup.js';
+import {
+  detectLeakedToolCallMarkup,
+  type LeakedToolMarkupHit,
+} from '../shared/leaked-tool-markup.js';
 import { formatOverloadRetryMessage, parseOverloadError } from '../shared/overload-error.js';
 import {
   CONTEXT_OVERFLOW_REASON,
@@ -64,6 +67,13 @@ export interface TurnState {
    * ——单纯 toolUses > 0 全免会漏掉这种"干到一半最后一步静默掉了"的形态。
    */
   uiTextLenAtLastToolUse: number;
+  /**
+   * tool_use 推进扫描偏移前,对被跳过的前段正文做检测留下的命中。平行调用里
+   * 前一个写坏成纯文本、后一个正常解析时,坏调用文本落在 tool_use 之前的段
+   * —— 不能把它一律当讨论语境跳过(Codex review);围栏/行内代码内的演示仍
+   * 被检测器剥离,不误伤。收口时与尾段检测一起判。
+   */
+  leakedMarkupBeforeToolUse: LeakedToolMarkupHit | null;
   /**
    * SDK API retry / assistant error envelope 的暂存详情。两者都不是可靠的 turn
    * 终态: Claude Code 可能随后自动重试并返回成功 result。只有最终
@@ -179,6 +189,7 @@ function resetTurnState(turn: TurnState): void {
   turn.hasEmittedText = false;
   turn.uiEmittedText = '';
   turn.uiTextLenAtLastToolUse = 0;
+  turn.leakedMarkupBeforeToolUse = null;
   turn.pendingApiError = null;
   turn.interruptRequested = false;
   turn.lastAssistantMsgHadSubstance = true;
@@ -1151,6 +1162,13 @@ function handleAssistant(
         agentMeta: assistantMeta,
       });
     } else if (block.type === 'tool_use') {
+      // 推进扫描偏移前先检测被跳过的前段:平行调用里前一个写坏成纯文本、后一个
+      // 正常解析时,坏调用文本就落在这段里(见 TurnState.leakedMarkupBeforeToolUse)。
+      if (!ctx.turn.leakedMarkupBeforeToolUse) {
+        ctx.turn.leakedMarkupBeforeToolUse = detectLeakedToolCallMarkup(
+          ctx.turn.uiEmittedText.slice(ctx.turn.uiTextLenAtLastToolUse),
+        );
+      }
       ctx.turn.toolUses += 1;
       ctx.turn.uiTextLenAtLastToolUse = ctx.turn.uiEmittedText.length;
       // ctx.log.info('SDK ▷ tool_use', {
@@ -1792,7 +1810,11 @@ function handleResult(
   const leakedMarkupGuard =
     !msg.is_error && !ctx.turn.interruptRequested && !ctx.turn.sawCompactBoundary;
   let leakedMarkupBody = (emitted + fallbackTail).slice(ctx.turn.uiTextLenAtLastToolUse);
-  let leakedToolMarkup = leakedMarkupGuard ? detectLeakedToolCallMarkup(leakedMarkupBody) : null;
+  // 尾段检测之外还要并入 tool_use 推进偏移时留下的前段命中(平行调用里前一个
+  // 写坏、后一个正常解析的形态,见 TurnState.leakedMarkupBeforeToolUse)。
+  let leakedToolMarkup = leakedMarkupGuard
+    ? detectLeakedToolCallMarkup(leakedMarkupBody) ?? ctx.turn.leakedMarkupBeforeToolUse
+    : null;
   // mismatch 分支补扫(Greptile review):full 与 emitted 前缀对不上时 fallbackTail
   // 为空、full 未展示,但泄漏若只在 full 里,「工具没执行却按成功收口」的实质
   // 伤害不变 —— 检测依据是本轮模型输出,不限于已展示部分。只在零 tool 轮补扫:
