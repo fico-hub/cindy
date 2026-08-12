@@ -867,6 +867,9 @@ function forward(
   // upstreamReq.error 或 upstreamRes.error。request 侧通过这个回调汇入当前
   // response 的终态处理,保证 observer 与下游收口语义不受事件先后影响。
   let failActiveResponse: ((err: unknown) => void) | null = null;
+  // 客户端中途断开时通知 observer 的钩子(#2051)。流式路径建立 sink 后填入;
+  // 非流式/无 observer 时保持 null,close 分支行为与从前逐字节一致。
+  let notifyObserverClientAborted: (() => void) | null = null;
 
   const finishClientAfterUpstreamFailure = (
     err: Error,
@@ -910,6 +913,11 @@ function forward(
       method,
       path: upstreamPathname,
     });
+    // 通知 observer(#2051):这是预期取消,不走 onError;会话生命周期观察者
+    // 需要这一拍来关联「哪个会话的流被 client 半途放弃」。
+    const notifyAborted = notifyObserverClientAborted;
+    notifyObserverClientAborted = null;
+    notifyAborted?.();
     upstreamReq.destroy(new Error('client aborted before response completed'));
   });
 
@@ -1129,6 +1137,19 @@ function forward(
         sink.onError(err);
       } catch (observerErr) {
         logger.warn?.('responseObserver threw on error', { reqId, err: String(observerErr) });
+      }
+    };
+    // 客户端中途断开的通知钩子(#2051):终态互斥 —— sink 一旦经 end/error 收口
+    // 即置 null,这里再取时自然为空,不会双重通知;同理本钩子触发后 sink 清空,
+    // 迟到的 end/error 也不会再打到 observer。
+    notifyObserverClientAborted = () => {
+      const sink = observerSink;
+      observerSink = null;
+      if (!sink?.onClientAborted) return;
+      try {
+        sink.onClientAborted();
+      } catch (err) {
+        logger.warn?.('responseObserver threw on client abort', { reqId, err: String(err) });
       }
     };
 

@@ -138,6 +138,16 @@ export interface ResponseObserverSink {
   onData?: (chunk: Buffer) => void;
   onEnd?: () => void;
   onError?: (err: Error) => void;
+  /**
+   * 下游客户端(agent 子进程)在流式响应中途主动断开(#2051)。
+   *
+   * 这是**预期的取消路径**,刻意不复用 onError:上游没有故障,把它报成
+   * upstream failure 会误导重试/诊断逻辑。但对会话生命周期观察者而言,
+   * 「client 半途放弃了一条 2xx 流」正是 `client disconnected mid-response`
+   * 这类静默挂死的第一现场 —— 此前 observer 在该路径上**收不到任何回调**,
+   * 桌面侧无从关联 sessionId/turn 做有界收口。不订阅时行为与从前一致。
+   */
+  onClientAborted?: () => void;
 }
 
 /**

@@ -2058,6 +2058,79 @@ describe('anthropic-compat-proxy 客户端中断传播', () => {
     expect(errorLogs.filter((m) => m.includes('upstream response stream error'))).toHaveLength(0);
   });
 
+  it('客户端中途断开:observer 收到 onClientAborted,而非 onEnd/onError(#2051)', async () => {
+    // 此前该路径 observer 零回调 —— 会话生命周期观察者无从关联「哪条 2xx 流被
+    // client 半途放弃」,这正是 client disconnected mid-response 静默挂死的盲区。
+    // 取消不是上游故障,所以断言 onError 保持 0;终态互斥,onEnd 也必须是 0。
+    let sawAbort!: () => void;
+    const upstreamAborted = new Promise<void>((r) => { sawAbort = r; });
+    let observerEnds = 0;
+    let observerErrors = 0;
+    let observerClientAborts = 0;
+    const upstream = await startFakeUpstream((_idx, _body, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write('event: message_start\ndata: {}\n\n');
+      res.on('close', () => sawAbort());
+    });
+    upstreamClose = upstream.close;
+    proxy = await createAnthropicCompatProxy({
+      upstream: upstream.url,
+      transformRequest: [],
+      responseObserver: () => ({
+        onEnd: () => { observerEnds += 1; },
+        onError: () => { observerErrors += 1; },
+        onClientAborted: () => { observerClientAborts += 1; },
+      }),
+    });
+
+    const controller = new AbortController();
+    const res = await fetch(`${proxy.url}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'test-model', stream: true }),
+      signal: controller.signal,
+    });
+    expect(res.status).toBe(200);
+    const reader = (res.body as ReadableStream<Uint8Array>).getReader();
+    await reader.read();
+    controller.abort();
+    await upstreamAborted;
+    // 事件在 socket close 后的微任务里派发,给一拍。
+    await new Promise((r) => setTimeout(r, 50));
+    expect(observerClientAborts).toBe(1);
+    expect(observerEnds).toBe(0);
+    expect(observerErrors).toBe(0);
+  });
+
+  it('正常完成的流式响应不触发 onClientAborted(#2051)', async () => {
+    let observerClientAborts = 0;
+    let observerEnds = 0;
+    const upstream = await startFakeUpstream((_idx, _body, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end('event: message_start\ndata: {}\n\n');
+    });
+    upstreamClose = upstream.close;
+    proxy = await createAnthropicCompatProxy({
+      upstream: upstream.url,
+      transformRequest: [],
+      responseObserver: () => ({
+        onEnd: () => { observerEnds += 1; },
+        onClientAborted: () => { observerClientAborts += 1; },
+      }),
+    });
+
+    const res = await fetch(`${proxy.url}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'test-model', stream: true }),
+    });
+    expect(res.status).toBe(200);
+    await res.text();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(observerEnds).toBe(1);
+    expect(observerClientAborts).toBe(0);
+  });
+
   it('透明重试后的上游 2xx SSE 中断时,立即收口且旧 listener 不误报客户端断开', async () => {
     const errorLogs: Array<{ msg: string; ctx?: Record<string, unknown> }> = [];
     const infoLogs: string[] = [];
