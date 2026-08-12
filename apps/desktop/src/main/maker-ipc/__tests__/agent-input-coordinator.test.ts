@@ -8383,3 +8383,124 @@ describe('AgentInputCoordinator 中断自动续跑', () => {
     expect(h.onResumableTurnError, '落库失败就没有可续跑的目标,不该消耗额度').not.toHaveBeenCalled();
   });
 });
+
+// 403 终态后的插话收口(#2045):终止性上游错误(如 master-key 403)经重连耗尽后,
+// 会话看似空闲但残留状态可能挡住后续输入。以下用例按维护者方案钉住三条收敛路径:
+// zombie activeTurn 的合成收口、终态 error 后的 fallback 收敛、fallback 预派发失败
+// 的有界重试 —— 相同 clientId 不得形成热循环。
+describe('terminal-error steer closure (#2045)', () => {
+  it('zombie activeTurn(done 丢失)经 NO_ACTIVE_TURN 合成收口,fallback 恰好派发一次', async () => {
+    const h = createHarness();
+    const sid = 's-2045-zombie-active-turn';
+
+    h.coordinator.enqueue(sid, makeItem('m-1', 'long task'));
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(1);
+
+    // vendor 实际已停转(done 事件丢失),tracker 已复位,activeTurn 成僵尸。
+    h.setRunning(false);
+    h.steerToAgent.mockRejectedValueOnce(
+      new Error('[NO_ACTIVE_TURN] session has no active turn'),
+    );
+
+    await expect(h.coordinator.steer(sid, makeItem('m-2', 'continue please'))).resolves.toBe(true);
+    await flush();
+
+    // 合成 done 收掉僵尸 activeTurn 后,fallback 恰好派发一次(不重复、不丢)。
+    expect(h.reconcileTurnIdle).toHaveBeenCalledWith(sid);
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+    expect(h.sendToAgent.mock.calls[1]?.[1]).toEqual({ type: 'user', content: 'continue please' });
+    const projection = latestProjection(h.projections);
+    expect(projection.pendingQueue).toEqual([]);
+    expect(projection.steeringQueueClientIds ?? []).toEqual([]);
+
+    // 收口后无残留阻塞:下一条普通消息照常派发。
+    h.setRunning(false);
+    h.coordinator.onTurnEvent(sid, 'done');
+    h.coordinator.enqueue(sid, makeItem('m-3', 'next plain message'));
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(3);
+  });
+
+  it('终态 403 error(不接管)后,插话 fallback 收敛并清掉 error 呈现', async () => {
+    const h = createHarness();
+    const sid = 's-2045-terminal-403';
+
+    h.coordinator.enqueue(sid, makeItem('m-1', 'long task'));
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(1);
+
+    // 403 是确定性失败:候选判定不命中自动续跑,走常规错误呈现。
+    h.setResumableTurnErrorCandidate(() => false);
+    h.coordinator.onTurnEvent(sid, 'error', 'Upstream request failed: 403 master key rejected');
+    await flush();
+    expect(latestProjection(h.projections).error).toContain('403');
+
+    // vendor 已停,用户插话 → 权威 NO_ACTIVE_TURN → fallback 普通派发。
+    h.setRunning(false);
+    h.steerToAgent.mockRejectedValueOnce(
+      new Error('[NO_ACTIVE_TURN] session has no active turn'),
+    );
+    await expect(h.coordinator.steer(sid, makeItem('m-2', 'continue'))).resolves.toBe(true);
+    await flush();
+
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+    expect(h.sendToAgent.mock.calls[1]?.[1]).toEqual({ type: 'user', content: 'continue' });
+    const projection = latestProjection(h.projections);
+    // 新派发成功后不再呈现旧终态错误,恢复态清空,队列不再显示 running 残留。
+    expect(projection.error).toBeNull();
+    expect(projection.recovery).toBeNull();
+    expect(projection.pendingQueue).toEqual([]);
+    expect(projection.steeringQueueClientIds ?? []).toEqual([]);
+  });
+
+  it('fallback 预派发失败:队列项保留可重试、有界退避唤醒,同 clientId 不热循环', async () => {
+    vi.useFakeTimers();
+    try {
+      const h = createHarness();
+      const sid = 's-2045-fallback-retry';
+
+      h.coordinator.enqueue(sid, makeItem('m-1', 'long task'));
+      await flush();
+      expect(h.sendToAgent).toHaveBeenCalledTimes(1);
+
+      h.setRunning(false);
+      h.steerToAgent.mockRejectedValueOnce(
+        new Error('[NO_ACTIVE_TURN] session has no active turn'),
+      );
+      // fallback 的首次派发在 vendor dispatch 前被取消(投递结果确定未接收)。
+      h.sendToAgent.mockImplementationOnce(async () => sessionDispatchFailure('post-abort'));
+
+      await h.coordinator.steer(sid, makeItem('m-2', 'continue'));
+      await flush();
+      expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+
+      // 消息保留在可重试位置(不丢);有界退避后至多一次自动重试,
+      // 默认实现成功 → 恰好再派发一次,队列收敛清空。
+      const retained = latestProjection(h.projections);
+      const retainedIds = [
+        ...retained.pendingQueue.map((q) => q.clientId),
+        ...(retained.recovery && 'clientId' in retained.recovery
+          ? [(retained.recovery as { clientId?: string }).clientId]
+          : []),
+      ];
+      expect(retainedIds).toContain('m-2');
+
+      await vi.advanceTimersByTimeAsync(3_000);
+      await flush();
+      const callsAfterBackoff = h.sendToAgent.mock.calls.length;
+      expect(callsAfterBackoff).toBeLessThanOrEqual(3);
+
+      // 再推进 5s:不允许同 clientId 继续热循环。
+      await vi.advanceTimersByTimeAsync(5_000);
+      await flush();
+      expect(h.sendToAgent.mock.calls.length).toBe(callsAfterBackoff);
+      const dispatchedTexts = h.sendToAgent.mock.calls.map(
+        (call) => (call[1] as { content?: string }).content,
+      );
+      expect(dispatchedTexts.filter((text) => text === 'continue').length).toBeLessThanOrEqual(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
