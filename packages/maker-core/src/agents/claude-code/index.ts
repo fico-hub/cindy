@@ -2126,6 +2126,8 @@ export class ClaudeCodeAgent extends BaseAgent {
       turnState.sawCompactBoundary = false;
       turnState.hasEmittedText = false;
       turnState.uiEmittedText = '';
+      turnState.uiTextLenAtLastToolUse = 0;
+      turnState.leakedMarkupBeforeToolUse = null;
       turnState.pendingApiError = null;
       turnState.lastAssistantRequestId = undefined;
       turnState.lastAssistantMsgHadSubstance = true;

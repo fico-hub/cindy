@@ -197,6 +197,25 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toEqual({ category: 'invoke-with-parameter' });
   });
 
+  it('does not hit when the markers only appear inside a blockquoted fence', () => {
+    // 引用里的围栏(> ```xml)剥掉 blockquote 前缀后按普通围栏处理,块内示例
+    // 不命中。
+    const quoted = `文档引用:\n> \`\`\`xml\n${CLASS_B_LEAK.split('\n')
+      .map((l) => (l.length > 0 ? `> ${l}` : l))
+      .join('\n')}> \`\`\`\n以上。`;
+    expect(detectLeakedToolCallMarkup(quoted)).toBeNull();
+  });
+
+  it('still hits on a bare leak inside a blockquote (no fence)', () => {
+    // 引用里的裸泄漏剥掉前缀后仍是裸文本,不丢检出。
+    const quoted = CLASS_B_LEAK.split('\n')
+      .map((l) => (l.length > 0 ? `> ${l}` : l))
+      .join('\n');
+    expect(detectLeakedToolCallMarkup(`上一轮输出是:\n${quoted}`)).toEqual({
+      category: 'invoke-with-parameter',
+    });
+  });
+
   it('does not treat a mixed-character line as a closing fence', () => {
     // CommonMark 闭栏必须与开栏同字符:``` 栏内出现 ```~~~ 行不是闭栏,块内
     // 后续的标记示例仍在围栏里,不命中。

@@ -132,9 +132,21 @@ export interface LeakedToolMarkupHit {
  * 即全文)—— 已正常执行过工具的那段正文里出现类似文本属于讨论语境,不应触发;
  * 之后再出现的泄漏标记(最后一步调用写坏成纯文本)仍需捕获。
  */
+/**
+ * 行首 blockquote 前缀(`> `,可叠加嵌套)。检测前统一剥掉:引用里的围栏/
+ * 缩进块(`> ```xml`、`>     code`)剥掉前缀后就是普通围栏/缩进块,交给后续
+ * 剥离逻辑按 CommonMark 处理(Codex review);引用里的裸泄漏剥掉前缀后仍是
+ * 裸文本,不丢检出。
+ */
+const BLOCKQUOTE_PREFIX_RE = /^(?:[ \t]{0,3}> ?)+/gm;
+
 export function detectLeakedToolCallMarkup(rawText: string): LeakedToolMarkupHit | null {
   if (!rawText || rawText.length < 16) return null;
-  const text = stripInlineCodeSpans(stripIndentedCodeBlocks(rawText.replace(FENCED_CODE_RE, '')));
+  const text = stripInlineCodeSpans(
+    stripIndentedCodeBlocks(
+      rawText.replace(BLOCKQUOTE_PREFIX_RE, '').replace(FENCED_CODE_RE, ''),
+    ),
+  );
   const invoke = INVOKE_MARKER_RE.exec(text);
   if (!invoke) return null;
   const afterInvoke = text.slice(invoke.index + invoke[0].length);
