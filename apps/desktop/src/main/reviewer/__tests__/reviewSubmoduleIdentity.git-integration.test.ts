@@ -236,6 +236,39 @@ describe('readReviewSubmoduleIdentity (#2463)', () => {
     expect(batched).toEqual(single);
   });
 
+  it('records every index stage for an unmerged gitlink instead of keeping only the last', async () => {
+    const { parent, sub } = await setupParentWithSubmodule();
+    parentPath = parent;
+    const { stdout: baseOut } = await runGit(['rev-parse', 'HEAD'], { cwd: sub });
+    const base = baseOut.trim();
+
+    // 子仓分叉出两个互不为祖先的 commit(祖先关系会被 gitlink 合并自动收敛,
+    // 构造不出冲突),父仓两个分支各记一个 → merge 后 index 里 stage 1/2/3。
+    await runGit(['checkout', '-b', 'left'], { cwd: parent });
+    await fs.writeFile(path.join(sub, 'inner.txt'), 'sub-left\n');
+    await runGit(['commit', '--no-gpg-sign', '-am', 'sub left'], { cwd: sub });
+    await runGit(['add', 'vendor/lib'], { cwd: parent });
+    await runGit(['commit', '--no-gpg-sign', '-m', 'parent left'], { cwd: parent });
+
+    await runGit(['checkout', '-b', 'right', 'HEAD~1'], { cwd: parent });
+    await runGit(['checkout', base], { cwd: sub });
+    await fs.writeFile(path.join(sub, 'inner.txt'), 'sub-right\n');
+    await runGit(['commit', '--no-gpg-sign', '-am', 'sub right'], { cwd: sub });
+    await runGit(['add', 'vendor/lib'], { cwd: parent });
+    await runGit(['commit', '--no-gpg-sign', '-m', 'parent right'], { cwd: parent });
+
+    await runGit(['merge', 'left'], { cwd: parent, allowedExitCodes: [0, 1] });
+
+    const result = await readReviewSubmoduleIdentity(parentPath, ['vendor/lib']);
+    const rows = result.identities[0].indexRecord.split(',');
+    expect(rows).toHaveLength(3);
+    expect([...rows].sort()).toEqual(rows);
+    expect(rows.map((row) => row.split(' ')[1]).sort()).toEqual(['1', '2', '3']);
+    for (const row of rows) {
+      expect(row).toMatch(/^160000 [123] [0-9a-f]{40,64}$/);
+    }
+  });
+
   it('fails closed when the parent repository cannot be read', async () => {
     await expect(
       readReviewSubmoduleIdentity(path.join(workRoot, 'no-such-repo'), ['vendor/lib']),

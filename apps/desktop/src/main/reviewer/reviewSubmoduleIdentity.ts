@@ -57,7 +57,10 @@ export class ReviewSubmoduleIdentityError extends Error {}
 /** 单个 submodule 的身份 manifest(JSON 可序列化,字段序即声明序,确定性)。 */
 export interface ReviewSubmoduleIdentity {
   path: string;
-  /** 父仓 index 里的 gitlink 记录(`<mode> <stage> <oid>`),缺席记 'absent'。 */
+  /**
+   * 父仓 index 里的 gitlink 记录(`<mode> <stage> <oid>`);unmerged 时
+   * stage 1/2/3 全部并入并稳定排序、逗号连接,缺席记 'absent'。
+   */
   indexRecord: string;
   /** 父仓 HEAD tree 里的 gitlink oid,缺席(如新增未提交)记 'absent'。 */
   headRecord: string;
@@ -95,14 +98,18 @@ async function readParentRecords(
     ['ls-files', '--stage', '-z', '--', literalPathspec(subPath)],
     { cwd: repoRoot, maxStdoutBytes: 1024 * 1024 },
   );
-  let indexRecord = 'absent';
+  // unmerged gitlink 在 index 里是 stage 1/2/3 三条记录,全部并入身份并稳定
+  // 排序 —— 只留最后一条会让「替换较早 stage 的 OID」逃过新鲜度检查(与
+  // readStagedIndexIdentity 的多 stage 表达同一裁决)。
+  const indexRows: string[] = [];
   for (const record of stageOut.split('\0')) {
     if (!record) continue;
     const tab = record.indexOf('\t');
     if (tab < 0 || record.slice(tab + 1) !== subPath) continue;
     const [mode, oid, stage] = record.slice(0, tab).trim().split(/\s+/);
-    if (mode && oid && stage) indexRecord = `${mode} ${stage} ${oid}`;
+    if (mode && oid && stage) indexRows.push(`${mode} ${stage} ${oid}`);
   }
+  const indexRecord = indexRows.length > 0 ? indexRows.sort().join(',') : 'absent';
 
   const { stdout: treeOut } = await runGit(
     ['ls-tree', '-z', 'HEAD', '--', subPath],
