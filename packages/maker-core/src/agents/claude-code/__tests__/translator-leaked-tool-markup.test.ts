@@ -238,6 +238,25 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toEqual({ category: 'invoke-with-parameter' });
   });
 
+  it('does not hit when the markers only appear inside a fence opened on a list item', () => {
+    // 列表项内的围栏示例(- ```xml,内容与闭栏随列表边距缩进 2 空格)是合法
+    // 文档形态,不命中。
+    const listFence = `语法示例:\n- \`\`\`xml\n  invoke name="Bash">\n  <parameter name="command">ls</parameter>\n  \`\`\`\n以上。`;
+    expect(detectLeakedToolCallMarkup(listFence)).toBeNull();
+  });
+
+  it('does not hit when the fence sits on an ordered list item', () => {
+    const listFence = `步骤:\n1. \`\`\`python\n   invoke name="Bash">\n   <parameter name="command">ls</parameter>\n   \`\`\`\n完。`;
+    expect(detectLeakedToolCallMarkup(listFence)).toBeNull();
+  });
+
+  it('still hits on a bare leak after a closed list-item fence', () => {
+    // 列表围栏闭合后,其后的真实泄漏保持可检出。
+    expect(
+      detectLeakedToolCallMarkup(`示例:\n- \`\`\`xml\n  demo\n  \`\`\`\n\n${CLASS_B_LEAK}`),
+    ).toEqual({ category: 'invoke-with-parameter' });
+  });
+
   it('does not treat a mixed-character line as a closing fence', () => {
     // CommonMark 闭栏必须与开栏同字符:``` 栏内出现 ```~~~ 行不是闭栏,块内
     // 后续的标记示例仍在围栏里,不命中。

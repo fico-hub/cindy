@@ -25,10 +25,14 @@
 
 /**
  * 围栏开栏(行级判定,CommonMark 语义):行首 0-3 个**空格**缩进(tab 缩进的
- * 是缩进代码不是围栏,Codex review)+ 3 个及以上同字符运行;反引号开栏的
- * info string 不得含反引号(含则整行不是开栏),波浪线开栏无此限制。
+ * 是缩进代码不是围栏,Codex review)+ 可选的列表项标记(`- ` / `1. ` 等 ——
+ * 列表项内的围栏示例是合法文档形态,第八轮 Codex review)+ 3 个及以上同字符
+ * 运行;反引号开栏的 info string 不得含反引号(含则整行不是开栏),波浪线
+ * 开栏无此限制。捕获组:m[1]=运行前的全部前缀,m[2]=围栏运行,m[3]=info。
  */
-const FENCE_OPEN_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+const FENCE_OPEN_RE = /^( {0,3}(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})?)(`{3,}|~{3,})(.*)$/;
+/** 闭栏行:纯缩进 + 围栏运行 + 尾随空白;缩进上限由开栏的容器边距决定。 */
+const FENCE_CLOSE_RE = /^( *)(`{3,}|~{3,})[ \t]*$/;
 
 /**
  * 剥离围栏代码块 —— 行级状态机替代正则(第五、七轮 review 后正则已不可维护):
@@ -40,26 +44,29 @@ const FENCE_OPEN_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
  */
 function stripFencedBlocks(lines: string[]): string[] {
   const out: string[] = [];
-  let fence: { char: string; len: number } | null = null;
+  // maxCloseIndent = 开栏容器边距 + 3(CommonMark:闭栏缩进相对容器至多 3 空格
+  // —— 列表项内的闭栏随列表边距整体右移)。
+  let fence: { char: string; len: number; maxCloseIndent: number } | null = null;
   for (const line of lines) {
-    const m = FENCE_OPEN_RE.exec(line);
     if (fence) {
+      const c = FENCE_CLOSE_RE.exec(line);
       if (
-        m &&
-        m[1][0] === fence.char &&
-        m[1].length >= fence.len &&
-        /^[ \t]*$/.test(m[2] ?? '')
+        c &&
+        c[1].length <= fence.maxCloseIndent &&
+        c[2][0] === fence.char &&
+        c[2].length >= fence.len
       ) {
         fence = null; // 闭栏行本身也剥掉
       }
       continue; // 围栏内容整行剥掉
     }
+    const m = FENCE_OPEN_RE.exec(line);
     if (m) {
-      const char = m[1][0];
-      const info = m[2] ?? '';
+      const char = m[2][0];
+      const info = m[3] ?? '';
       const validOpen = char === '~' || !info.includes('`');
       if (validOpen) {
-        fence = { char, len: m[1].length };
+        fence = { char, len: m[2].length, maxCloseIndent: m[1].length + 3 };
         continue;
       }
     }
