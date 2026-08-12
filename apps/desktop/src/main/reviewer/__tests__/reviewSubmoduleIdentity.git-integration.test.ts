@@ -444,3 +444,30 @@ describe('readReviewSubmoduleIdentity 路径边界 (#2463 review)', () => {
     },
   );
 });
+
+describe('readReviewSubmoduleIdentity 无身份目录 (#2463 review)', () => {
+  it('fails closed when the gitlink path is a non-empty plain directory without git identity', async () => {
+    // .git 被移除、路径被普通目录 + 任意文件替换:porcelain 仍是同一条 S 记录,
+    // 目录字节没有任何身份来源 —— 归入固定 'uninitialized' 会让不同内容映射到
+    // 同一 manifest,必须整体拒绝。
+    const { parent, sub } = await setupParentWithSubmodule();
+    parentPath = parent;
+    await fs.rm(sub, { recursive: true, force: true });
+    await fs.mkdir(sub, { recursive: true });
+    await fs.writeFile(path.join(sub, 'arbitrary.txt'), 'not-a-repo\n');
+
+    await expect(readReviewSubmoduleIdentity(parentPath, ['vendor/lib'])).rejects.toThrow(
+      /no git identity but is not empty/,
+    );
+  });
+
+  it('still records an empty deinit-style directory as uninitialized', async () => {
+    const { parent, sub } = await setupParentWithSubmodule();
+    parentPath = parent;
+    await fs.rm(sub, { recursive: true, force: true });
+    await fs.mkdir(sub, { recursive: true });
+
+    const result = await readReviewSubmoduleIdentity(parentPath, ['vendor/lib']);
+    expect(result.identities[0].subHead).toBe('uninitialized');
+  });
+});
