@@ -480,9 +480,12 @@ const LT_CHAR_REF_RE = /&#0{0,6}60;|&#[xX]0{0,6}3[cC];|&lt;/gi;
 
 export function detectLeakedToolCallMarkup(rawText: string): LeakedToolMarkupHit | null {
   if (!rawText || rawText.length < 16) return null;
-  const text = stripInlineCodeSpans(
-    stripBlockStructures(rawText).replace(HTML_COMMENT_RE, '').replace(LT_CHAR_REF_RE, '&lt;'),
-  );
+  // inline code span 先于注释/实体处理(CommonMark 优先级:code span 先于
+  // 原始 HTML)—— 否则 \`<!--\` 与 \`-->\` 两个字面量之间的真实泄漏会被
+  // 误当一段注释吞掉(第二十二轮 Codex review)。
+  const text = stripInlineCodeSpans(stripBlockStructures(rawText))
+    .replace(HTML_COMMENT_RE, '')
+    .replace(LT_CHAR_REF_RE, '&lt;');
   const invoke = INVOKE_MARKER_RE.exec(text);
   if (!invoke) return null;
   const afterInvoke = text.slice(invoke.index + invoke[0].length);

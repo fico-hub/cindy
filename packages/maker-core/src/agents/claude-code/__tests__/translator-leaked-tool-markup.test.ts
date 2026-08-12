@@ -483,6 +483,16 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toBeNull();
   });
 
+  it('still hits when a leak sits between literal `<!--` and `-->` code spans', () => {
+    // inline code span 先于注释剥离(CommonMark 优先级):两个字面量分隔符
+    // 不能被拼成一段注释把中间的真实泄漏吞掉。
+    expect(
+      detectLeakedToolCallMarkup(
+        `起始标记写作 \`<!--\`。\n${CLASS_B_LEAK}结束标记写作 \`-->\`。`,
+      ),
+    ).toEqual({ category: 'invoke-with-parameter' });
+  });
+
   it('does not treat a mixed-character line as a closing fence', () => {
     // CommonMark 闭栏必须与开栏同字符:``` 栏内出现 ```~~~ 行不是闭栏,块内
     // 后续的标记示例仍在围栏里,不命中。
