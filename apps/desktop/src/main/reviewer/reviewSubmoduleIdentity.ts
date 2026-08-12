@@ -291,7 +291,18 @@ async function readOneSubmoduleIdentity(
     fsRealpath(toplevelOut.replace(/\r?\n$/, '')),
     fsRealpath(subRoot),
   ]);
-  if (toplevelReal !== subRootReal) return uninitialized;
+  if (toplevelReal !== subRootReal) {
+    // toplevel 归属不是子仓自身 = 没有独立 git 身份。只有**空目录**是合法的
+    // deinit 形态可以稳定归入 'uninitialized';非空普通目录(.git 被移除、
+    // 内容被任意文件替换)必须 fail closed —— 目录里的字节没有任何身份来源,
+    // 归入固定的 'uninitialized' 会让不同内容映射到同一 manifest,旧结论
+    // 照样通过新鲜度门(Codex review #2515)。
+    const entries = await fsPromises.readdir(subRoot);
+    if (entries.length === 0) return uninitialized;
+    throw new ReviewSubmoduleIdentityError(
+      `Review cannot bind submodule ${subPath}: worktree directory has no git identity but is not empty`,
+    );
+  }
   // --verify --quiet 让「HEAD 不是合法 ref(已初始化的空仓)」确定性地表现为
   // exit 1 + 空输出;超时、进程启动失败等其余错误仍由 runGit 抛出 fail
   // closed —— 无条件 catch 会把读取失败伪装成稳定的 'unborn' 身份。
