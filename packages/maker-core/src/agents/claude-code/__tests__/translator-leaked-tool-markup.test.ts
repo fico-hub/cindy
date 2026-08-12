@@ -645,6 +645,43 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toEqual({ category: 'invoke-with-parameter' });
   });
 
+  it('still hits when a fence follows an ordered marker that stayed in the paragraph', () => {
+    // 段落后不能打断段落的 `2.  Example` 是段落延续文本,不建立列表上下文
+    // (第二十七轮 Codex review):其后四空格缩进的 ~~~ 行同样是段落延续,
+    // 里面的标记是可见正文,必须判。
+    expect(
+      detectLeakedToolCallMarkup(
+        `正文说明\n2.  Example:\n    ~~~xml\n    invoke name="Bash">\n    <parameter name="command">ls</parameter>\n    ~~~`,
+      ),
+    ).toEqual({ category: 'invoke-with-parameter' });
+  });
+
+  it('does not hit when a real ordered list carries an indented fence after a blank line', () => {
+    // 对照组:空行后的 `2.` 是合法列表,续行缩进围栏正常剥离。
+    expect(
+      detectLeakedToolCallMarkup(
+        `说明:\n\n2.  Example:\n    ~~~xml\n    invoke name="Bash">\n    <parameter name="command">ls</parameter>\n    ~~~\n完。`,
+      ),
+    ).toBeNull();
+  });
+
+  it('still hits when text starts with a slash-broken tag before a real leak', () => {
+    // `<div/foo`、`<script/foo` 的裸 `/` 不是 type 1/6 的标签名终止符
+    // (CommonMark:空白 / `>` / 行尾,type 6 另加完整 `/>`),不是 HTML 块,
+    // 其后的真实泄漏可见,必须判。
+    expect(detectLeakedToolCallMarkup(`<div/foo 提示\n${CLASS_B_LEAK}`)).toEqual({
+      category: 'invoke-with-parameter',
+    });
+    expect(detectLeakedToolCallMarkup(`<script/foo 提示\n${CLASS_B_LEAK}`)).toEqual({
+      category: 'invoke-with-parameter',
+    });
+  });
+
+  it('does not hit when the markers sit inside a self-closing type-6 block', () => {
+    // 对照组:`<div/>` 的 `/>` 是合法终止符,块到空行为止,块内标记不判。
+    expect(detectLeakedToolCallMarkup(`<div/>\n${CLASS_B_LEAK}以上是说明。`)).toBeNull();
+  });
+
   it('does not treat a mixed-character line as a closing fence', () => {
     // CommonMark 闭栏必须与开栏同字符:``` 栏内出现 ```~~~ 行不是闭栏,块内
     // 后续的标记示例仍在围栏里,不命中。

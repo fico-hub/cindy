@@ -269,7 +269,17 @@ function stripFencedBlocks(lines: string[]): string[] {
       // 分隔线优先于列表标记(`- - -` 是分隔线不是列表项,CommonMark 优先级)。
       const isThematicBreak = THEMATIC_BREAK_RE.test(line);
       const lm = isThematicBreak ? null : LIST_MARKER_LINE_RE.exec(line);
-      if (lm) {
+      // 不能打断段落的非 1 有序标记行是段落延续文本(与围栏开栏的拒绝分支
+      // 同条件,第二十七轮 Codex review):不建立列表上下文,否则其后按列表
+      // 续行缩进的围栏会把可见正文剥掉。
+      const lmOrdered = lm ? /^ {0,3}(\d{1,9})[.)]/.exec(line) : null;
+      const lmIsParagraphText =
+        lm !== null &&
+        inParagraph &&
+        listContentCol === 0 &&
+        lmOrdered !== null &&
+        lmOrdered[1] !== '1';
+      if (lm && !lmIsParagraphText) {
         listContentCol = widthInColumns(lm[1]);
       } else if (indentDefinitelyBelow(line, listContentCol)) {
         listContentCol = 0;
@@ -293,7 +303,7 @@ function stripFencedBlocks(lines: string[]): string[] {
         quoteLazy = true;
       } else if (
         isThematicBreak ||
-        lm !== null ||
+        (lm !== null && !lmIsParagraphText) ||
         ATX_HEADING_RE.test(line) ||
         (inParagraph && SETEXT_UNDERLINE_RE.test(line))
       ) {
@@ -377,10 +387,13 @@ const BLOCKQUOTE_MARKER_RE = /^[ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})*> ?/;
 // 内容列超过 3 的列表续行上的 HTML 块也要识别);并允许可选列表标记前缀
 // (- <script> 直接开在列表项标记行上,第十七轮 Codex review)。捕获组:
 // m[1]=前缀,m[2]=标签名。
+// 标签名终止符按 CommonMark 收紧(第二十七轮 Codex review):type 1 是
+// 空白 / `>` / 行尾,type 6 另加完整的 `/>` —— 裸 `/` 不是终止符,
+// `<div/foo`、`<script/foo` 都是普通正文不是 HTML 块(micromark 实测同)。
 const HTML_BLOCK_TYPE1_OPEN_RE =
-  /^([ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})*)<(script|pre|style|textarea)\b/i;
+  /^([ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})*)<(script|pre|style|textarea)(?=[ \t>]|$)/i;
 const HTML_BLOCK_TYPE6_RE =
-  /^([ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})*)<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?:[ \t/>]|$)/i;
+  /^([ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})*)<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?=[ \t>]|\/>|$)/i;
 
 /** 行首(允许列表标记前缀)开启且同一行未闭合的 HTML 注释。 */
 const HTML_COMMENT_OPEN_RE = /^([ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})*)<!--/;
