@@ -208,8 +208,33 @@ async function readGitlinkPaths(
       const mode = record.slice(0, tab).trim().split(/\s+/)[0];
       if (mode === '160000') gitlinks.add(record.slice(tab + 1));
     }
+    // HEAD tree 也要查(Codex review #2515):git rm --cached 从 index 删除
+    // gitlink 但保留 checkout 时,status 是 D + ?? 目录 —— 只查 index 会把
+    // 保留目录当普通 worktree 路径喂给文件指纹器直接抛错。HEAD 里是 gitlink
+    // 的路径同样按嵌套子仓处理(indexRecord 记 absent,身份仍完整绑定)。
+    // unborn HEAD 等按 exit 128 视作无记录。
+    const { stdout: treeOut } = await runGit(
+      ['ls-tree', '-z', 'HEAD', '--', ...group.map(literalPathspec)],
+      {
+        cwd: subRoot,
+        maxStdoutBytes: Math.max(1024 * 1024, group.length * 512),
+        allowedExitCodes: [0, 128],
+      },
+    );
+    for (const record of treeOut.split('\0')) {
+      if (!record) continue;
+      const tab = record.indexOf('\t');
+      if (tab < 0) continue;
+      const mode = record.slice(0, tab).trim().split(/\s+/)[0];
+      if (mode === '160000') gitlinks.add(record.slice(tab + 1));
+    }
   }
   return gitlinks;
+}
+
+/** 未跟踪目录条目(如内嵌仓库)带尾斜杠;与 gitlink 路径比较前归一。 */
+function stripTrailingSlash(p: string): string {
+  return p.endsWith('/') ? p.slice(0, -1) : p;
 }
 
 async function readOneSubmoduleIdentity(
@@ -322,20 +347,24 @@ async function readOneSubmoduleIdentity(
   }
 
   const entries = await readSubStatus(subRoot);
+  // untracked 条目也参与 gitlink 判定(尾斜杠归一):index 已删但 checkout
+  // 保留的嵌套仓在 status 里正是 ?? 目录形态。
   const gitlinkPaths = await readGitlinkPaths(
     subRoot,
-    entries.filter((entry) => !entry.untracked).map((entry) => entry.path),
+    [...new Set(entries.map((entry) => stripTrailingSlash(entry.path)))],
     batch,
   );
 
   const stagedPaths = entries
-    .filter((entry) => entry.staged && !gitlinkPaths.has(entry.path))
+    .filter((entry) => entry.staged && !gitlinkPaths.has(stripTrailingSlash(entry.path)))
     .map((entry) => entry.path);
   const worktreePaths = entries
-    .filter((entry) => entry.worktree && !gitlinkPaths.has(entry.path))
+    .filter((entry) => entry.worktree && !gitlinkPaths.has(stripTrailingSlash(entry.path)))
     .map((entry) => entry.path);
   const nestedPaths = [...new Set(
-    entries.filter((entry) => gitlinkPaths.has(entry.path)).map((entry) => entry.path),
+    entries
+      .filter((entry) => gitlinkPaths.has(stripTrailingSlash(entry.path)))
+      .map((entry) => stripTrailingSlash(entry.path)),
   )];
 
   // staged 身份记录同样消耗全局路径预算(每条 staged 路径一条记录)。
