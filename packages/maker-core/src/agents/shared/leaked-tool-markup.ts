@@ -25,7 +25,61 @@
  * 时多余字符残留为普通文本,对标记检测无影响。
  */
 const FENCED_CODE_RE = /(`{3,}|~{3,})[\s\S]*?(?:\1|$)/g;
-const INLINE_CODE_RE = /`[^`\n]+`/g;
+
+/**
+ * 剥离段落内的 inline code span(CommonMark 语义,对齐
+ * packages/maker-shared/src/mathMarkdown.ts 的实现):开 backtick 运行与
+ * **等长**闭合运行配对,长度不等不闭合;span 内容允许换行 —— 单行正则会把
+ * 「多行合法 code span 里演示的标记」留给检测器造成误报(Codex review)。
+ * 无闭合的 backtick 运行按字面量保留。按空行分段处理:CommonMark 的 code
+ * span 不跨段落,空行屏障避免两段各自的孤立 backtick 把中间真实泄漏吞掉。
+ */
+function stripInlineCodeSpans(text: string): string {
+  if (!text.includes('`')) return text;
+  return text
+    .split(/\n[ \t]*\n/)
+    .map(stripInlineCodeSpansInParagraph)
+    .join('\n\n');
+}
+
+function stripInlineCodeSpansInParagraph(segment: string): string {
+  if (!segment.includes('`')) return segment;
+  let out = '';
+  let cursor = 0;
+  while (cursor < segment.length) {
+    const tick = segment.indexOf('`', cursor);
+    if (tick === -1) {
+      out += segment.slice(cursor);
+      break;
+    }
+    let openEnd = tick;
+    while (openEnd < segment.length && segment[openEnd] === '`') openEnd += 1;
+    const runLength = openEnd - tick;
+    // 找等长闭合运行:逐个 backtick 运行推进,线性复杂度。
+    let closeStart = -1;
+    let probe = openEnd;
+    while (probe < segment.length) {
+      const t = segment.indexOf('`', probe);
+      if (t === -1) break;
+      let e = t;
+      while (e < segment.length && segment[e] === '`') e += 1;
+      if (e - t === runLength) {
+        closeStart = t;
+        break;
+      }
+      probe = e;
+    }
+    if (closeStart === -1) {
+      // 无闭合:backtick 运行是字面量,保留后继续扫其后正文。
+      out += segment.slice(cursor, openEnd);
+      cursor = openEnd;
+    } else {
+      out += segment.slice(cursor, tick);
+      cursor = closeStart + runLength;
+    }
+  }
+  return out;
+}
 
 /** invoke 开标记:类 B 的典型形态缺失前导 `<`,两种都认。 */
 const INVOKE_MARKER_RE = /<?invoke\s+name="[^"\n]{1,128}"\s*>/;
@@ -46,7 +100,7 @@ export interface LeakedToolMarkupHit {
  */
 export function detectLeakedToolCallMarkup(rawText: string): LeakedToolMarkupHit | null {
   if (!rawText || rawText.length < 16) return null;
-  const text = rawText.replace(FENCED_CODE_RE, '').replace(INLINE_CODE_RE, '');
+  const text = stripInlineCodeSpans(rawText.replace(FENCED_CODE_RE, ''));
   const invoke = INVOKE_MARKER_RE.exec(text);
   if (!invoke) return null;
   const afterInvoke = text.slice(invoke.index + invoke[0].length);

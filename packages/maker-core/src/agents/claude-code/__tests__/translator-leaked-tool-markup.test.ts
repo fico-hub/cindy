@@ -155,6 +155,26 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toBeNull();
   });
 
+  it('does not hit when the markers only appear inside a multiline inline code span', () => {
+    // CommonMark 的 code span 内容允许换行:单反引号跨两行包住两个标记,属于
+    // 合法文档演示,不是泄漏(Codex review:单行正则会漏剥这种 span 造成误报)。
+    expect(
+      detectLeakedToolCallMarkup(
+        '标记语法是 `invoke name="Bash">\n<parameter name="command">ls</parameter>` 这样的形状。',
+      ),
+    ).toBeNull();
+  });
+
+  it('still hits when stray backticks sit in different paragraphs around a real leak', () => {
+    // 空行屏障:code span 不跨段落,两段各自的孤立反引号不能配对成 span 把
+    // 中间的真实泄漏吞掉。
+    expect(
+      detectLeakedToolCallMarkup(
+        `先看输出里的 \` 字符。\n\n${CLASS_B_LEAK}\n\n结尾又有一个 \` 字符。`,
+      ),
+    ).toEqual({ category: 'invoke-with-parameter' });
+  });
+
   it('does not let an inner shorter fence close an outer longer fence early', () => {
     // 外层 ```` 包住含 ``` 的内容(CommonMark 嵌套围栏惯用法):内层 ``` 不闭合
     // 外层,泄漏标记始终在围栏内,不命中。
@@ -304,6 +324,33 @@ describe('Claude Code translator leaked tool markup guard (#2518)', () => {
       isTerminal: true,
     });
     expect(events.some((e) => e.type === 'done')).toBe(true);
+  });
+
+  it('flags a leak only present in a mismatched result body on a zero-tool turn (Greptile review)', async () => {
+    // mismatch 分支:result.result 与已流式正文前缀对不上(fallbackTail 为空、
+    // full 不展示),但泄漏只在 full 里时「工具没执行却按成功收口」的伤害不变
+    // —— 零 tool 轮补扫 full。
+    const tracker = new UsageTracker();
+    const queue = createAsyncQueue<AgentEvent>();
+    const ctx = createCtx(tracker);
+
+    pushMessageStart(queue, ctx);
+    translateSdkMessage(
+      { type: 'assistant', message: { content: [{ type: 'text', text: '我马上执行。' }] } },
+      queue,
+      ctx,
+    );
+    pushResult(queue, ctx, `完全错位的最终正文:\n${CLASS_B_LEAK}`);
+
+    const events = await drain(queue);
+    // mismatch 保守不补推正文(既有截断兜底语义不变)。
+    expect(
+      events.some((e) => e.type === 'text' && String((e.data as { text?: string }).text).includes('invoke')),
+    ).toBe(false);
+    expect(events.find((e) => e.type === 'error')?.data).toMatchObject({
+      reason: 'malformed-tool-markup',
+      isTerminal: true,
+    });
   });
 
   it('flags a leak that only exists in the unstreamed result tail (Greptile review)', async () => {

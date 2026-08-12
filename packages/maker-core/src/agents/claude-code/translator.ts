@@ -1785,15 +1785,31 @@ function handleResult(
   // 扫描域两个边界(Greptile/Codex review):
   //  - 正文取「用户实际看到的全文」= emitted + fallbackTail —— 泄漏标记可能只
   //    存在于 result.result 兜出的未流式尾段(上方刚补推给 UI),只扫 emitted
-  //    会漏;mismatch 分支 fallbackTail 为空,退化为只扫 emitted,与展示一致。
+  //    会漏;mismatch 分支(fallbackTail 为空)由下方零 tool 轮补扫兜底。
   //  - 起点取最后一次结构化 tool_use 时的已推正文长度 —— 之前的文本属于已正常
   //    执行过工具的讨论语境不判;之后再出现的泄漏(先成功调 N 个工具、第 N+1 个
   //    写坏成纯文本)仍要判。零 tool 轮偏移为 0,即全文。
-  const leakedMarkupBody = (emitted + fallbackTail).slice(ctx.turn.uiTextLenAtLastToolUse);
-  const leakedToolMarkup =
-    !msg.is_error && !ctx.turn.interruptRequested && !ctx.turn.sawCompactBoundary
-      ? detectLeakedToolCallMarkup(leakedMarkupBody)
-      : null;
+  const leakedMarkupGuard =
+    !msg.is_error && !ctx.turn.interruptRequested && !ctx.turn.sawCompactBoundary;
+  let leakedMarkupBody = (emitted + fallbackTail).slice(ctx.turn.uiTextLenAtLastToolUse);
+  let leakedToolMarkup = leakedMarkupGuard ? detectLeakedToolCallMarkup(leakedMarkupBody) : null;
+  // mismatch 分支补扫(Greptile review):full 与 emitted 前缀对不上时 fallbackTail
+  // 为空、full 未展示,但泄漏若只在 full 里,「工具没执行却按成功收口」的实质
+  // 伤害不变 —— 检测依据是本轮模型输出,不限于已展示部分。只在零 tool 轮补扫:
+  // 有 tool 轮的 uiTextLenAtLastToolUse 偏移建立在 emitted 之上,无法映射进
+  // 错位的 full,保守跳过(展示路径已覆盖其主形态)。complete/tail 分支的 full
+  // 已被 emitted + fallbackTail 全量覆盖,不会走到这里。
+  if (
+    leakedMarkupGuard &&
+    !leakedToolMarkup &&
+    ctx.turn.toolUses === 0 &&
+    full.length > 0 &&
+    fallbackTail.length === 0 &&
+    full !== emitted
+  ) {
+    leakedToolMarkup = detectLeakedToolCallMarkup(full);
+    if (leakedToolMarkup) leakedMarkupBody = full;
+  }
   if (leakedToolMarkup) {
     // 只记类别与长度,不记正文 —— 泄漏内容可能含命令参数等敏感信息。
     ctx.log.warn('SDK ◀ turn leaked malformed tool-call markup as plain text', {
