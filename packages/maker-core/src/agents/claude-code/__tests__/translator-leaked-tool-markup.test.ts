@@ -441,6 +441,15 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toEqual({ category: 'invoke-with-parameter' });
   });
 
+  it('does not hit when a fence sits inside a quote beneath nested list items', () => {
+    // `- - > \`\`\`xml`:叠加列表标记 + 引用的组合,引用前缀允许可叠加标记。
+    expect(
+      detectLeakedToolCallMarkup(
+        `示例:\n- - > \`\`\`xml\n    > invoke name="Bash">\n    > <parameter name="command">ls</parameter>\n    > \`\`\`\n完。`,
+      ),
+    ).toBeNull();
+  });
+
   it('does not treat a mixed-character line as a closing fence', () => {
     // CommonMark 闭栏必须与开栏同字符:``` 栏内出现 ```~~~ 行不是闭栏,块内
     // 后续的标记示例仍在围栏里,不命中。

@@ -204,8 +204,8 @@ function stripIndentedCodeBlocks(text: string): string {
 // 只认根级 `>` 会把首行留在引用段外、后续行却按引用处理,容器被撕裂
 // (第十六轮 Codex review)。剥前缀时列表标记随 `>` 一起去掉,内层按引用
 // 内容递归。
-const BLOCKQUOTE_LINE_RE = /^ {0,3}(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})?>/;
-const BLOCKQUOTE_MARKER_RE = /^ {0,3}(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})?> ?/;
+const BLOCKQUOTE_LINE_RE = /^ {0,3}(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})*>/;
+const BLOCKQUOTE_MARKER_RE = /^ {0,3}(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})*> ?/;
 
 /**
  * 按块结构剥离代码容器:先在**当前容器层**剥围栏,再把连续的 blockquote 行
