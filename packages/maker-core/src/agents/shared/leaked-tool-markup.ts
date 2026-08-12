@@ -200,8 +200,12 @@ function stripIndentedCodeBlocks(text: string): string {
 }
 
 /** blockquote 行(`>` 前至多 3 个空格;`>` 后空格可选,CommonMark 语义)。 */
-const BLOCKQUOTE_LINE_RE = /^ {0,3}>/;
-const BLOCKQUOTE_MARKER_RE = /^ {0,3}> ?/;
+// 允许可选的列表项标记前缀:`- > ```xml` 是「列表项里嵌引用」的合法组合,
+// 只认根级 `>` 会把首行留在引用段外、后续行却按引用处理,容器被撕裂
+// (第十六轮 Codex review)。剥前缀时列表标记随 `>` 一起去掉,内层按引用
+// 内容递归。
+const BLOCKQUOTE_LINE_RE = /^ {0,3}(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})?>/;
+const BLOCKQUOTE_MARKER_RE = /^ {0,3}(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})?> ?/;
 
 /**
  * 按块结构剥离代码容器:先在**当前容器层**剥围栏,再把连续的 blockquote 行
@@ -223,9 +227,11 @@ const BLOCKQUOTE_MARKER_RE = /^ {0,3}> ?/;
  * 取检测优先,代价是「自定义标签块 + 紧随标记」的极端形态可能误报,标准
  * 块级标签已由 type 6 覆盖。
  */
-const HTML_BLOCK_TYPE1_OPEN_RE = /^[ \t]{0,3}<(script|pre|style|textarea)\b/i;
+// 前缀空白放开由代码按列宽校验(与围栏开栏同规则,第十六轮 Codex review:
+// 内容列超过 3 的列表续行上的 HTML 块也要识别)。
+const HTML_BLOCK_TYPE1_OPEN_RE = /^[ \t]*<(script|pre|style|textarea)\b/i;
 const HTML_BLOCK_TYPE6_RE =
-  /^[ \t]{0,3}<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?:[ \t/>]|$)/i;
+  /^[ \t]*<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?:[ \t/>]|$)/i;
 
 function stripHtmlBlocks(lines: string[]): string[] {
   const out: string[] = [];
@@ -257,15 +263,24 @@ function stripHtmlBlocks(lines: string[]): string[] {
         continue;
       }
     }
+    // 开栏缩进合法性与围栏同规则:≤3 列(顶层),或落在列表续行区间
+    // [内容列, 内容列 + 3];更深的缩进是缩进代码,不是 HTML 块。
+    const openerIndentOk = (): boolean => {
+      const cols = leadingIndentColumns(line);
+      return (
+        cols <= 3 ||
+        (listContentCol > 0 && cols >= listContentCol && cols <= listContentCol + 3)
+      );
+    };
     const t1 = HTML_BLOCK_TYPE1_OPEN_RE.exec(line);
-    if (t1) {
+    if (t1 && openerIndentOk()) {
       const close = new RegExp(`</${t1[1]}>`, 'i');
       blockIndent =
         listContentCol > 0 && !indentDefinitelyBelow(line, listContentCol) ? listContentCol : 0;
       if (!close.test(line)) closeTag = close;
       continue;
     }
-    if (HTML_BLOCK_TYPE6_RE.test(line)) {
+    if (HTML_BLOCK_TYPE6_RE.test(line) && openerIndentOk()) {
       blockIndent =
         listContentCol > 0 && !indentDefinitelyBelow(line, listContentCol) ? listContentCol : 0;
       inType6 = true;
@@ -396,7 +411,9 @@ const HTML_COMMENT_RE = /<!--[\s\S]*?(?:-->|$)/g;
  * 统一归一成 `&lt;`,由标记正则的实体转义排除分支处理(第十二轮 Codex
  * review:只排除 &lt; 拼写会漏掉数字引用形式的转义示例)。
  */
-const LT_CHAR_REF_RE = /&#0{0,6}60;|&#[xX]0{0,6}3[cC];/g;
+// 命名引用大小写变体(&LT; / &Lt; 等均为合法 HTML 引用)一并归一(第十六轮
+// Codex review:只排除小写拼写会漏掉大写变体的转义示例)。
+const LT_CHAR_REF_RE = /&#0{0,6}60;|&#[xX]0{0,6}3[cC];|&lt;/gi;
 
 export function detectLeakedToolCallMarkup(rawText: string): LeakedToolMarkupHit | null {
   if (!rawText || rawText.length < 16) return null;

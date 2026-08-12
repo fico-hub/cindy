@@ -400,6 +400,32 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toBeNull();
   });
 
+  it('does not hit when a fence sits inside a blockquote nested in a list item', () => {
+    // `- > \`\`\`xml`:列表项里嵌引用的合法组合,整块按引用容器递归处理。
+    expect(
+      detectLeakedToolCallMarkup(
+        `示例:\n- > \`\`\`xml\n  > invoke name="Bash">\n  > <parameter name="command">ls</parameter>\n  > \`\`\`\n完。`,
+      ),
+    ).toBeNull();
+  });
+
+  it('does not hit when a raw HTML block sits at deep list continuation indentation', () => {
+    // `-   Example:` 内容列 4:四空格缩进的 <script> 块仍是列表项内的 HTML 块。
+    expect(
+      detectLeakedToolCallMarkup(
+        `-   Example:\n    <script>\n    invoke name="Bash">\n    <parameter name="command">ls</parameter>\n    </script>\n完。`,
+      ),
+    ).toBeNull();
+  });
+
+  it('does not hit on uppercase named entity escapes (&LT;invoke)', () => {
+    expect(
+      detectLeakedToolCallMarkup(
+        '写法是 &LT;invoke name="Bash"> 后跟 &LT;parameter name="command">ls</parameter>。',
+      ),
+    ).toBeNull();
+  });
+
   it('does not treat a mixed-character line as a closing fence', () => {
     // CommonMark 闭栏必须与开栏同字符:``` 栏内出现 ```~~~ 行不是闭栏,块内
     // 后续的标记示例仍在围栏里,不命中。
