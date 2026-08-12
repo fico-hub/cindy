@@ -216,6 +216,28 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     });
   });
 
+  it('still hits when a tab-indented backtick line precedes the leak (not a fence opener)', () => {
+    // CommonMark:tab 缩进的 ``` 行是缩进代码/段落延续,不是围栏开栏 ——
+    // 不能被误作未闭合围栏把其后的真实泄漏吞到结尾。
+    expect(
+      detectLeakedToolCallMarkup(`参考这行输出\n\t\`\`\`\n${CLASS_B_LEAK}`),
+    ).toEqual({ category: 'invoke-with-parameter' });
+  });
+
+  it('still hits when a backtick "opener" has backticks in its info string (invalid fence)', () => {
+    // CommonMark:反引号开栏的 info string 不得含反引号,含则整行不是开栏。
+    expect(
+      detectLeakedToolCallMarkup(`\`\`\`code\` demo\n${CLASS_B_LEAK}`),
+    ).toEqual({ category: 'invoke-with-parameter' });
+  });
+
+  it('still hits when an unclosed fence inside a blockquote precedes a bare leak outside it', () => {
+    // 容器边界:引用里未闭合的围栏只吞到该引用段末尾,不吞引用外的真实泄漏。
+    expect(
+      detectLeakedToolCallMarkup(`文档引用:\n> \`\`\`xml\n然后模型泄漏了真实调用:\n${CLASS_B_LEAK}`),
+    ).toEqual({ category: 'invoke-with-parameter' });
+  });
+
   it('does not treat a mixed-character line as a closing fence', () => {
     // CommonMark 闭栏必须与开栏同字符:``` 栏内出现 ```~~~ 行不是闭栏,块内
     // 后续的标记示例仍在围栏里,不命中。

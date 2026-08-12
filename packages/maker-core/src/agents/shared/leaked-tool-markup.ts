@@ -12,33 +12,62 @@
  *  - 必须同时命中「invoke 开标记(允许缺失前导 `<`)」与其**之后**的
  *    「parameter 开标记」—— 单独出现 invoke / parameter 词汇、普通英文讨论
  *    不构成命中;
- *  - 代码围栏与行内代码里的内容先剥离 —— 讨论/演示工具调用语法本身不算泄漏;
+ *  - 代码围栏、缩进代码块、blockquote 内的代码、行内 code span 先按
+ *    CommonMark 块结构剥离 —— 讨论/演示工具调用语法本身不算泄漏;
  *  - 标记形状要求 `name="..."` 且以 `>` 收尾,name 不含换行且有界。
+ *
+ * 误报与漏检的代价不对称:误报会把正常回合打成终态错误并触发自动续跑
+ * (用户可见的伤害),漏检只是退化为本检测存在之前的现状(按成功收口)。
+ * 因此剥离逻辑取向 fail-open:拿不准的形态宁可少剥少判。
  *
  * 判定命中与否之外不携带任何正文内容,调用方记日志时同样不应记录正文。
  */
 
 /**
- * 成对的围栏代码块:反引号或波浪线围栏,3 个及以上(CommonMark 允许更长的开栏,
- * 如 ```` 包住含 ``` 的内容)。开栏与闭栏都锚定在行首(允许 0-3 空格缩进,
- * CommonMark 语义)—— 段落中间的行内 ``` / ~~~ 不是围栏,不锚定会把它误作
- * 未闭合围栏吞掉其后的真实泄漏(Greptile review)。闭栏用反向引用要求与开栏
- * 同字符且不短于开栏(更长的闭栏由后随**同字符**吸收 —— 反引号栏与波浪线栏
- * 各自独立分支,`` ```~~~ `` 这样的混合字符行不是闭栏,CommonMark 语义,
- * Codex review);更短的内层围栏不会提前闭合外层;未闭合的围栏(正文被截断)
- * 吞到结尾。
+ * 围栏开栏(行级判定,CommonMark 语义):行首 0-3 个**空格**缩进(tab 缩进的
+ * 是缩进代码不是围栏,Codex review)+ 3 个及以上同字符运行;反引号开栏的
+ * info string 不得含反引号(含则整行不是开栏),波浪线开栏无此限制。
  */
-const FENCED_CODE_RE =
-  /(?:^|\n)[ \t]{0,3}(?:(`{3,})[\s\S]*?(?:\n[ \t]{0,3}\1`*[ \t]*(?=\n|$)|$)|(~{3,})[\s\S]*?(?:\n[ \t]{0,3}\2~*[ \t]*(?=\n|$)|$))/g;
+const FENCE_OPEN_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 
 /**
- * 剥离段落内的 inline code span(CommonMark 语义,对齐
- * packages/maker-shared/src/mathMarkdown.ts 的实现):开 backtick 运行与
- * **等长**闭合运行配对,长度不等不闭合;span 内容允许换行 —— 单行正则会把
- * 「多行合法 code span 里演示的标记」留给检测器造成误报(Codex review)。
- * 无闭合的 backtick 运行按字面量保留。按空行分段处理:CommonMark 的 code
- * span 不跨段落,空行屏障避免两段各自的孤立 backtick 把中间真实泄漏吞掉。
+ * 剥离围栏代码块 —— 行级状态机替代正则(第五、七轮 review 后正则已不可维护):
+ *  - 闭栏与开栏同字符、不短于开栏、除尾随空格外不得有其他内容
+ *    (`` ```~~~ `` 混合行不是闭栏);更短的内层围栏不闭合外层;
+ *  - 未闭合围栏(正文被截断)吞到输入末尾 —— 输入按容器分段传入
+ *    (见 stripBlockStructures),引用里的未闭合围栏只吞到该引用段末尾,
+ *    不会把引用外的真实泄漏一并吞掉(Codex review)。
  */
+function stripFencedBlocks(lines: string[]): string[] {
+  const out: string[] = [];
+  let fence: { char: string; len: number } | null = null;
+  for (const line of lines) {
+    const m = FENCE_OPEN_RE.exec(line);
+    if (fence) {
+      if (
+        m &&
+        m[1][0] === fence.char &&
+        m[1].length >= fence.len &&
+        /^[ \t]*$/.test(m[2] ?? '')
+      ) {
+        fence = null; // 闭栏行本身也剥掉
+      }
+      continue; // 围栏内容整行剥掉
+    }
+    if (m) {
+      const char = m[1][0];
+      const info = m[2] ?? '';
+      const validOpen = char === '~' || !info.includes('`');
+      if (validOpen) {
+        fence = { char, len: m[1].length };
+        continue;
+      }
+    }
+    out.push(line);
+  }
+  return out;
+}
+
 /**
  * 剥离 CommonMark 缩进代码块(4 空格或 tab 起始的行)。规则两条,都来自
  * CommonMark:缩进块**不能打断段落**(紧跟非空行的缩进行是段落的惰性延续,
@@ -68,6 +97,49 @@ function stripIndentedCodeBlocks(text: string): string {
   return out.join('\n');
 }
 
+/** blockquote 行(`>` 前至多 3 个空格;`>` 后空格可选,CommonMark 语义)。 */
+const BLOCKQUOTE_LINE_RE = /^ {0,3}>/;
+const BLOCKQUOTE_MARKER_RE = /^ {0,3}> ?/;
+
+/**
+ * 按块结构剥离代码容器:先在**当前容器层**剥围栏,再把连续的 blockquote 行
+ * 作为子容器摘出、去掉一层 `>` 前缀后递归处理,最后剥当前层的缩进代码块。
+ * 容器边界不能先抹平(第七轮 Codex review):引用里未闭合的围栏若被提升到
+ * 顶层,会把引用外的真实泄漏一并吞掉 —— 分段处理后它只吞到引用段末尾。
+ * 递归深度限 8 层:更深的引用嵌套按原文保留(fail-open 方向是少剥,只可能
+ * 多判不会漏判 —— 但标记正则要求裸形态,残留的 `>` 前缀行不会命中 invoke
+ * 行首形态之外的内容,误报面可忽略)。
+ */
+function stripBlockStructures(text: string, depth = 0): string {
+  const afterFences = stripFencedBlocks(text.split('\n'));
+  const out: string[] = [];
+  let quoteRun: string[] | null = null;
+  const flushQuote = (): void => {
+    if (!quoteRun) return;
+    const inner = quoteRun.map((l) => l.replace(BLOCKQUOTE_MARKER_RE, '')).join('\n');
+    out.push(depth < 8 ? stripBlockStructures(inner, depth + 1) : inner);
+    quoteRun = null;
+  };
+  for (const line of afterFences) {
+    if (BLOCKQUOTE_LINE_RE.test(line)) {
+      (quoteRun ??= []).push(line);
+    } else {
+      flushQuote();
+      out.push(line);
+    }
+  }
+  flushQuote();
+  return stripIndentedCodeBlocks(out.join('\n'));
+}
+
+/**
+ * 剥离段落内的 inline code span(CommonMark 语义,对齐
+ * packages/maker-shared/src/mathMarkdown.ts 的实现):开 backtick 运行与
+ * **等长**闭合运行配对,长度不等不闭合;span 内容允许换行 —— 单行正则会把
+ * 「多行合法 code span 里演示的标记」留给检测器造成误报(Codex review)。
+ * 无闭合的 backtick 运行按字面量保留。按空行分段处理:CommonMark 的 code
+ * span 不跨段落,空行屏障避免两段各自的孤立 backtick 把中间真实泄漏吞掉。
+ */
 function stripInlineCodeSpans(text: string): string {
   if (!text.includes('`')) return text;
   return text
@@ -132,21 +204,9 @@ export interface LeakedToolMarkupHit {
  * 即全文)—— 已正常执行过工具的那段正文里出现类似文本属于讨论语境,不应触发;
  * 之后再出现的泄漏标记(最后一步调用写坏成纯文本)仍需捕获。
  */
-/**
- * 行首 blockquote 前缀(`> `,可叠加嵌套)。检测前统一剥掉:引用里的围栏/
- * 缩进块(`> ```xml`、`>     code`)剥掉前缀后就是普通围栏/缩进块,交给后续
- * 剥离逻辑按 CommonMark 处理(Codex review);引用里的裸泄漏剥掉前缀后仍是
- * 裸文本,不丢检出。
- */
-const BLOCKQUOTE_PREFIX_RE = /^(?:[ \t]{0,3}> ?)+/gm;
-
 export function detectLeakedToolCallMarkup(rawText: string): LeakedToolMarkupHit | null {
   if (!rawText || rawText.length < 16) return null;
-  const text = stripInlineCodeSpans(
-    stripIndentedCodeBlocks(
-      rawText.replace(BLOCKQUOTE_PREFIX_RE, '').replace(FENCED_CODE_RE, ''),
-    ),
-  );
+  const text = stripInlineCodeSpans(stripBlockStructures(rawText));
   const invoke = INVOKE_MARKER_RE.exec(text);
   if (!invoke) return null;
   const afterInvoke = text.slice(invoke.index + invoke[0].length);
