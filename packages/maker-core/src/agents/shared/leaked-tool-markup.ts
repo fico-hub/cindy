@@ -236,10 +236,14 @@ const HTML_BLOCK_TYPE1_OPEN_RE =
 const HTML_BLOCK_TYPE6_RE =
   /^([ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})*)<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?:[ \t/>]|$)/i;
 
+/** 行首(允许列表标记前缀)开启且同一行未闭合的 HTML 注释。 */
+const HTML_COMMENT_OPEN_RE = /^([ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})*)<!--/;
+
 function stripHtmlBlocks(lines: string[]): string[] {
   const out: string[] = [];
   let closeTag: RegExp | null = null;
   let inType6 = false;
+  let inComment = false;
   // blockIndent = 当前 HTML 块所属列表项的内容列(0 = 顶层)。开在列表续行上
   // 的未闭合 HTML 块随列表项结束而终止(与围栏状态机同规则,第十五轮 Codex
   // review):低于内容列的非空行按普通行重新处理,块外的真实泄漏不被吞掉。
@@ -247,7 +251,14 @@ function stripHtmlBlocks(lines: string[]): string[] {
   let listContentCol = 0;
   for (const line of lines) {
     const blank = /^[ \t]*$/.test(line);
-    if (closeTag) {
+    if (inComment) {
+      if (blockIndent > 0 && !blank && indentDefinitelyBelow(line, blockIndent)) {
+        inComment = false; // 注释随列表项终止,该行按普通行重新处理。
+      } else {
+        if (line.includes('-->')) inComment = false;
+        continue;
+      }
+    } else if (closeTag) {
       if (blockIndent > 0 && !blank && indentDefinitelyBelow(line, blockIndent)) {
         closeTag = null; // 列表项结束,块随容器终止;该行落下去按普通行处理。
       } else {
@@ -296,6 +307,22 @@ function stripHtmlBlocks(lines: string[]): string[] {
         }
         continue;
       }
+    }
+    const cm = HTML_COMMENT_OPEN_RE.exec(line);
+    if (cm && !line.slice(cm[0].length).includes('-->')) {
+      // 未闭合的行首注释按块处理:容器边界与 type 1/6 同规则 —— 开在列表项内
+      // 时随列表项结束终止,不再从 <!-- 一路吞到全文末尾(第十九轮 Codex
+      // review);同一行内闭合的注释留给后续闭合式注释正则。
+      const prefix = cm[1] ?? '';
+      const isListOpener = /\S/.test(prefix);
+      blockIndent = isListOpener
+        ? widthInColumns(prefix)
+        : listContentCol > 0 && !indentDefinitelyBelow(line, listContentCol)
+        ? listContentCol
+        : 0;
+      if (isListOpener) listContentCol = widthInColumns(prefix);
+      inComment = true;
+      continue;
     }
     if (!blank) {
       const lm = LIST_MARKER_LINE_RE.exec(line);
@@ -410,12 +437,14 @@ export interface LeakedToolMarkupHit {
  * 之后再出现的泄漏标记(最后一步调用写坏成纯文本)仍需捕获。
  */
 /**
- * HTML 注释(含未闭合注释吞到结尾 —— CommonMark 的注释块同样延续到 `-->`,
- * 渲染端 skipHtml 下整段不展示)。注释里的协议示例用户看不到,不算泄漏
- * (第十二轮 Codex review)。在块结构剥离之后应用:围栏内的 `<!--` 是代码
- * 内容,已随围栏剥掉,不会在这里误配对。
+ * **闭合式** HTML 注释(跨行也认)。注释里的协议示例用户看不到,不算泄漏
+ * (第十二轮 Codex review)。未闭合注释不在这里处理:行首形态由
+ * stripHtmlBlocks 按容器边界处理(开在列表/引用里的未闭合注释随容器终止,
+ * 不吞容器外正文,第十九轮 Codex review),顶层未闭合在那里吞到段末与渲染
+ * 端 skipHtml 一致。在块结构剥离之后应用:围栏内的 `<!--` 是代码内容,已随
+ * 围栏剥掉,不会在这里误配对。
  */
-const HTML_COMMENT_RE = /<!--[\s\S]*?(?:-->|$)/g;
+const HTML_COMMENT_RE = /<!--[\s\S]*?-->/g;
 
 /**
  * `<` 的数字字符引用(十进制 &#60; / 十六进制 &#x3c;,允许前导零与大小写)。

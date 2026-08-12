@@ -450,6 +450,22 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toBeNull();
   });
 
+  it('still hits when an unclosed list-item HTML comment ends with the list', () => {
+    // 开在列表项里的未闭合 <!-- 随列表项结束终止,不吞容器外的真实泄漏。
+    expect(
+      detectLeakedToolCallMarkup(`- <!-- 示例说明\n  更多说明\n${CLASS_B_LEAK}`),
+    ).toEqual({ category: 'invoke-with-parameter' });
+  });
+
+  it('does not hit when a top-level unclosed comment hides the rest of the response', () => {
+    // 顶层未闭合注释:渲染端 skipHtml 下其后整段不展示,与剥离语义一致。
+    expect(
+      detectLeakedToolCallMarkup(
+        `说明。\n<!-- 被截断的注释\ninvoke name="Bash">\n<parameter name="command">ls</parameter>`,
+      ),
+    ).toBeNull();
+  });
+
   it('does not treat a mixed-character line as a closing fence', () => {
     // CommonMark 闭栏必须与开栏同字符:``` 栏内出现 ```~~~ 行不是闭栏,块内
     // 后续的标记示例仍在围栏里,不命中。
