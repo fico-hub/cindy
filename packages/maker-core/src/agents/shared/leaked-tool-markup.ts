@@ -433,6 +433,11 @@ function stripHtmlBlocks(lines: string[]): string[] {
   // review):低于内容列的非空行按普通行重新处理,块外的真实泄漏不被吞掉。
   let blockIndent = 0;
   let listContentCol = 0;
+  // prevBlank 近似「不在段落内」:段落内的单独 `-` 是 setext 下划线不是空
+  // 列表项,只有空行(或文首)之后的空标记才建立列表上下文(第二十九轮
+  // Codex review,镜像围栏状态机的空标记处理;本状态机不跟踪段落,取
+  // 空行近似)。
+  let prevBlank = true;
   for (const line of lines) {
     const blank = /^[ \t]*$/.test(line);
     if (inComment) {
@@ -527,9 +532,12 @@ function stripHtmlBlocks(lines: string[]): string[] {
     }
     if (!blank) {
       const lm = LIST_MARKER_LINE_RE.exec(line);
+      const emptyLm = !lm && prevBlank ? EMPTY_LIST_MARKER_LINE_RE.exec(line) : null;
       if (lm) listContentCol = widthInColumns(lm[1]);
+      else if (emptyLm) listContentCol = widthInColumns(emptyLm[1]) + 1;
       else if (indentDefinitelyBelow(line, listContentCol)) listContentCol = 0;
     }
+    prevBlank = blank;
     out.push(line);
   }
   return out;

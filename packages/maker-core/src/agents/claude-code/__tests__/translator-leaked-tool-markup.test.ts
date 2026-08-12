@@ -700,6 +700,24 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toBeNull();
   });
 
+  it('still hits when a leak dedents out of an empty-marker list HTML block', () => {
+    // stripHtmlBlocks 的列表上下文同样识别空标记行(第二十九轮 Codex
+    // review):`-` 项内的未闭合 <script> 随 dedent 终止,列表外真实泄漏不被
+    // 吞到输入末尾。
+    expect(detectLeakedToolCallMarkup(`-\n  <script>\n  示例内容\n${CLASS_B_LEAK}`)).toEqual({
+      category: 'invoke-with-parameter',
+    });
+  });
+
+  it('does not hit when the markers stay inside an empty-marker list HTML block', () => {
+    // 对照组:块内(同缩进)的标记仍随块剥离。
+    expect(
+      detectLeakedToolCallMarkup(
+        `-\n  <script>\n  invoke name="Bash">\n  <parameter name="command">ls</parameter>`,
+      ),
+    ).toBeNull();
+  });
+
   it('does not treat a mixed-character line as a closing fence', () => {
     // CommonMark 闭栏必须与开栏同字符:``` 栏内出现 ```~~~ 行不是闭栏,块内
     // 后续的标记示例仍在围栏里,不命中。
