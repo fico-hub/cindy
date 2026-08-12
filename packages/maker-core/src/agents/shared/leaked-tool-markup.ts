@@ -80,6 +80,13 @@ function indentDefinitelyBelow(line: string, cols: number): boolean {
 /** 纯列表标记行(不带围栏):用于维护「当前列表项内容列」上下文。 */
 const LIST_MARKER_LINE_RE = /^( {0,3}(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})+)/;
 
+// 段落状态只由真正的段落文本行建立(第二十四轮 Codex review):ATX 标题、
+// 分隔线是独立块,setext 下划线行收束其上方段落 —— 它们之后的有序围栏没有
+// 段落可打断,是合法开栏。
+const ATX_HEADING_RE = /^ {0,3}#{1,6}(?:[ \t]|$)/;
+const THEMATIC_BREAK_RE = /^ {0,3}([-*_])[ \t]*(?:\1[ \t]*){2,}$/;
+const SETEXT_UNDERLINE_RE = /^ {0,3}(?:=+|-+)[ \t]*$/;
+
 function stripFencedBlocks(lines: string[]): string[] {
   const out: string[] = [];
   // maxCloseIndent = 开栏容器边距 + 3(CommonMark:闭栏缩进相对容器至多 3 空格
@@ -135,9 +142,18 @@ function stripFencedBlocks(lines: string[]): string[] {
       if (validOpen) {
         const isListOpener = /\S/.test(m[1]);
         // 起始编号 ≠1 的有序列表不能打断段落:紧跟非空段落行时该行是段落延续
-        // 文本,不是围栏开栏,保留给后续正常处理。
+        // 文本,不是围栏开栏,保留给后续正常处理。限定非列表上下文:已在列表
+        // 里的 `2.` 是既有列表的兄弟项而非「打断段落的新列表」,CommonMark 的
+        // 打断限制只约束列表首项(第二十四轮 Codex review)—— 列表内一律按
+        // 合法开栏接受,近似方向是 fail-open(惰性延续形态多剥只会少判)。
         const orderedStart = /^[ \t]*(\d{1,9})[.)]/.exec(m[1]);
-        if (isListOpener && inParagraph && orderedStart && orderedStart[1] !== '1') {
+        if (
+          isListOpener &&
+          inParagraph &&
+          listContentCol === 0 &&
+          orderedStart &&
+          orderedStart[1] !== '1'
+        ) {
           out.push(line);
           continue;
         }
@@ -172,13 +188,20 @@ function stripFencedBlocks(lines: string[]): string[] {
       }
     }
     if (!/^[ \t]*$/.test(line)) {
-      const lm = LIST_MARKER_LINE_RE.exec(line);
+      // 分隔线优先于列表标记(`- - -` 是分隔线不是列表项,CommonMark 优先级)。
+      const isThematicBreak = THEMATIC_BREAK_RE.test(line);
+      const lm = isThematicBreak ? null : LIST_MARKER_LINE_RE.exec(line);
       if (lm) {
         listContentCol = widthInColumns(lm[1]);
       } else if (indentDefinitelyBelow(line, listContentCol)) {
         listContentCol = 0;
       }
-      inParagraph = true;
+      // 标题/分隔线之后没有敞开的段落;setext 下划线只在紧跟段落时是标题
+      // (否则 `====` 本身就是段落文本)。
+      inParagraph =
+        !isThematicBreak &&
+        !ATX_HEADING_RE.test(line) &&
+        !(inParagraph && SETEXT_UNDERLINE_RE.test(line));
     } else {
       inParagraph = false;
     }
@@ -240,6 +263,9 @@ const BLOCKQUOTE_MARKER_RE = /^[ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})*> ?/;
  * 用户看不到,不算泄漏 —— 第十四轮 Codex review):
  *  - type 1 容器(script / pre / style / textarea):到含闭合标签的行(含)
  *    为止,未闭合吞到段末(渲染端同样整段隐藏);
+ *  - type 3/4/5(处理指令 `<?…?>` / 声明 `<!字母…>` / `<![CDATA[…]]>`):到
+ *    各自闭合串所在行(含)为止,未闭合同样吞到段末(第二十四轮 Codex
+ *    review);
  *  - type 6(标准块级标签开头,如 <div> / <table>):到空行为止。
  * type 7(任意成对标签独立成行)**刻意不剥**:类 B 泄漏的 `<parameter …>`
  * 行本身就是这种形状,剥掉会把真实泄漏藏进「HTML 块」里致盲检测 —— 这里
@@ -257,6 +283,15 @@ const HTML_BLOCK_TYPE6_RE =
 
 /** 行首(允许列表标记前缀)开启且同一行未闭合的 HTML 注释。 */
 const HTML_COMMENT_OPEN_RE = /^([ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})*)<!--/;
+
+// CommonMark HTML 块 type 3(处理指令 <? … ?>)、type 5(<![CDATA[ … ]]>)、
+// type 4(<! + ASCII 字母的声明,到 > 为止)—— 渲染端 skipHtml 下同样整块
+// 隐藏,块内协议示例用户看不到(第二十四轮 Codex review)。捕获组:
+// m[1]=前缀,m[2]=区分闭合条件的开启形态。CDATA 分支先于声明分支
+// (`[` 不是字母,两者本不冲突,顺序只为可读);注释 `<!--` 的 `-` 不是字母,
+// 不会误入声明分支。
+const HTML_BLOCK_TYPE345_OPEN_RE =
+  /^([ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})*)<(\?|!\[CDATA\[|![a-zA-Z])/;
 
 function stripHtmlBlocks(lines: string[]): string[] {
   const out: string[] = [];
@@ -301,7 +336,8 @@ function stripHtmlBlocks(lines: string[]): string[] {
     // 更深的缩进是缩进代码,不是 HTML 块。
     const t1 = HTML_BLOCK_TYPE1_OPEN_RE.exec(line);
     const t6 = t1 ? null : HTML_BLOCK_TYPE6_RE.exec(line);
-    const opener = t1 ?? t6;
+    const t345 = t1 ?? t6 ? null : HTML_BLOCK_TYPE345_OPEN_RE.exec(line);
+    const opener = t1 ?? t6 ?? t345;
     if (opener) {
       const prefix = opener[1] ?? '';
       const isListOpener = /\S/.test(prefix);
@@ -321,6 +357,12 @@ function stripHtmlBlocks(lines: string[]): string[] {
         if (t1) {
           const close = new RegExp(`</${t1[2]}>`, 'i');
           if (!close.test(line)) closeTag = close;
+        } else if (t345) {
+          // type 3/4/5 的闭合条件都是「行内出现指定串」(含开启行本身):
+          // 同一行闭合的块只剥当前行,跨行的进 closeTag 态,与 type 1 共用
+          // 容器边界终止逻辑。
+          const closeRe = t345[2] === '?' ? /\?>/ : t345[2] === '![CDATA[' ? /\]\]>/ : />/;
+          if (!closeRe.test(line.slice(t345[0].length))) closeTag = closeRe;
         } else {
           inType6 = true;
         }

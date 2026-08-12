@@ -518,6 +518,69 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toEqual({ category: 'invoke-with-parameter' });
   });
 
+  it('does not hit when an ordered-list fence follows a heading or thematic break', () => {
+    // 标题/分隔线之后没有敞开的段落,`2.` 开启的围栏是合法列表围栏
+    // (第二十四轮 Codex review:段落状态不能把所有非空行都当段落)。
+    expect(
+      detectLeakedToolCallMarkup(
+        `# 步骤\n2. \`\`\`xml\n   invoke name="Bash">\n   <parameter name="command">ls</parameter>\n   \`\`\`\n完。`,
+      ),
+    ).toBeNull();
+    expect(
+      detectLeakedToolCallMarkup(
+        `前文说明。\n***\n2. \`\`\`xml\n   invoke name="Bash">\n   <parameter name="command">ls</parameter>\n   \`\`\`\n完。`,
+      ),
+    ).toBeNull();
+  });
+
+  it('does not hit when an ordered fence continues an existing list', () => {
+    // 打断限制只约束「打断段落的新列表首项」:已在列表里的 `2.` 是兄弟项,
+    // 其围栏合法(第二十四轮 Codex review)。
+    expect(
+      detectLeakedToolCallMarkup(
+        `1. 第一步说明\n2. \`\`\`xml\n   invoke name="Bash">\n   <parameter name="command">ls</parameter>\n   \`\`\`\n完。`,
+      ),
+    ).toBeNull();
+  });
+
+  it('does not hit when the markers only appear inside a processing-instruction block', () => {
+    // CommonMark HTML 块 type 3:<? 到 ?> 所在行为止,skipHtml 下整块隐藏
+    // (第二十四轮 Codex review)。
+    expect(
+      detectLeakedToolCallMarkup(`<?demo\n${CLASS_B_LEAK}?>\n以上是说明。`),
+    ).toBeNull();
+  });
+
+  it('does not hit when the markers only appear inside a CDATA block', () => {
+    // type 5:<![CDATA[ 到 ]]> 所在行为止。
+    expect(
+      detectLeakedToolCallMarkup(`<![CDATA[\n${CLASS_B_LEAK}]]>\n以上是说明。`),
+    ).toBeNull();
+  });
+
+  it('does not hit when the markers only appear inside a declaration block', () => {
+    // type 4:<! + 字母,到 > 所在行(含)为止 —— invoke 行自带 > 即闭合行,
+    // 连同其上的声明行一起剥掉;后续 parameter 单独出现不构成命中。
+    expect(
+      detectLeakedToolCallMarkup(`<!ATTLIST 示例\n${CLASS_B_LEAK}以上是说明。`),
+    ).toBeNull();
+  });
+
+  it('still hits when a leak follows a single-line declaration', () => {
+    // 同一行闭合的声明只剥当前行,其后的真实泄漏仍要判。
+    expect(detectLeakedToolCallMarkup(`<!DOCTYPE html>\n${CLASS_B_LEAK}`)).toEqual({
+      category: 'invoke-with-parameter',
+    });
+  });
+
+  it('still hits when a leak follows a list-bounded unclosed processing instruction', () => {
+    // 开在列表项里的未闭合 <? 随列表项结束终止(容器边界与 type 1/6 同规则),
+    // 列表外的真实泄漏不被吞掉。
+    expect(
+      detectLeakedToolCallMarkup(`- <?php 示例片段\n  仍在列表项里\n${CLASS_B_LEAK}`),
+    ).toEqual({ category: 'invoke-with-parameter' });
+  });
+
   it('does not treat a mixed-character line as a closing fence', () => {
     // CommonMark 闭栏必须与开栏同字符:``` 栏内出现 ```~~~ 行不是闭栏,块内
     // 后续的标记示例仍在围栏里,不命中。
