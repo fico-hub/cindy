@@ -573,6 +573,29 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     });
   });
 
+  it('does not hit when an ordered fence follows a closed raw HTML block', () => {
+    // 原始 HTML 块行不是段落文本(第二十五轮 Codex review):块结束后的
+    // `2.` 围栏没有段落可打断,是合法开栏。单行块与多行块都要覆盖。
+    expect(
+      detectLeakedToolCallMarkup(
+        `<script></script>\n2. \`\`\`xml\n   invoke name="Bash">\n   <parameter name="command">ls</parameter>\n   \`\`\`\n完。`,
+      ),
+    ).toBeNull();
+    expect(
+      detectLeakedToolCallMarkup(
+        `<script>\nvar x = 1\n</script>\n2. \`\`\`xml\n   invoke name="Bash">\n   <parameter name="command">ls</parameter>\n   \`\`\`\n完。`,
+      ),
+    ).toBeNull();
+  });
+
+  it('still hits when a fence-looking line sits inside an HTML block before a real leak', () => {
+    // HTML 块内容是 raw 文本:块内的 \`2. \`\`\`xml\` 不是围栏开栏,不能把
+    // 块外的真实泄漏吞进围栏态。
+    expect(
+      detectLeakedToolCallMarkup(`<?demo\n2. \`\`\`xml\n?>\n${CLASS_B_LEAK}`),
+    ).toEqual({ category: 'invoke-with-parameter' });
+  });
+
   it('still hits when a leak follows a list-bounded unclosed processing instruction', () => {
     // 开在列表项里的未闭合 <? 随列表项结束终止(容器边界与 type 1/6 同规则),
     // 列表外的真实泄漏不被吞掉。

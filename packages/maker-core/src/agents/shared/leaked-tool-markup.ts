@@ -87,6 +87,39 @@ const ATX_HEADING_RE = /^ {0,3}#{1,6}(?:[ \t]|$)/;
 const THEMATIC_BREAK_RE = /^ {0,3}([-*_])[ \t]*(?:\1[ \t]*){2,}$/;
 const SETEXT_UNDERLINE_RE = /^ {0,3}(?:=+|-+)[ \t]*$/;
 
+/**
+ * 供 stripFencedBlocks 维护段落状态的轻量 HTML 块判定(第二十五轮 Codex
+ * review):围栏剥离先于 HTML 块剥离跑,`<script></script>` 之类的原始 HTML
+ * 块行不是段落文本,其后的有序围栏没有段落可打断。返回该块的闭合条件:
+ * 'closed' = 开启行内已闭合(单行块),'blank' = type 6 到空行为止,RegExp =
+ * 到匹配行(含)为止;null = 不是 HTML 块开启行。缩进校验取近似(上界与
+ * stripHtmlBlocks 同规则,略去纯空白开栏的下界)—— 近似方向是多认块少建
+ * 段落,fail-open。引用的开启正则声明在本函数之后,仅在检测调用期执行,
+ * 模块初始化顺序无影响。
+ */
+function htmlBlockCloseForParagraph(
+  line: string,
+  listContentCol: number,
+): RegExp | 'blank' | 'closed' | null {
+  if (!line.includes('<')) return null;
+  const leadWsCols = leadingIndentColumns(line);
+  if (leadWsCols > 3 && !(listContentCol > 0 && leadWsCols <= listContentCol + 3)) return null;
+  const t1 = HTML_BLOCK_TYPE1_OPEN_RE.exec(line);
+  if (t1) {
+    const close = new RegExp(`</${t1[2]}>`, 'i');
+    return close.test(line.slice(t1[0].length)) ? 'closed' : close;
+  }
+  if (HTML_BLOCK_TYPE6_RE.test(line)) return 'blank';
+  const t345 = HTML_BLOCK_TYPE345_OPEN_RE.exec(line);
+  if (t345) {
+    const closeRe = t345[2] === '?' ? /\?>/ : t345[2] === '![CDATA[' ? /\]\]>/ : />/;
+    return closeRe.test(line.slice(t345[0].length)) ? 'closed' : closeRe;
+  }
+  const cm = HTML_COMMENT_OPEN_RE.exec(line);
+  if (cm) return line.slice(cm[0].length).includes('-->') ? 'closed' : /-->/;
+  return null;
+}
+
 function stripFencedBlocks(lines: string[]): string[] {
   const out: string[] = [];
   // maxCloseIndent = 开栏容器边距 + 3(CommonMark:闭栏缩进相对容器至多 3 空格
@@ -106,6 +139,9 @@ function stripFencedBlocks(lines: string[]): string[] {
   // 段落行的 `2. ```xml` 是段落延续文本不是围栏,进围栏态会把其后的真实
   // 泄漏吞掉(第二十三轮 Codex review)。
   let inParagraph = false;
+  // 段落视角的 HTML 块状态(第二十五轮 Codex review):块内行是 raw 文本,
+  // 不建段落也不当围栏开栏,整块留给 stripHtmlBlocks 剥离。
+  let htmlClose: RegExp | 'blank' | null = null;
   for (const line of lines) {
     if (fence) {
       const c = FENCE_CLOSE_RE.exec(line);
@@ -133,6 +169,15 @@ function stripFencedBlocks(lines: string[]): string[] {
       } else {
         continue; // 围栏内容整行剥掉(块内空行不终结围栏)。
       }
+    }
+    if (htmlClose) {
+      // HTML 块内容行:保留给 stripHtmlBlocks 剥离,不建段落、不开围栏
+      // (CommonMark 的 HTML 块内容是 raw 文本)。
+      const blankInBlock = /^[ \t]*$/.test(line);
+      if (htmlClose === 'blank' ? blankInBlock : htmlClose.test(line)) htmlClose = null;
+      inParagraph = false;
+      out.push(line);
+      continue;
     }
     const m = FENCE_OPEN_RE.exec(line);
     if (m) {
@@ -197,11 +242,18 @@ function stripFencedBlocks(lines: string[]): string[] {
         listContentCol = 0;
       }
       // 标题/分隔线之后没有敞开的段落;setext 下划线只在紧跟段落时是标题
-      // (否则 `====` 本身就是段落文本)。
-      inParagraph =
-        !isThematicBreak &&
-        !ATX_HEADING_RE.test(line) &&
-        !(inParagraph && SETEXT_UNDERLINE_RE.test(line));
+      // (否则 `====` 本身就是段落文本);原始 HTML 块开启行同样不是段落
+      // 文本(第二十五轮 Codex review)。
+      const hc = htmlBlockCloseForParagraph(line, listContentCol);
+      if (hc) {
+        if (hc !== 'closed') htmlClose = hc;
+        inParagraph = false;
+      } else {
+        inParagraph =
+          !isThematicBreak &&
+          !ATX_HEADING_RE.test(line) &&
+          !(inParagraph && SETEXT_UNDERLINE_RE.test(line));
+      }
     } else {
       inParagraph = false;
     }
