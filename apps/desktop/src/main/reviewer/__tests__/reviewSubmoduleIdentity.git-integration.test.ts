@@ -408,3 +408,39 @@ describe('readReviewSubmoduleIdentity 嵌套递归 (#2463 维护者 review)', ()
     );
   });
 });
+
+describe('readReviewSubmoduleIdentity 路径边界 (#2463 review)', () => {
+  // Windows 文件系统不允许目录名以空格结尾,该形态仅在 POSIX 侧存在。
+  it.skipIf(process.platform === 'win32')(
+    'binds a submodule whose directory name ends with a space (no path trim)',
+    async () => {
+      const upstream = path.join(workRoot, 'lib-upstream-sp');
+      await initRepo(upstream);
+      await fs.writeFile(path.join(upstream, 'inner.txt'), 'inner-v1\n');
+      await runGit(['add', 'inner.txt'], { cwd: upstream });
+      await runGit(['commit', '--no-gpg-sign', '-m', 'inner seed'], { cwd: upstream });
+
+      const parent = path.join(workRoot, 'parent-space');
+      await initRepo(parent);
+      await fs.writeFile(path.join(parent, 'root.txt'), 'root\n');
+      await runGit(['add', 'root.txt'], { cwd: parent });
+      await runGit(['commit', '--no-gpg-sign', '-m', 'parent seed'], { cwd: parent });
+      // 目录名以空格结尾:macOS/Linux 文件系统与 git 都合法。rev-parse
+      // --show-toplevel 输出被 trim 会裁掉路径本身的尾随空格,realpath 查错
+      // 路径 → 整次 Review 失败。
+      await runGit(
+        ['-c', 'protocol.file.allow=always', 'submodule', 'add', upstream, 'vendor/lib '],
+        { cwd: parent },
+      );
+      await runGit(['commit', '--no-gpg-sign', '-m', 'add submodule'], { cwd: parent });
+      const sub = path.join(parent, 'vendor', 'lib ');
+      await configureRepo(sub);
+      await fs.writeFile(path.join(sub, 'inner.txt'), 'inner-dirty\n');
+
+      const result = await readReviewSubmoduleIdentity(parent, ['vendor/lib ']);
+      expect(result.identities).toHaveLength(1);
+      expect(result.identities[0].subHead).not.toBe('uninitialized');
+      expect(result.identities[0].dirtyContentFingerprint).not.toBeNull();
+    },
+  );
+});

@@ -71,6 +71,28 @@ describe('git-review statusReader', () => {
     expect(status.untrackedCount).toBe(1);
     expect(status.unmergedCount).toBe(1);
     expect(status.writeDisabledReasons).toContain('unmerged');
+    // 普通文件冲突不是 submodule;XY 取自记录本身,不再硬编码。
+    const conflict = status.files.find((f) => f.path === 'conflict.txt');
+    expect(conflict?.isSubmodule).toBe(false);
+    expect(conflict?.rawXY).toBe('UU');
+  });
+
+  it('keeps submodule identity on unmerged gitlink records (#2463 review)', () => {
+    // 顶层 gitlink 的合并冲突:porcelain=2 的 u 记录 sub 字段为 S 开头 ——
+    // 丢掉它会让冲突 gitlink 绕过 submodule reader,目录被普通文件指纹器
+    // 拒绝、合法冲突无法启动 Review。
+    const status = parsePorcelainV2Status(
+      [
+        'u AA S... 160000 160000 160000 160000 aaaaaaa bbbbbbb ccccccc vendor/lib',
+        '',
+      ].join('\0'),
+      scope,
+    );
+
+    const gitlink = status.files.find((f) => f.path === 'vendor/lib');
+    expect(gitlink?.isSubmodule).toBe(true);
+    expect(gitlink?.isUnmerged).toBe(true);
+    expect(gitlink?.rawXY).toBe('AA');
   });
 
   it('marks SSH workspace status as view-only', () => {
