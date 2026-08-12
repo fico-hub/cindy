@@ -52,6 +52,20 @@ interface ManifestContentBudget {
   remainingPaths: number;
 }
 
+/**
+ * 所有 manifest 条目(子仓自身、staged 身份记录、dirty 工作树文件)共同消耗
+ * 全局路径预算 —— 只对工作树文件扣减时,N 个子仓仍可各自产生上限条 staged
+ * 记录或继续横向展开子仓,总量不受控。耗尽 fail closed。
+ */
+function consumePathBudget(budget: ManifestContentBudget, count: number): void {
+  budget.remainingPaths -= count;
+  if (budget.remainingPaths < 0) {
+    throw new ReviewSubmoduleIdentityError(
+      `Review submodule manifest exceeds the shared content-path budget of ${MAX_MANIFEST_CONTENT_PATHS}`,
+    );
+  }
+}
+
 export class ReviewSubmoduleIdentityError extends Error {}
 
 /** 单个 submodule 的身份 manifest(JSON 可序列化,字段序即声明序,确定性)。 */
@@ -206,6 +220,8 @@ async function readOneSubmoduleIdentity(
       `Review cannot bind submodules nested deeper than ${MAX_SUBMODULE_RECURSION_DEPTH} levels`,
     );
   }
+  // 子仓条目自身也计入全局路径预算:横向展开的子仓数量同样必须受控。
+  consumePathBudget(budget, 1);
   const { indexRecord, headRecord } = await readParentRecords(repoRoot, subPath);
   const subRoot = path.join(repoRoot, ...subPath.split('/'));
 
@@ -245,12 +261,7 @@ async function readOneSubmoduleIdentity(
     // 普通文件只会 ENOTDIR。这类条目的新鲜度真身就是那份文件字节 —— 交给
     // capped 指纹器绑定内容(同一套路径守卫、敏感过滤与共享预算);符号链接
     // 指向目录等超出表达能力的形态由指纹器 fail closed。
-    budget.remainingPaths -= 1;
-    if (budget.remainingPaths < 0) {
-      throw new ReviewSubmoduleIdentityError(
-        `Review submodule manifest exceeds the shared content-path budget of ${MAX_MANIFEST_CONTENT_PATHS}`,
-      );
-    }
+    consumePathBudget(budget, 1);
     const typechangeFingerprint = await fingerprintReviewCappedWorkspaceFiles(
       repoRoot,
       [subPath],
@@ -306,6 +317,8 @@ async function readOneSubmoduleIdentity(
     entries.filter((entry) => gitlinkPaths.has(entry.path)).map((entry) => entry.path),
   )];
 
+  // staged 身份记录同样消耗全局路径预算(每条 staged 路径一条记录)。
+  consumePathBudget(budget, stagedPaths.length);
   const stagedIdentity = await readStagedIndexIdentity(subRoot, stagedPaths, batch);
   // 工作树 dirty 普通文件走 capped 指纹器:同一套路径守卫、敏感路径过滤、
   // 字节上限与「哈希期间文件变了就抛 ChangedError」的稳定性语义。目录形态
@@ -314,12 +327,7 @@ async function readOneSubmoduleIdentity(
   let hashedContent = false;
   if (worktreePaths.length > 0) {
     // 字节与路径预算都从整次构建的共享额度里扣,不按子仓重置。
-    budget.remainingPaths -= worktreePaths.length;
-    if (budget.remainingPaths < 0) {
-      throw new ReviewSubmoduleIdentityError(
-        `Review submodule manifest exceeds the shared content-path budget of ${MAX_MANIFEST_CONTENT_PATHS}`,
-      );
-    }
+    consumePathBudget(budget, worktreePaths.length);
     dirtyContentFingerprint = await fingerprintReviewCappedWorkspaceFiles(subRoot, worktreePaths, {
       byteBudget: budget,
     });

@@ -161,12 +161,15 @@ export async function fingerprintReviewCappedWorkspaceFiles(
 ): Promise<string> {
   const budget = options.byteBudget;
   const maxTotalBytes = budget ? budget.remainingBytes : (options.maxTotalBytes ?? MAX_CAPPED_WORKSPACE_BYTES);
-  if (!Number.isSafeInteger(maxTotalBytes) || maxTotalBytes <= 0) {
-    if (budget) {
+  if (budget) {
+    // 共享预算允许恰好用尽(剩余 0):零字节文件 / 缺失路径不需要读取任何
+    // 字节,是否真正超限交给逐文件的 size > remaining 判断。负值 = 账目损坏。
+    if (!Number.isSafeInteger(maxTotalBytes) || maxTotalBytes < 0) {
       throw new ReviewCappedWorkspaceFingerprintLimitError(
-        'Capped Review shared content-byte budget is exhausted',
+        'Capped Review shared content-byte budget is corrupt',
       );
     }
+  } else if (!Number.isSafeInteger(maxTotalBytes) || maxTotalBytes <= 0) {
     throw new TypeError('maxTotalBytes must be a positive safe integer');
   }
   const repoRootReal = await fs.realpath(repoRoot);
