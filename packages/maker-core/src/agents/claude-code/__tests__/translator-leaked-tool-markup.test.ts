@@ -197,6 +197,14 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toEqual({ category: 'invoke-with-parameter' });
   });
 
+  it('does not treat a mixed-character line as a closing fence', () => {
+    // CommonMark 闭栏必须与开栏同字符:``` 栏内出现 ```~~~ 行不是闭栏,块内
+    // 后续的标记示例仍在围栏里,不命中。
+    expect(
+      detectLeakedToolCallMarkup(`示例:\n\`\`\`\n\`\`\`~~~\n${CLASS_B_LEAK}\`\`\`\n后文。`),
+    ).toBeNull();
+  });
+
   it('does not let an inner shorter fence close an outer longer fence early', () => {
     // 外层 ```` 包住含 ``` 的内容(CommonMark 嵌套围栏惯用法):内层 ``` 不闭合
     // 外层,泄漏标记始终在围栏内,不命中。
