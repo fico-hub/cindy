@@ -474,6 +474,15 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toEqual({ category: 'invoke-with-parameter' });
   });
 
+  it('does not hit when a quoted fence sits at deep list continuation indent', () => {
+    // `-   Example:` 内容列 4:四空格缩进的 > 行仍是列表项内的引用容器。
+    expect(
+      detectLeakedToolCallMarkup(
+        `-   Example:\n    > \`\`\`xml\n    > invoke name="Bash">\n    > <parameter name="command">ls</parameter>\n    > \`\`\`\n完。`,
+      ),
+    ).toBeNull();
+  });
+
   it('does not treat a mixed-character line as a closing fence', () => {
     // CommonMark 闭栏必须与开栏同字符:``` 栏内出现 ```~~~ 行不是闭栏,块内
     // 后续的标记示例仍在围栏里,不命中。

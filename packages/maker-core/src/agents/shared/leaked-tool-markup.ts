@@ -204,8 +204,10 @@ function stripIndentedCodeBlocks(text: string): string {
 // 只认根级 `>` 会把首行留在引用段外、后续行却按引用处理,容器被撕裂
 // (第十六轮 Codex review)。剥前缀时列表标记随 `>` 一起去掉,内层按引用
 // 内容递归。
-const BLOCKQUOTE_LINE_RE = /^ {0,3}(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})*>/;
-const BLOCKQUOTE_MARKER_RE = /^ {0,3}(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})*> ?/;
+// 前导空白放开由代码按列宽校验(深列表续行上的引用,第二十一轮 Codex
+// review:`-   Example:` 内容列 4 时,四空格缩进的 > 行仍是列表项内的引用)。
+const BLOCKQUOTE_LINE_RE = /^[ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})*>/;
+const BLOCKQUOTE_MARKER_RE = /^[ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})*> ?/;
 
 /**
  * 按块结构剥离代码容器:先在**当前容器层**剥围栏,再把连续的 blockquote 行
@@ -350,6 +352,9 @@ function stripBlockStructures(text: string, depth = 0): string {
   const afterFences = stripHtmlBlocks(stripFencedBlocks(text.split('\n')));
   const out: string[] = [];
   let quoteRun: string[] | null = null;
+  // 引用行的前导空白按列宽校验(≤3 列,或列表续行区间上限 内容列+3):
+  // 深于该区间的 > 行是缩进代码不是引用。
+  let listContentCol = 0;
   const flushQuote = (): void => {
     if (!quoteRun) return;
     const inner = quoteRun.map((l) => l.replace(BLOCKQUOTE_MARKER_RE, '')).join('\n');
@@ -357,10 +362,18 @@ function stripBlockStructures(text: string, depth = 0): string {
     quoteRun = null;
   };
   for (const line of afterFences) {
-    if (BLOCKQUOTE_LINE_RE.test(line)) {
+    const leadWsCols = leadingIndentColumns(line);
+    const quoteIndentOk =
+      leadWsCols <= 3 || (listContentCol > 0 && leadWsCols <= listContentCol + 3);
+    if (quoteIndentOk && BLOCKQUOTE_LINE_RE.test(line)) {
       (quoteRun ??= []).push(line);
     } else {
       flushQuote();
+      if (!/^[ \t]*$/.test(line)) {
+        const lm = LIST_MARKER_LINE_RE.exec(line);
+        if (lm) listContentCol = widthInColumns(lm[1]);
+        else if (indentDefinitelyBelow(line, listContentCol)) listContentCol = 0;
+      }
       out.push(line);
     }
   }
