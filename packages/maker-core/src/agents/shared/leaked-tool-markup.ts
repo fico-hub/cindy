@@ -18,8 +18,13 @@
  * 判定命中与否之外不携带任何正文内容,调用方记日志时同样不应记录正文。
  */
 
-/** 成对的围栏代码块;未闭合的围栏(正文被截断)吞到结尾。 */
-const FENCED_CODE_RE = /```[\s\S]*?(?:```|$)/g;
+/**
+ * 成对的围栏代码块:反引号或波浪线围栏,3 个及以上(CommonMark 允许更长的开栏,
+ * 如 ```` 包住含 ``` 的内容)。闭栏用反向引用要求与开栏同字符同长度 —— 更短的
+ * 内层围栏不会提前闭合外层;未闭合的围栏(正文被截断)吞到结尾。闭栏比开栏更长
+ * 时多余字符残留为普通文本,对标记检测无影响。
+ */
+const FENCED_CODE_RE = /(`{3,}|~{3,})[\s\S]*?(?:\1|$)/g;
 const INLINE_CODE_RE = /`[^`\n]+`/g;
 
 /** invoke 开标记:类 B 的典型形态缺失前导 `<`,两种都认。 */
@@ -35,8 +40,9 @@ export interface LeakedToolMarkupHit {
 /**
  * 检测 assistant 正文中泄漏的工具调用标记。返回 null = 未命中。
  *
- * 调用方应只在「本回合没有任何结构化 tool_use」时使用本判定 —— 正常执行过
- * 工具的回合里出现类似文本属于讨论语境,不应触发。
+ * 调用方应只对「最后一次结构化 tool_use 之后」的正文使用本判定(零 tool 回合
+ * 即全文)—— 已正常执行过工具的那段正文里出现类似文本属于讨论语境,不应触发;
+ * 之后再出现的泄漏标记(最后一步调用写坏成纯文本)仍需捕获。
  */
 export function detectLeakedToolCallMarkup(rawText: string): LeakedToolMarkupHit | null {
   if (!rawText || rawText.length < 16) return null;

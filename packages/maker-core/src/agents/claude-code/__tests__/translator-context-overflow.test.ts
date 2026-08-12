@@ -30,6 +30,7 @@ function createTurnState(): TurnState {
     sawCompactBoundary: false,
     hasEmittedText: false,
     uiEmittedText: '',
+    uiTextLenAtLastToolUse: 0,
     pendingApiError: null,
     interruptRequested: false,
     generation: 0,

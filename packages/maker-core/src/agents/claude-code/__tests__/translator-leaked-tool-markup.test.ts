@@ -18,6 +18,7 @@ function createTurnState(): TurnState {
     sawCompactBoundary: false,
     hasEmittedText: false,
     uiEmittedText: '',
+    uiTextLenAtLastToolUse: 0,
     pendingApiError: null,
     interruptRequested: false,
     generation: 0,
@@ -66,7 +67,11 @@ function pushMessageStart(queue: ReturnType<typeof createAsyncQueue<AgentEvent>>
   );
 }
 
-function pushResult(queue: ReturnType<typeof createAsyncQueue<AgentEvent>>, ctx: ReturnType<typeof createCtx>): void {
+function pushResult(
+  queue: ReturnType<typeof createAsyncQueue<AgentEvent>>,
+  ctx: ReturnType<typeof createCtx>,
+  resultText?: string,
+): void {
   translateSdkMessage(
     {
       type: 'result',
@@ -76,6 +81,7 @@ function pushResult(queue: ReturnType<typeof createAsyncQueue<AgentEvent>>, ctx:
       modelUsage: {
         'codex/gpt-5.5': { inputTokens: 1200, outputTokens: 340, costUSD: 0.01, contextWindow: 272_000 },
       },
+      ...(resultText !== undefined ? { result: resultText } : {}),
     },
     queue,
     ctx,
@@ -135,6 +141,28 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     expect(
       detectLeakedToolCallMarkup(`${CLASS_B_LEAK}\n\`\`\`text truncated...`),
     ).toEqual({ category: 'invoke-with-parameter' });
+  });
+
+  it('does not hit when the markers only appear inside tilde fences', () => {
+    expect(
+      detectLeakedToolCallMarkup(`语法示例:\n~~~\n${CLASS_B_LEAK}~~~\n以上是说明。`),
+    ).toBeNull();
+  });
+
+  it('does not hit when the markers only appear inside 4+ backtick fences', () => {
+    expect(
+      detectLeakedToolCallMarkup(`语法示例:\n\`\`\`\`\n${CLASS_B_LEAK}\`\`\`\`\n以上是说明。`),
+    ).toBeNull();
+  });
+
+  it('does not let an inner shorter fence close an outer longer fence early', () => {
+    // 外层 ```` 包住含 ``` 的内容(CommonMark 嵌套围栏惯用法):内层 ``` 不闭合
+    // 外层,泄漏标记始终在围栏内,不命中。
+    expect(
+      detectLeakedToolCallMarkup(
+        `文档片段:\n\`\`\`\`md\n\`\`\`xml\n${CLASS_B_LEAK}\`\`\`\n\`\`\`\`\n完。`,
+      ),
+    ).toBeNull();
   });
 });
 
@@ -213,7 +241,9 @@ describe('Claude Code translator leaked tool markup guard (#2518)', () => {
     expect(events.some((e) => e.type === 'done')).toBe(true);
   });
 
-  it('does not flag a turn that executed a structured tool call (discussion context)', async () => {
+  it('does not flag markup-like text that precedes a successful structured tool call', async () => {
+    // 讨论语境:类标记文本出现在最后一次成功 tool_use **之前** —— 扫描域从该
+    // tool_use 时的已推正文长度起算,之前的文本不参与判定。
     const tracker = new UsageTracker();
     const queue = createAsyncQueue<AgentEvent>();
     const ctx = createCtx(tracker);
@@ -224,11 +254,16 @@ describe('Claude Code translator leaked tool markup guard (#2518)', () => {
         type: 'assistant',
         message: {
           content: [
+            { type: 'text', text: `先解释一下这条被截断的调用长什么样:\n${CLASS_B_LEAK}` },
             { type: 'tool_use', id: 'tool-1', name: 'Read', input: { file_path: '/tmp/a' } },
-            { type: 'text', text: CLASS_B_LEAK },
           ],
         },
       },
+      queue,
+      ctx,
+    );
+    translateSdkMessage(
+      { type: 'assistant', message: { content: [{ type: 'text', text: '读完了,内容正常。' }] } },
       queue,
       ctx,
     );
@@ -236,6 +271,66 @@ describe('Claude Code translator leaked tool markup guard (#2518)', () => {
 
     const events = await drain(queue);
     expect(events.some((e) => e.type === 'error')).toBe(false);
+  });
+
+  it('flags a leak that appears after the last successful tool call (Codex review)', async () => {
+    // 先成功调了一个工具、随后第二个调用写坏成纯文本 —— toolUses 累计非零不能
+    // 全免判定,只豁免最后一次 tool_use 之前的正文。
+    const tracker = new UsageTracker();
+    const queue = createAsyncQueue<AgentEvent>();
+    const ctx = createCtx(tracker);
+
+    pushMessageStart(queue, ctx);
+    translateSdkMessage(
+      {
+        type: 'assistant',
+        message: {
+          content: [{ type: 'tool_use', id: 'tool-1', name: 'Read', input: { file_path: '/tmp/a' } }],
+        },
+      },
+      queue,
+      ctx,
+    );
+    translateSdkMessage(
+      { type: 'assistant', message: { content: [{ type: 'text', text: CLASS_B_LEAK }] } },
+      queue,
+      ctx,
+    );
+    pushResult(queue, ctx);
+
+    const events = await drain(queue);
+    expect(events.find((e) => e.type === 'error')?.data).toMatchObject({
+      reason: 'malformed-tool-markup',
+      isTerminal: true,
+    });
+    expect(events.some((e) => e.type === 'done')).toBe(true);
+  });
+
+  it('flags a leak that only exists in the unstreamed result tail (Greptile review)', async () => {
+    // 流式只推过正常旁白,泄漏标记只在 result.result 兜出的尾段里(该尾段上方
+    // 刚补推给 UI)—— 检测必须覆盖「用户实际看到的全文」,不能只扫 emitted。
+    const tracker = new UsageTracker();
+    const queue = createAsyncQueue<AgentEvent>();
+    const ctx = createCtx(tracker);
+
+    pushMessageStart(queue, ctx);
+    const preamble = '我来执行这一步。\n';
+    translateSdkMessage(
+      { type: 'assistant', message: { content: [{ type: 'text', text: preamble }] } },
+      queue,
+      ctx,
+    );
+    pushResult(queue, ctx, `${preamble}${CLASS_B_LEAK}`);
+
+    const events = await drain(queue);
+    // 尾段先按流式截断兜底补推给 UI,再触发泄漏判定。
+    expect(
+      events.some((e) => e.type === 'text' && (e.data as { text?: string }).text === CLASS_B_LEAK),
+    ).toBe(true);
+    expect(events.find((e) => e.type === 'error')?.data).toMatchObject({
+      reason: 'malformed-tool-markup',
+      isTerminal: true,
+    });
   });
 
   it('does not flag when the user interrupted the turn', async () => {

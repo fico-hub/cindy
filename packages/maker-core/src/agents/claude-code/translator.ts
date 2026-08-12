@@ -58,6 +58,13 @@ export interface TurnState {
    */
   uiEmittedText: string;
   /**
+   * 最后一次结构化 tool_use 发生时 uiEmittedText 的长度。泄漏标记检测(#2518
+   * 类 B)只扫描该偏移之后的正文:之前的文本属于已正常执行过工具的讨论语境,
+   * 之后再出现的泄漏标记(先成功调了 N 个工具、第 N+1 个写坏成纯文本)仍要判
+   * ——单纯 toolUses > 0 全免会漏掉这种"干到一半最后一步静默掉了"的形态。
+   */
+  uiTextLenAtLastToolUse: number;
+  /**
    * SDK API retry / assistant error envelope 的暂存详情。两者都不是可靠的 turn
    * 终态: Claude Code 可能随后自动重试并返回成功 result。只有最终
    * result.is_error 才把它推成 terminal error；成功 result 直接丢弃，避免下游
@@ -171,6 +178,7 @@ function resetTurnState(turn: TurnState): void {
   turn.sawCompactBoundary = false;
   turn.hasEmittedText = false;
   turn.uiEmittedText = '';
+  turn.uiTextLenAtLastToolUse = 0;
   turn.pendingApiError = null;
   turn.interruptRequested = false;
   turn.lastAssistantMsgHadSubstance = true;
@@ -1144,6 +1152,7 @@ function handleAssistant(
       });
     } else if (block.type === 'tool_use') {
       ctx.turn.toolUses += 1;
+      ctx.turn.uiTextLenAtLastToolUse = ctx.turn.uiEmittedText.length;
       // ctx.log.info('SDK ▷ tool_use', {
       //   toolName: block.name,
       //   toolUseId: block.id,
@@ -1772,14 +1781,17 @@ function handleResult(
   // (main 的有界自动续跑按 reason 放行,续跑提示让模型基于上下文重发调用),
   // 然后**继续**走下方 status Done + done —— 本轮有真实用量,砍 done 会丢
   // 整轮账(与 is_error 失败序列同构;empty-response 只发 error 是因为零用量
-  // 无账可丢)。执行过结构化工具的回合(toolUses > 0)不判:正文里出现类似
-  // 文本属于讨论语境。
-  const leakedMarkupBody = emitted.length > 0 ? emitted : full;
+  // 无账可丢)。
+  // 扫描域两个边界(Greptile/Codex review):
+  //  - 正文取「用户实际看到的全文」= emitted + fallbackTail —— 泄漏标记可能只
+  //    存在于 result.result 兜出的未流式尾段(上方刚补推给 UI),只扫 emitted
+  //    会漏;mismatch 分支 fallbackTail 为空,退化为只扫 emitted,与展示一致。
+  //  - 起点取最后一次结构化 tool_use 时的已推正文长度 —— 之前的文本属于已正常
+  //    执行过工具的讨论语境不判;之后再出现的泄漏(先成功调 N 个工具、第 N+1 个
+  //    写坏成纯文本)仍要判。零 tool 轮偏移为 0,即全文。
+  const leakedMarkupBody = (emitted + fallbackTail).slice(ctx.turn.uiTextLenAtLastToolUse);
   const leakedToolMarkup =
-    !msg.is_error &&
-    !ctx.turn.interruptRequested &&
-    !ctx.turn.sawCompactBoundary &&
-    ctx.turn.toolUses === 0
+    !msg.is_error && !ctx.turn.interruptRequested && !ctx.turn.sawCompactBoundary
       ? detectLeakedToolCallMarkup(leakedMarkupBody)
       : null;
   if (leakedToolMarkup) {
@@ -1787,6 +1799,7 @@ function handleResult(
     ctx.log.warn('SDK ◀ turn leaked malformed tool-call markup as plain text', {
       category: leakedToolMarkup.category,
       textLength: leakedMarkupBody.length,
+      toolUses: ctx.turn.toolUses,
       apiCalls: ctx.turn.apiCalls,
       model: currentModel,
     });
