@@ -57,6 +57,7 @@ import {
   type WorkerSummary,
 } from '../xdt-helper/index.js';
 import type { ControlResult, ControlWorkerAgent } from '../types.js';
+import { buildActionableInputSchema } from './actionableToolErrors.js';
 import { resolveLiziMcpSessionContext } from '../session-context.js';
 import { errorPayload, okPayload } from '../xdt-helper/_payload.js';
 
@@ -274,13 +275,25 @@ class DirectToolSink extends XdtHelperToolRegistry {
       description: string,
       paramsSchema: z.ZodRawShape,
       cb: XdtHelperToolHandler,
-    ) => void;
-    directTool(
+    ) => { inputSchema?: unknown } | undefined;
+    const registered = directTool(
       def.name,
       def.description,
       def.inputShape,
       def.handler as unknown as XdtHelperToolHandler,
     );
+    // 可行动参数校验接管(#2410):注册仍用 raw shape,随后把 RegisteredTool 的
+    // 校验 schema 换成 strictObject + 对象级错误定制 —— 顶层未知键(典型误用:
+    // 包一层 {"args": {...}})不再被 SDK 的非 strict 解析静默剥离,而是与缺失
+    // 字段一次报全,并附平铺提示、schema 派生的必填清单与最小示例。SDK 形态
+    // 变化导致接管失败时保持默认校验(fail-open,工具照常可用)。
+    try {
+      if (registered && typeof registered === 'object' && 'inputSchema' in registered) {
+        registered.inputSchema = buildActionableInputSchema(def.name, def.inputShape);
+      }
+    } catch {
+      // 保持 SDK 默认校验。
+    }
   }
 }
 
