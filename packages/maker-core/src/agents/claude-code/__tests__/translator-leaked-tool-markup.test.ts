@@ -175,6 +175,27 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toEqual({ category: 'invoke-with-parameter' });
   });
 
+  it('does not hit when the markers only appear inside an indented code block', () => {
+    // CommonMark 缩进代码块(4 空格):合法文档回复用缩进块演示标记语法。
+    const indented = CLASS_B_LEAK.split('\n')
+      .map((l) => (l.length > 0 ? `    ${l}` : l))
+      .join('\n');
+    expect(
+      detectLeakedToolCallMarkup(`标记语法示例:\n\n${indented}\n\n以上是说明。`),
+    ).toBeNull();
+  });
+
+  it('still hits when the indented lines lazily continue a paragraph (not a code block)', () => {
+    // 缩进块不能打断段落:紧跟非空行的缩进行是段落延续,不剥离 —— 真实泄漏
+    // 恰好带缩进出现在段落中间时仍要判。
+    const indented = CLASS_B_LEAK.split('\n')
+      .map((l) => (l.length > 0 ? `    ${l}` : l))
+      .join('\n');
+    expect(
+      detectLeakedToolCallMarkup(`我现在执行这一步,输出如下\n${indented}`),
+    ).toEqual({ category: 'invoke-with-parameter' });
+  });
+
   it('does not let an inner shorter fence close an outer longer fence early', () => {
     // 外层 ```` 包住含 ``` 的内容(CommonMark 嵌套围栏惯用法):内层 ``` 不闭合
     // 外层,泄漏标记始终在围栏内,不命中。

@@ -34,6 +34,35 @@ const FENCED_CODE_RE = /(`{3,}|~{3,})[\s\S]*?(?:\1|$)/g;
  * 无闭合的 backtick 运行按字面量保留。按空行分段处理:CommonMark 的 code
  * span 不跨段落,空行屏障避免两段各自的孤立 backtick 把中间真实泄漏吞掉。
  */
+/**
+ * 剥离 CommonMark 缩进代码块(4 空格或 tab 起始的行)。规则两条,都来自
+ * CommonMark:缩进块**不能打断段落**(紧跟非空行的缩进行是段落的惰性延续,
+ * 不算代码,保留 —— 顺带保住「真实泄漏恰好缩进在段落中间」的检出);块内
+ * 空行不终结块。合法文档回复用缩进块演示标记语法时不应误报(Codex review)。
+ */
+function stripIndentedCodeBlocks(text: string): string {
+  if (!/^(?: {4}|\t)/m.test(text)) return text;
+  const out: string[] = [];
+  let prevBlank = true; // 文首视同空行:开头的缩进行就是代码块。
+  let inCode = false;
+  for (const line of text.split('\n')) {
+    const blank = /^[ \t]*$/.test(line);
+    if (blank) {
+      out.push(line);
+      prevBlank = true;
+      continue; // 空行不改变 inCode:块内空行仍属于块。
+    }
+    if (/^(?: {4}|\t)/.test(line) && (prevBlank || inCode)) {
+      inCode = true;
+      continue;
+    }
+    inCode = false;
+    prevBlank = false;
+    out.push(line);
+  }
+  return out.join('\n');
+}
+
 function stripInlineCodeSpans(text: string): string {
   if (!text.includes('`')) return text;
   return text
@@ -100,7 +129,7 @@ export interface LeakedToolMarkupHit {
  */
 export function detectLeakedToolCallMarkup(rawText: string): LeakedToolMarkupHit | null {
   if (!rawText || rawText.length < 16) return null;
-  const text = stripInlineCodeSpans(rawText.replace(FENCED_CODE_RE, ''));
+  const text = stripInlineCodeSpans(stripIndentedCodeBlocks(rawText.replace(FENCED_CODE_RE, '')));
   const invoke = INVOKE_MARKER_RE.exec(text);
   if (!invoke) return null;
   const afterInvoke = text.slice(invoke.index + invoke[0].length);
