@@ -220,7 +220,14 @@ function workspacePathsWithoutContent(workspace: ReviewWorkspaceEvidence): strin
   const capped = [workspace.diffs.capped?.staged, workspace.diffs.capped?.unstaged].flatMap(
     (bucket) =>
       bucket
-        ? bucket.files.flatMap((file) => [file.path, file.oldPath].filter(Boolean) as string[])
+        ? bucket.files
+            // capped bucket 同样排除 submodule(理由同下方非 capped 分支):
+            // gitlink 是目录,喂给普通文件指纹器会直接抛错,含 capped 子仓的
+            // 大型 dirty workspace 整个 Review 起不来;其身份由
+            // submoduleEvidencePaths()(已含 capped bucket)路由到 submodule
+            // reader 绑定(Codex review #2515)。
+            .filter((file) => !file.isSubmodule)
+            .flatMap((file) => [file.path, file.oldPath].filter(Boolean) as string[])
         : [],
   );
   const contentless = [...workspace.diffs.staged, ...workspace.diffs.unstaged]

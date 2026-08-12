@@ -514,6 +514,53 @@ describe('readReviewWorkspaceSnapshot', () => {
     ).resolves.toBeTruthy();
   });
 
+  it('excludes capped submodule entries from the content fingerprint paths (#2463 review)', async () => {
+    // capped bucket 里的 submodule 条目不得进入普通文件指纹器:gitlink 是
+    // 目录,指纹器会直接抛错,含 capped 子仓的大型 dirty workspace 整个
+    // Review 起不来;其身份由 submodule reader 绑定。
+    const repoRoot = await tempDir();
+    const submodulePath = 'vendor/lib';
+    await fs.mkdir(path.join(repoRoot, submodulePath), { recursive: true });
+    const data = cappedReviewData(repoRoot, submodulePath);
+    readReviewDataMock.mockResolvedValue({
+      ...data,
+      status: data.status
+        ? { ...data.status, files: data.status.files.map((f) => ({ ...f, isSubmodule: true })) }
+        : data.status,
+      diffs: {
+        ...data.diffs,
+        capped: {
+          staged: null,
+          unstaged: {
+            ...data.diffs.capped!.unstaged!,
+            files: data.diffs.capped!.unstaged!.files.map((f) => ({ ...f, isSubmodule: true })),
+          },
+        },
+      },
+    });
+    const fingerprintCappedWorkspaceFiles = vi.fn(
+      async (_repoRoot: string, _paths: readonly string[]) => 'digest',
+    );
+    const readSubmoduleIdentity = vi.fn(
+      async (_repoRoot: string, _paths: readonly string[]) => ({
+        identities: [],
+        hashedContent: false,
+      }),
+    );
+
+    await expect(
+      readReviewWorkspaceSnapshot('source', {
+        fingerprintCappedWorkspaceFiles,
+        readSubmoduleIdentity,
+      }),
+    ).resolves.toBeTruthy();
+    for (const [, paths] of fingerprintCappedWorkspaceFiles.mock.calls) {
+      expect(paths).not.toContain(submodulePath);
+    }
+    expect(readSubmoduleIdentity).toHaveBeenCalled();
+    expect(readSubmoduleIdentity.mock.calls[0]?.[1]).toContain(submodulePath);
+  });
+
   it('routes submodule evidence to the identity reader and binds the manifest (#2463)', async () => {
     const repoRoot = await tempDir();
     const submodulePath = 'vendor/lib';
