@@ -126,7 +126,10 @@ async function readParentRecords(
   const indexRecord = indexRows.length > 0 ? indexRows.sort().join(',') : 'absent';
 
   const { stdout: treeOut } = await runGit(
-    ['ls-tree', '-z', 'HEAD', '--', subPath],
+    // 字面 pathspec:子仓名以 pathspec magic 开头(如合法目录名 ':(exclude)')
+    // 时,裸路径会以 128 失败中止 Review(Codex review #2515;同函数的
+    // ls-files 调用已是 literal)。
+    ['ls-tree', '-z', 'HEAD', '--', literalPathspec(subPath)],
     { cwd: repoRoot, maxStdoutBytes: 1024 * 1024, allowedExitCodes: [0, 128] },
   );
   // exit 128 = unborn HEAD 等;当作 tree 无记录处理(absent 本身就是身份)。

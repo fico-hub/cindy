@@ -42,12 +42,20 @@ function stableStatMatches(before: Stats, after: Stats): boolean {
 }
 
 function assertSafeGitPath(rawPath: string): void {
+  // git 输出的 repo-relative 路径分隔符恒为 '/'。反斜杠在 POSIX 上是普通文件名
+  // 字符('C:\\notes' / 'dir\\..\\file' 都是合法 dirty 文件),按 win32 语义做
+  // 词法校验会把它们误判成越界、中止整个 Review(Codex review #2515)。win32
+  // 词法检查仅在 Windows 生效(那里文件名不可能含反斜杠);词法校验之外的
+  // 越界防护由下游 realpath 边界检查兜底。
+  const winUnsafe =
+    process.platform === 'win32' &&
+    (path.win32.isAbsolute(rawPath) || rawPath.split(/[\\/]/).includes('..'));
   if (
     !rawPath ||
     rawPath.includes('\0') ||
     path.posix.isAbsolute(rawPath) ||
-    path.win32.isAbsolute(rawPath) ||
-    rawPath.split(/[\\/]/).includes('..')
+    winUnsafe ||
+    rawPath.split('/').includes('..')
   ) {
     throw new ReviewCappedWorkspaceFingerprintError(
       'Review refused an invalid capped workspace path',
