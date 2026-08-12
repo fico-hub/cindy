@@ -12,13 +12,18 @@ import { readReviewSubmoduleIdentity } from '../reviewSubmoduleIdentity';
 let workRoot: string;
 let parentPath: string;
 
-async function initRepo(dir: string): Promise<void> {
-  await fs.mkdir(dir, { recursive: true });
-  await runGit(['init'], { cwd: dir });
+// CI runner 没有全局 git 身份;每个会执行 commit 的仓库(含 submodule 克隆)都要配本地身份。
+async function configureRepo(dir: string): Promise<void> {
   await runGit(['config', 'user.email', 'test@xdt.local'], { cwd: dir });
   await runGit(['config', 'user.name', 'XDT Test'], { cwd: dir });
   await runGit(['config', 'commit.gpgsign', 'false'], { cwd: dir });
   await runGit(['config', 'core.autocrlf', 'false'], { cwd: dir });
+}
+
+async function initRepo(dir: string): Promise<void> {
+  await fs.mkdir(dir, { recursive: true });
+  await runGit(['init'], { cwd: dir });
+  await configureRepo(dir);
 }
 
 /** 父仓 + 已初始化 submodule(vendor/lib,含一个已提交文件 inner.txt)。 */
@@ -39,7 +44,9 @@ async function setupParentWithSubmodule(): Promise<{ parent: string; sub: string
     { cwd: parent },
   );
   await runGit(['commit', '--no-gpg-sign', '-m', 'add submodule'], { cwd: parent });
-  return { parent, sub: path.join(parent, 'vendor', 'lib') };
+  const sub = path.join(parent, 'vendor', 'lib');
+  await configureRepo(sub);
+  return { parent, sub };
 }
 
 beforeEach(async () => {
