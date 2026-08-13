@@ -88,16 +88,24 @@ const LIST_MARKER_LINE_RE = /^( {0,3}(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})+)/;
 const EMPTY_LIST_MARKER_LINE_RE = /^( {0,3}(?:[-*+]|\d{1,9}[.)]))[ \t]*$/;
 
 /**
- * 列表标记行的内容列。标记后空白 ≥5 列时只有 1 列算 padding(CommonMark:
- * 内容缩进超过 4 的项按「标记 + 1 空格」定内容列,余下缩进是项内缩进代码,
- * 第三十二轮 Codex review)—— 标记正则只吞 1-4 列空白,后面还跟着空白即是
- * 这种形态;否则内容列就是标记前缀的列宽。
+ * 列表标记行前缀里**每一层**标记的内容列(外层在前)。叠加标记行
+ * (`- - inner`)的每个标记都开启一层容器,只记录最内层会让外层项的续行
+ * 把整个栈弹空(第三十六轮 Codex review)。最后一层应用「标记后空白 ≥5 列
+ * 只算 1 列 padding」的规则(CommonMark:内容缩进超过 4 的项按「标记 +
+ * 1 空格」定内容列,余下缩进是项内缩进代码,第三十二轮 Codex review)——
+ * 标记正则每段只吞 1-4 列空白,前缀之后还跟着空白即是这种形态。
  */
-function listMarkerContentCol(markerPrefix: string, line: string): number {
-  if (/[ \t]/.test(line.charAt(markerPrefix.length))) {
-    return widthInColumns(markerPrefix.replace(/[ \t]+$/, '')) + 1;
+function listMarkerContentCols(markerPrefix: string, line: string): number[] {
+  const cols: number[] = [];
+  const markerRe = /(?:[-*+]|\d{1,9}[.)])[ \t]{1,4}/y;
+  markerRe.lastIndex = (/^ {0,3}/.exec(markerPrefix)?.[0] ?? '').length;
+  while (markerRe.exec(markerPrefix) !== null) {
+    cols.push(widthInColumns(markerPrefix.slice(0, markerRe.lastIndex)));
   }
-  return widthInColumns(markerPrefix);
+  if (cols.length > 0 && /[ \t]/.test(line.charAt(markerPrefix.length))) {
+    cols[cols.length - 1] = widthInColumns(markerPrefix.replace(/[ \t]+$/, '')) + 1;
+  }
+  return cols;
 }
 
 /**
@@ -109,7 +117,7 @@ function listMarkerContentCol(markerPrefix: string, line: string): number {
  */
 interface ListContext {
   readonly col: number;
-  enterItem(line: string, contentCol: number): void;
+  enterItem(line: string, contentCols: readonly number[]): void;
   onLine(line: string): void;
   dropTop(): void;
 }
@@ -120,10 +128,12 @@ function createListContext(): ListContext {
     get col(): number {
       return stack.length ? stack[stack.length - 1] : 0;
     },
-    enterItem(line: string, contentCol: number): void {
+    enterItem(line: string, contentCols: readonly number[]): void {
       this.onLine(line);
-      while (stack.length && stack[stack.length - 1] >= contentCol) stack.pop();
-      stack.push(contentCol);
+      for (const col of contentCols) {
+        while (stack.length && stack[stack.length - 1] >= col) stack.pop();
+        stack.push(col);
+      }
     },
     onLine(line: string): void {
       while (stack.length && indentDefinitelyBelow(line, stack[stack.length - 1])) stack.pop();
@@ -180,8 +190,8 @@ function createBlockContext(): BlockContext {
         lmOrdered[1] !== '1';
       const emptyLm =
         isThematicBreak || lm !== null || inPara ? null : EMPTY_LIST_MARKER_LINE_RE.exec(line);
-      if (lm && !lmIsParagraphText) listCtx.enterItem(line, listMarkerContentCol(lm[1], line));
-      else if (emptyLm) listCtx.enterItem(line, widthInColumns(emptyLm[1]) + 1);
+      if (lm && !lmIsParagraphText) listCtx.enterItem(line, listMarkerContentCols(lm[1], line));
+      else if (emptyLm) listCtx.enterItem(line, [widthInColumns(emptyLm[1]) + 1]);
       else listCtx.onLine(line);
       pendingEmptyItem = emptyLm !== null;
       if (BLOCKQUOTE_LINE_RE.test(line)) {
@@ -381,7 +391,7 @@ function stripFencedBlocks(lines: string[]): string[] {
             maxCloseIndent: prefixCols + 3,
             contentIndent,
           };
-          if (isListOpener) listCtx.enterItem(line, prefixCols);
+          if (isListOpener) listCtx.enterItem(line, listMarkerContentCols(m[1], line));
           else if (contentIndent === 0 && prefixCols < listCtx.col) listCtx.onLine(line);
           inParagraph = false;
           quoteLazy = false;
@@ -410,9 +420,9 @@ function stripFencedBlocks(lines: string[]): string[] {
           ? null
           : EMPTY_LIST_MARKER_LINE_RE.exec(line);
       if (lm && !lmIsParagraphText) {
-        listCtx.enterItem(line, listMarkerContentCol(lm[1], line));
+        listCtx.enterItem(line, listMarkerContentCols(lm[1], line));
       } else if (emptyLm) {
-        listCtx.enterItem(line, widthInColumns(emptyLm[1]) + 1);
+        listCtx.enterItem(line, [widthInColumns(emptyLm[1]) + 1]);
       } else {
         listCtx.onLine(line);
       }
@@ -613,7 +623,7 @@ function stripHtmlBlocks(lines: string[]): string[] {
           : listCtx.col > 0 && !indentDefinitelyBelow(line, listCtx.col)
           ? listCtx.col
           : 0;
-        if (isListOpener) listCtx.enterItem(line, prefixCols);
+        if (isListOpener) listCtx.enterItem(line, listMarkerContentCols(prefix, line));
         inPara = false;
         quoteLazy = false;
         if (t1) {
@@ -652,7 +662,7 @@ function stripHtmlBlocks(lines: string[]): string[] {
           : listCtx.col > 0 && !indentDefinitelyBelow(line, listCtx.col)
           ? listCtx.col
           : 0;
-        if (isListOpener) listCtx.enterItem(line, prefixCols);
+        if (isListOpener) listCtx.enterItem(line, listMarkerContentCols(prefix, line));
         inPara = false;
         quoteLazy = false;
         inComment = true;
@@ -666,8 +676,8 @@ function stripHtmlBlocks(lines: string[]): string[] {
       const lmIsParagraphText =
         lm !== null && inPara && listCtx.col === 0 && lmOrdered !== null && lmOrdered[1] !== '1';
       const emptyLm = lm !== null || inPara ? null : EMPTY_LIST_MARKER_LINE_RE.exec(line);
-      if (lm && !lmIsParagraphText) listCtx.enterItem(line, listMarkerContentCol(lm[1], line));
-      else if (emptyLm) listCtx.enterItem(line, widthInColumns(emptyLm[1]) + 1);
+      if (lm && !lmIsParagraphText) listCtx.enterItem(line, listMarkerContentCols(lm[1], line));
+      else if (emptyLm) listCtx.enterItem(line, [widthInColumns(emptyLm[1]) + 1]);
       else listCtx.onLine(line);
       if (BLOCKQUOTE_LINE_RE.test(line)) {
         inPara = false;
