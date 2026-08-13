@@ -100,6 +100,36 @@ function listMarkerContentCol(markerPrefix: string, line: string): number {
   return widthInColumns(markerPrefix);
 }
 
+/**
+ * 列表容器栈(第三十三轮 Codex review):嵌套列表 dedent 结束内层项时要
+ * **恢复外层内容列**而不是清零 —— 否则外层项续行上的未闭合围栏被当顶层,
+ * 吞掉列表外的真实泄漏。enterItem 先按行首缩进弹掉已结束的层再入栈;
+ * onLine 只弹层;col 是当前(栈顶)内容列,空栈为 0。tab 歧义沿用
+ * indentDefinitelyBelow 的 fail-open 取向(拿不准不弹)。
+ */
+interface ListContext {
+  readonly col: number;
+  enterItem(line: string, contentCol: number): void;
+  onLine(line: string): void;
+}
+
+function createListContext(): ListContext {
+  const stack: number[] = [];
+  return {
+    get col(): number {
+      return stack.length ? stack[stack.length - 1] : 0;
+    },
+    enterItem(line: string, contentCol: number): void {
+      this.onLine(line);
+      while (stack.length && stack[stack.length - 1] >= contentCol) stack.pop();
+      stack.push(contentCol);
+    },
+    onLine(line: string): void {
+      while (stack.length && indentDefinitelyBelow(line, stack[stack.length - 1])) stack.pop();
+    },
+  };
+}
+
 // 段落状态只由真正的段落文本行建立(第二十四轮 Codex review):ATX 标题、
 // 分隔线是独立块,setext 下划线行收束其上方段落 —— 它们之后的有序围栏没有
 // 段落可打断,是合法开栏。
@@ -168,11 +198,12 @@ function stripFencedBlocks(lines: string[]): string[] {
   // contentIndent 为 0,保持「未闭合吞到段末」的既有语义。
   let fence: { char: string; len: number; maxCloseIndent: number; contentIndent: number } | null =
     null;
-  // 当前列表项的内容列(0 = 不在列表项上下文)。围栏开在列表项的**续行**上时
-  // (- Example: 换行后缩进的 ```xml),开栏前缀只有空白、不含标记 —— 靠这个
-  // 跨行上下文把它绑回列表项,低缩进行仍能隐式闭栏(第十二轮 Codex review)。
-  // 标记行建立上下文;低于内容列的非空行清除;空行不清(列表项内允许空行)。
-  let listContentCol = 0;
+  // 当前列表容器栈(栈顶 col = 内容列,空栈 0)。围栏开在列表项的**续行**上
+  // 时(- Example: 换行后缩进的 ```xml),开栏前缀只有空白、不含标记 —— 靠这
+  // 个跨行上下文把它绑回列表项,低缩进行仍能隐式闭栏(第十二轮 Codex
+  // review)。标记行入栈;低于内容列的非空行弹层(嵌套 dedent 恢复外层而非
+  // 清零,第三十三轮 Codex review);空行不动(列表项内允许空行)。
+  const listCtx = createListContext();
   // 段落状态:CommonMark 只允许起始编号为 1 的有序列表打断段落 —— 紧跟非空
   // 段落行的 `2. ```xml` 是段落延续文本不是围栏,进围栏态会把其后的真实
   // 泄漏吞掉(第二十三轮 Codex review)。
@@ -247,7 +278,7 @@ function stripFencedBlocks(lines: string[]): string[] {
         if (
           isListOpener &&
           inParagraph &&
-          listContentCol === 0 &&
+          listCtx.col === 0 &&
           orderedStart &&
           orderedStart[1] !== '1'
         ) {
@@ -262,14 +293,14 @@ function stripFencedBlocks(lines: string[]): string[] {
         //  - 更深的缩进是缩进代码,不是围栏,落到下方普通行处理。
         const leadWsCols = widthInColumns(/^[ \t]*/.exec(m[1])?.[0] ?? '');
         const openerValid = isListOpener
-          ? leadWsCols <= 3 || (listContentCol > 0 && leadWsCols <= listContentCol + 3)
+          ? leadWsCols <= 3 || (listCtx.col > 0 && leadWsCols <= listCtx.col + 3)
           : prefixCols <= 3 ||
-            (listContentCol > 0 && prefixCols >= listContentCol && prefixCols <= listContentCol + 3);
+            (listCtx.col > 0 && prefixCols >= listCtx.col && prefixCols <= listCtx.col + 3);
         if (openerValid) {
           const contentIndent = isListOpener
             ? prefixCols
-            : listContentCol > 0 && prefixCols >= listContentCol
-            ? listContentCol
+            : listCtx.col > 0 && prefixCols >= listCtx.col
+            ? listCtx.col
             : 0;
           fence = {
             char,
@@ -277,8 +308,8 @@ function stripFencedBlocks(lines: string[]): string[] {
             maxCloseIndent: prefixCols + 3,
             contentIndent,
           };
-          if (isListOpener) listContentCol = prefixCols;
-          else if (contentIndent === 0 && prefixCols < listContentCol) listContentCol = 0;
+          if (isListOpener) listCtx.enterItem(line, prefixCols);
+          else if (contentIndent === 0 && prefixCols < listCtx.col) listCtx.onLine(line);
           inParagraph = false;
           quoteLazy = false;
           continue;
@@ -296,7 +327,7 @@ function stripFencedBlocks(lines: string[]): string[] {
       const lmIsParagraphText =
         lm !== null &&
         inParagraph &&
-        listContentCol === 0 &&
+        listCtx.col === 0 &&
         lmOrdered !== null &&
         lmOrdered[1] !== '1';
       // 空标记行只在段落外算列表项(段落内的 `-` 是 setext 下划线、`2.` 是
@@ -306,11 +337,11 @@ function stripFencedBlocks(lines: string[]): string[] {
           ? null
           : EMPTY_LIST_MARKER_LINE_RE.exec(line);
       if (lm && !lmIsParagraphText) {
-        listContentCol = listMarkerContentCol(lm[1], line);
+        listCtx.enterItem(line, listMarkerContentCol(lm[1], line));
       } else if (emptyLm) {
-        listContentCol = widthInColumns(emptyLm[1]) + 1;
-      } else if (indentDefinitelyBelow(line, listContentCol)) {
-        listContentCol = 0;
+        listCtx.enterItem(line, widthInColumns(emptyLm[1]) + 1);
+      } else {
+        listCtx.onLine(line);
       }
       // 标题/分隔线之后没有敞开的段落;setext 下划线只在紧跟段落时是标题
       // (否则 `====` 本身就是段落文本);原始 HTML 块开启行同样不是段落
@@ -318,7 +349,7 @@ function stripFencedBlocks(lines: string[]): string[] {
       // 容器,不建段落状态(第二十六轮 Codex review)。缩进代码行**不**清
       // 段落:实测缩进代码块后的非 1 有序行仍按段落文本解析,惰性延续行则
       // 本就在段落里 —— 两种形态都维持现状即正确。
-      const hc = htmlBlockCloseForParagraph(line, listContentCol);
+      const hc = htmlBlockCloseForParagraph(line, listCtx.col);
       if (hc) {
         if (hc.close !== 'closed') {
           htmlClose = hc.close;
@@ -364,7 +395,7 @@ function stripIndentedCodeBlocks(text: string): string {
   // 缩进代码的门槛相对列表内容列 +4(第三十二轮 Codex review):内容列 4 的
   // 列表项里,空行后的 4 空格行是项内**正文**不是代码,剥掉会漏判可见泄漏。
   // 行首空白从第 0 列起算,tab 展开无歧义,直接按列宽比较。
-  let listContentCol = 0;
+  const listCtx = createListContext();
   for (const line of text.split('\n')) {
     const blank = /^[ \t]*$/.test(line);
     if (blank) {
@@ -372,7 +403,7 @@ function stripIndentedCodeBlocks(text: string): string {
       prevBlank = true;
       continue; // 空行不改变 inCode:块内空行仍属于块。
     }
-    if (leadingIndentColumns(line) >= listContentCol + 4 && (prevBlank || inCode)) {
+    if (leadingIndentColumns(line) >= listCtx.col + 4 && (prevBlank || inCode)) {
       inCode = true;
       continue;
     }
@@ -381,9 +412,9 @@ function stripIndentedCodeBlocks(text: string): string {
     prevBlank = false;
     const lm = LIST_MARKER_LINE_RE.exec(line);
     const emptyLm = !lm && wasPrevBlank ? EMPTY_LIST_MARKER_LINE_RE.exec(line) : null;
-    if (lm) listContentCol = listMarkerContentCol(lm[1], line);
-    else if (emptyLm) listContentCol = widthInColumns(emptyLm[1]) + 1;
-    else if (indentDefinitelyBelow(line, listContentCol)) listContentCol = 0;
+    if (lm) listCtx.enterItem(line, listMarkerContentCol(lm[1], line));
+    else if (emptyLm) listCtx.enterItem(line, widthInColumns(emptyLm[1]) + 1);
+    else listCtx.onLine(line);
     out.push(line);
   }
   return out.join('\n');
@@ -455,7 +486,7 @@ function stripHtmlBlocks(lines: string[]): string[] {
   // 的未闭合 HTML 块随列表项结束而终止(与围栏状态机同规则,第十五轮 Codex
   // review):低于内容列的非空行按普通行重新处理,块外的真实泄漏不被吞掉。
   let blockIndent = 0;
-  let listContentCol = 0;
+  const listCtx = createListContext();
   // 段落/引用状态(镜像围栏状态机,第三十轮 Codex review:只用「空行之后」
   // 近似会漏掉标题等块边界后无空行的空标记 —— `# 标题\n-\n  <script>` 的
   // 空标记同样建立列表项):空列表标记只在段落外成立(段落内的 `-` 是
@@ -504,16 +535,16 @@ function stripHtmlBlocks(lines: string[]): string[] {
       const prefixCols = widthInColumns(prefix);
       const leadWsCols = widthInColumns(/^[ \t]*/.exec(prefix)?.[0] ?? '');
       const ok = isListOpener
-        ? leadWsCols <= 3 || (listContentCol > 0 && leadWsCols <= listContentCol + 3)
+        ? leadWsCols <= 3 || (listCtx.col > 0 && leadWsCols <= listCtx.col + 3)
         : prefixCols <= 3 ||
-          (listContentCol > 0 && prefixCols >= listContentCol && prefixCols <= listContentCol + 3);
+          (listCtx.col > 0 && prefixCols >= listCtx.col && prefixCols <= listCtx.col + 3);
       if (ok) {
         blockIndent = isListOpener
           ? prefixCols
-          : listContentCol > 0 && !indentDefinitelyBelow(line, listContentCol)
-          ? listContentCol
+          : listCtx.col > 0 && !indentDefinitelyBelow(line, listCtx.col)
+          ? listCtx.col
           : 0;
-        if (isListOpener) listContentCol = prefixCols;
+        if (isListOpener) listCtx.enterItem(line, prefixCols);
         inPara = false;
         quoteLazy = false;
         if (t1) {
@@ -543,16 +574,16 @@ function stripHtmlBlocks(lines: string[]): string[] {
       const prefixCols = widthInColumns(prefix);
       const leadWsCols = widthInColumns(/^[ \t]*/.exec(prefix)?.[0] ?? '');
       const ok = isListOpener
-        ? leadWsCols <= 3 || (listContentCol > 0 && leadWsCols <= listContentCol + 3)
+        ? leadWsCols <= 3 || (listCtx.col > 0 && leadWsCols <= listCtx.col + 3)
         : prefixCols <= 3 ||
-          (listContentCol > 0 && prefixCols >= listContentCol && prefixCols <= listContentCol + 3);
+          (listCtx.col > 0 && prefixCols >= listCtx.col && prefixCols <= listCtx.col + 3);
       if (ok) {
         blockIndent = isListOpener
           ? prefixCols
-          : listContentCol > 0 && !indentDefinitelyBelow(line, listContentCol)
-          ? listContentCol
+          : listCtx.col > 0 && !indentDefinitelyBelow(line, listCtx.col)
+          ? listCtx.col
           : 0;
-        if (isListOpener) listContentCol = prefixCols;
+        if (isListOpener) listCtx.enterItem(line, prefixCols);
         inPara = false;
         quoteLazy = false;
         inComment = true;
@@ -564,11 +595,11 @@ function stripHtmlBlocks(lines: string[]): string[] {
       const lm = isThematicBreak ? null : LIST_MARKER_LINE_RE.exec(line);
       const lmOrdered = lm ? /^ {0,3}(\d{1,9})[.)]/.exec(line) : null;
       const lmIsParagraphText =
-        lm !== null && inPara && listContentCol === 0 && lmOrdered !== null && lmOrdered[1] !== '1';
+        lm !== null && inPara && listCtx.col === 0 && lmOrdered !== null && lmOrdered[1] !== '1';
       const emptyLm = lm !== null || inPara ? null : EMPTY_LIST_MARKER_LINE_RE.exec(line);
-      if (lm && !lmIsParagraphText) listContentCol = listMarkerContentCol(lm[1], line);
-      else if (emptyLm) listContentCol = widthInColumns(emptyLm[1]) + 1;
-      else if (indentDefinitelyBelow(line, listContentCol)) listContentCol = 0;
+      if (lm && !lmIsParagraphText) listCtx.enterItem(line, listMarkerContentCol(lm[1], line));
+      else if (emptyLm) listCtx.enterItem(line, widthInColumns(emptyLm[1]) + 1);
+      else listCtx.onLine(line);
       if (BLOCKQUOTE_LINE_RE.test(line)) {
         inPara = false;
         quoteLazy = true;
@@ -601,7 +632,7 @@ function stripBlockStructures(text: string, depth = 0): string {
   let quoteRun: string[] | null = null;
   // 引用行的前导空白按列宽校验(≤3 列,或列表续行区间上限 内容列+3):
   // 深于该区间的 > 行是缩进代码不是引用。
-  let listContentCol = 0;
+  const listCtx = createListContext();
   const flushQuote = (): void => {
     if (!quoteRun) return;
     const inner = quoteRun.map((l) => l.replace(BLOCKQUOTE_MARKER_RE, '')).join('\n');
@@ -610,16 +641,15 @@ function stripBlockStructures(text: string, depth = 0): string {
   };
   for (const line of afterFences) {
     const leadWsCols = leadingIndentColumns(line);
-    const quoteIndentOk =
-      leadWsCols <= 3 || (listContentCol > 0 && leadWsCols <= listContentCol + 3);
+    const quoteIndentOk = leadWsCols <= 3 || (listCtx.col > 0 && leadWsCols <= listCtx.col + 3);
     if (quoteIndentOk && BLOCKQUOTE_LINE_RE.test(line)) {
       (quoteRun ??= []).push(line);
     } else {
       flushQuote();
       if (!/^[ \t]*$/.test(line)) {
         const lm = LIST_MARKER_LINE_RE.exec(line);
-        if (lm) listContentCol = listMarkerContentCol(lm[1], line);
-        else if (indentDefinitelyBelow(line, listContentCol)) listContentCol = 0;
+        if (lm) listCtx.enterItem(line, listMarkerContentCol(lm[1], line));
+        else listCtx.onLine(line);
       }
       out.push(line);
     }

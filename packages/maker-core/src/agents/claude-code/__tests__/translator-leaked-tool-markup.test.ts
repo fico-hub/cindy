@@ -744,6 +744,26 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     });
   });
 
+  it('still hits when a leak dedents out of an outer-item fence after a nested list', () => {
+    // 嵌套列表 dedent 结束内层项时恢复**外层**内容列而非清零(第三十三轮
+    // Codex review):外层项续行上的未闭合围栏绑定外层项,dedent 到顶层的
+    // 真实泄漏不被吞到输入末尾。
+    expect(
+      detectLeakedToolCallMarkup(
+        `- outer\n  - inner\n\n  outer continuation\n  \`\`\`xml\n  content\n${CLASS_B_LEAK}`,
+      ),
+    ).toEqual({ category: 'invoke-with-parameter' });
+  });
+
+  it('does not hit when the markers stay inside an outer-item fence after a nested list', () => {
+    // 对照组:外层项续行上正常闭合的围栏照常剥离。
+    expect(
+      detectLeakedToolCallMarkup(
+        `- outer\n  - inner\n\n  \`\`\`xml\n  invoke name="Bash">\n  <parameter name="command">ls</parameter>\n  \`\`\`\n完。`,
+      ),
+    ).toBeNull();
+  });
+
   it('does not treat a mixed-character line as a closing fence', () => {
     // CommonMark 闭栏必须与开栏同字符:``` 栏内出现 ```~~~ 行不是闭栏,块内
     // 后续的标记示例仍在围栏里,不命中。
