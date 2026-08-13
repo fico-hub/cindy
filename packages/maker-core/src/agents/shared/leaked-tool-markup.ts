@@ -875,7 +875,10 @@ export interface LeakedToolMarkupHit {
  * 端 skipHtml 一致。在块结构剥离之后应用:围栏内的 `<!--` 是代码内容,已随
  * 围栏剥掉,不会在这里误配对。
  */
-const HTML_COMMENT_RE = /<!--[\s\S]*?-->/g;
+// `<` 未被反斜杠转义才是注释开启符(第三十九轮 Codex review):`\<!--` 是
+// 可见文本(micromark 实测渲染为 `&lt;!--`),不能把它到 `-->` 之间的真实
+// 泄漏当注释吞掉。转义排除与标记正则同为单层 lookbehind 近似。
+const HTML_COMMENT_RE = /(?<!\\)<!--[\s\S]*?-->/g;
 
 /**
  * `<` 的数字字符引用(十进制 &#60; / 十六进制 &#x3c;,允许前导零与大小写)。

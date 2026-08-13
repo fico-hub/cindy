@@ -846,6 +846,14 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toBeNull();
   });
 
+  it('still hits when a leak sits after an escaped comment opener', () => {
+    // `\\<!--` 是反斜杠转义的可见文本不是注释开启符(第三十九轮 Codex
+    // review):它到后文 `-->` 之间的真实泄漏不能被当注释吞掉。
+    expect(
+      detectLeakedToolCallMarkup(`提示 \\<!-- 演示开始\n${CLASS_B_LEAK}演示结束 -->`),
+    ).toEqual({ category: 'invoke-with-parameter' });
+  });
+
   it('does not treat a mixed-character line as a closing fence', () => {
     // CommonMark 闭栏必须与开栏同字符:``` 栏内出现 ```~~~ 行不是闭栏,块内
     // 后续的标记示例仍在围栏里,不命中。
