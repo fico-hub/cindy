@@ -815,6 +815,17 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toBeNull();
   });
 
+  it('still hits when a stale empty-item context would swallow indented backticks', () => {
+    // 围栏状态机同样在空项后的空行弹层(第三十七轮 Codex review):空行关闭
+    // 空项后,4 空格反引号行是顶层缩进代码、2 空格标记行是可见正文 ——
+    // 过期的列 2 上下文不能把反引号行当项内围栏吞掉后续泄漏。
+    expect(
+      detectLeakedToolCallMarkup(
+        `-\n\n    \`\`\`xml\n  invoke name="Bash">\n  <parameter name="command">ls</parameter>`,
+      ),
+    ).toEqual({ category: 'invoke-with-parameter' });
+  });
+
   it('does not treat a mixed-character line as a closing fence', () => {
     // CommonMark 闭栏必须与开栏同字符:``` 栏内出现 ```~~~ 行不是闭栏,块内
     // 后续的标记示例仍在围栏里,不命中。

@@ -302,7 +302,14 @@ function stripFencedBlocks(lines: string[]): string[] {
   // 一致)其后的非 1 起始有序围栏会结束引用并合法开栏 —— 引用段落不算「可被
   // 打断的段落」,惰性延续的普通行同样不建段落状态(第二十六轮 Codex review)。
   let quoteLazy = false;
+  // 空列表项之后紧跟空行即关闭该项(CommonMark:list item can begin with at
+  // most one blank line,与 createBlockContext 同规则,第三十七轮 Codex
+  // review)—— 不弹层的话,过期的空项上下文会把其后顶层缩进代码里的反引号
+  // 行当成项内围栏,吞掉后续可见泄漏。
+  let pendingEmptyItem = false;
   for (const line of lines) {
+    const hadPendingEmptyItem = pendingEmptyItem;
+    pendingEmptyItem = false;
     if (fence) {
       const c = FENCE_CLOSE_RE.exec(line);
       if (
@@ -423,6 +430,7 @@ function stripFencedBlocks(lines: string[]): string[] {
         listCtx.enterItem(line, listMarkerContentCols(lm[1], line));
       } else if (emptyLm) {
         listCtx.enterItem(line, [widthInColumns(emptyLm[1]) + 1]);
+        pendingEmptyItem = true;
       } else {
         listCtx.onLine(line);
       }
@@ -456,6 +464,7 @@ function stripFencedBlocks(lines: string[]): string[] {
         inParagraph = true;
       }
     } else {
+      if (hadPendingEmptyItem) listCtx.dropTop();
       inParagraph = false;
       quoteLazy = false;
     }
@@ -573,8 +582,12 @@ function stripHtmlBlocks(lines: string[]): string[] {
   // 段落。
   let inPara = false;
   let quoteLazy = false;
+  // 空项后空行弹层,与围栏状态机同规则(第三十七轮 Codex review)。
+  let pendingEmptyItem = false;
   for (const line of lines) {
     const blank = /^[ \t]*$/.test(line);
+    const hadPendingEmptyItem = pendingEmptyItem;
+    pendingEmptyItem = false;
     if (inComment) {
       if (blockIndent > 0 && !blank && indentDefinitelyBelow(line, blockIndent)) {
         inComment = false; // 注释随列表项终止,该行按普通行重新处理。
@@ -677,8 +690,10 @@ function stripHtmlBlocks(lines: string[]): string[] {
         lm !== null && inPara && listCtx.col === 0 && lmOrdered !== null && lmOrdered[1] !== '1';
       const emptyLm = lm !== null || inPara ? null : EMPTY_LIST_MARKER_LINE_RE.exec(line);
       if (lm && !lmIsParagraphText) listCtx.enterItem(line, listMarkerContentCols(lm[1], line));
-      else if (emptyLm) listCtx.enterItem(line, [widthInColumns(emptyLm[1]) + 1]);
-      else listCtx.onLine(line);
+      else if (emptyLm) {
+        listCtx.enterItem(line, [widthInColumns(emptyLm[1]) + 1]);
+        pendingEmptyItem = true;
+      } else listCtx.onLine(line);
       if (BLOCKQUOTE_LINE_RE.test(line)) {
         inPara = false;
         quoteLazy = true;
@@ -695,6 +710,7 @@ function stripHtmlBlocks(lines: string[]): string[] {
         inPara = true;
       }
     } else {
+      if (hadPendingEmptyItem) listCtx.dropTop();
       inPara = false;
       quoteLazy = false;
     }
