@@ -898,6 +898,16 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toBeNull();
   });
 
+  it('does not hit when a span ends with a backslash before the closing backtick', () => {
+    // code span 内容里反斜杠不转义(第四十三轮 Codex review):`code \\` 的
+    // 尾随反引号照常闭合,span 里的标记示例正常剥离不误报。
+    expect(
+      detectLeakedToolCallMarkup(
+        '标记语法是 `invoke name="Bash"> <parameter name="command">ls</parameter> \\` 这样的形状。',
+      ),
+    ).toBeNull();
+  });
+
   it('does not treat a mixed-character line as a closing fence', () => {
     // CommonMark 闭栏必须与开栏同字符:``` 栏内出现 ```~~~ 行不是闭栏,块内
     // 后续的标记示例仍在围栏里,不命中。

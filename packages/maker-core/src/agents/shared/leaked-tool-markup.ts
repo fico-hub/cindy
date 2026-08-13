@@ -881,11 +881,13 @@ function stripBlockStructures(text: string, depth = 0): string {
  */
 function stripInlineCodeSpansInParagraph(segment: string): string {
   if (!segment.includes('`')) return segment;
-  // 反斜杠转义的反引号是字面量不是分隔符(第四十一轮 Codex review):
-  // \` 渲染为普通文本,不能与后文的转义反引号配对成 span 把中间可见泄漏
+  // 反斜杠转义的反引号是字面量,不作**开启**分隔符(第四十一轮 Codex
+  // review):\` 渲染为普通文本,不能与后文反引号配对成 span 把中间可见泄漏
   // 吞掉。转义只吞运行的首个反引号,剩余仍可作(更短的)分隔符;单层
-  // lookbehind 近似与其余正则一致。
-  const nextRun = (from: number): { start: number; end: number } | null => {
+  // lookbehind 近似与其余正则一致。闭合端**不**看转义(第四十三轮 Codex
+  // review):CommonMark 的 code span 内容里反斜杠不转义,`code \` 的尾随
+  // 反引号照常闭合。
+  const nextOpenRun = (from: number): { start: number; end: number } | null => {
     let probe = from;
     while (probe < segment.length) {
       const t = segment.indexOf('`', probe);
@@ -904,10 +906,17 @@ function stripInlineCodeSpansInParagraph(segment: string): string {
     }
     return null;
   };
+  const nextRawRun = (from: number): { start: number; end: number } | null => {
+    const t = segment.indexOf('`', from);
+    if (t === -1) return null;
+    let e = t;
+    while (e < segment.length && segment[e] === '`') e += 1;
+    return { start: t, end: e };
+  };
   let out = '';
   let cursor = 0;
   while (cursor < segment.length) {
-    const open = nextRun(cursor);
+    const open = nextOpenRun(cursor);
     if (!open) {
       out += segment.slice(cursor);
       break;
@@ -917,7 +926,7 @@ function stripInlineCodeSpansInParagraph(segment: string): string {
     let close: { start: number; end: number } | null = null;
     let probe = open.end;
     while (true) {
-      const r = nextRun(probe);
+      const r = nextRawRun(probe);
       if (r === null) break;
       if (r.end - r.start === runLength) {
         close = r;
