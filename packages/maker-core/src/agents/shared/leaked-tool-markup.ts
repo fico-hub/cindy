@@ -87,6 +87,19 @@ const LIST_MARKER_LINE_RE = /^( {0,3}(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})+)/;
 // 段落状态先行排除。
 const EMPTY_LIST_MARKER_LINE_RE = /^( {0,3}(?:[-*+]|\d{1,9}[.)]))[ \t]*$/;
 
+/**
+ * 列表标记行的内容列。标记后空白 ≥5 列时只有 1 列算 padding(CommonMark:
+ * 内容缩进超过 4 的项按「标记 + 1 空格」定内容列,余下缩进是项内缩进代码,
+ * 第三十二轮 Codex review)—— 标记正则只吞 1-4 列空白,后面还跟着空白即是
+ * 这种形态;否则内容列就是标记前缀的列宽。
+ */
+function listMarkerContentCol(markerPrefix: string, line: string): number {
+  if (/[ \t]/.test(line.charAt(markerPrefix.length))) {
+    return widthInColumns(markerPrefix.replace(/[ \t]+$/, '')) + 1;
+  }
+  return widthInColumns(markerPrefix);
+}
+
 // 段落状态只由真正的段落文本行建立(第二十四轮 Codex review):ATX 标题、
 // 分隔线是独立块,setext 下划线行收束其上方段落 —— 它们之后的有序围栏没有
 // 段落可打断,是合法开栏。
@@ -293,7 +306,7 @@ function stripFencedBlocks(lines: string[]): string[] {
           ? null
           : EMPTY_LIST_MARKER_LINE_RE.exec(line);
       if (lm && !lmIsParagraphText) {
-        listContentCol = widthInColumns(lm[1]);
+        listContentCol = listMarkerContentCol(lm[1], line);
       } else if (emptyLm) {
         listContentCol = widthInColumns(emptyLm[1]) + 1;
       } else if (indentDefinitelyBelow(line, listContentCol)) {
@@ -348,6 +361,10 @@ function stripIndentedCodeBlocks(text: string): string {
   const out: string[] = [];
   let prevBlank = true; // 文首视同空行:开头的缩进行就是代码块。
   let inCode = false;
+  // 缩进代码的门槛相对列表内容列 +4(第三十二轮 Codex review):内容列 4 的
+  // 列表项里,空行后的 4 空格行是项内**正文**不是代码,剥掉会漏判可见泄漏。
+  // 行首空白从第 0 列起算,tab 展开无歧义,直接按列宽比较。
+  let listContentCol = 0;
   for (const line of text.split('\n')) {
     const blank = /^[ \t]*$/.test(line);
     if (blank) {
@@ -355,12 +372,18 @@ function stripIndentedCodeBlocks(text: string): string {
       prevBlank = true;
       continue; // 空行不改变 inCode:块内空行仍属于块。
     }
-    if (/^(?: {4}|\t)/.test(line) && (prevBlank || inCode)) {
+    if (leadingIndentColumns(line) >= listContentCol + 4 && (prevBlank || inCode)) {
       inCode = true;
       continue;
     }
     inCode = false;
+    const wasPrevBlank = prevBlank;
     prevBlank = false;
+    const lm = LIST_MARKER_LINE_RE.exec(line);
+    const emptyLm = !lm && wasPrevBlank ? EMPTY_LIST_MARKER_LINE_RE.exec(line) : null;
+    if (lm) listContentCol = listMarkerContentCol(lm[1], line);
+    else if (emptyLm) listContentCol = widthInColumns(emptyLm[1]) + 1;
+    else if (indentDefinitelyBelow(line, listContentCol)) listContentCol = 0;
     out.push(line);
   }
   return out.join('\n');
@@ -543,7 +566,7 @@ function stripHtmlBlocks(lines: string[]): string[] {
       const lmIsParagraphText =
         lm !== null && inPara && listContentCol === 0 && lmOrdered !== null && lmOrdered[1] !== '1';
       const emptyLm = lm !== null || inPara ? null : EMPTY_LIST_MARKER_LINE_RE.exec(line);
-      if (lm && !lmIsParagraphText) listContentCol = widthInColumns(lm[1]);
+      if (lm && !lmIsParagraphText) listContentCol = listMarkerContentCol(lm[1], line);
       else if (emptyLm) listContentCol = widthInColumns(emptyLm[1]) + 1;
       else if (indentDefinitelyBelow(line, listContentCol)) listContentCol = 0;
       if (BLOCKQUOTE_LINE_RE.test(line)) {
@@ -595,7 +618,7 @@ function stripBlockStructures(text: string, depth = 0): string {
       flushQuote();
       if (!/^[ \t]*$/.test(line)) {
         const lm = LIST_MARKER_LINE_RE.exec(line);
-        if (lm) listContentCol = widthInColumns(lm[1]);
+        if (lm) listContentCol = listMarkerContentCol(lm[1], line);
         else if (indentDefinitelyBelow(line, listContentCol)) listContentCol = 0;
       }
       out.push(line);

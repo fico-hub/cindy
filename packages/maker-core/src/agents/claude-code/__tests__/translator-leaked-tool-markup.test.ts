@@ -726,6 +726,24 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toBeNull();
   });
 
+  it('still hits when the markers are list-item content at the list content column', () => {
+    // 缩进代码门槛相对列表内容列 +4(第三十二轮 Codex review):内容列 4 的
+    // 项内空行后的 4 空格行是可见正文不是代码,必须判。
+    expect(
+      detectLeakedToolCallMarkup(
+        `-   Work:\n\n    invoke name="Bash">\n    <parameter name="command">ls</parameter>`,
+      ),
+    ).toEqual({ category: 'invoke-with-parameter' });
+  });
+
+  it('still hits when a fence in a five-space-padded item releases a dedented leak', () => {
+    // `-     Example` 的内容列是 2(标记 + 1 空格,余下是项内缩进):其下
+    // 2 空格未闭合围栏绑定列表项,dedent 的真实泄漏不被吞到输入末尾。
+    expect(detectLeakedToolCallMarkup(`-     Example\n  \`\`\`\n${CLASS_B_LEAK}`)).toEqual({
+      category: 'invoke-with-parameter',
+    });
+  });
+
   it('does not treat a mixed-character line as a closing fence', () => {
     // CommonMark 闭栏必须与开栏同字符:``` 栏内出现 ```~~~ 行不是闭栏,块内
     // 后续的标记示例仍在围栏里,不命中。
