@@ -854,6 +854,24 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toEqual({ category: 'invoke-with-parameter' });
   });
 
+  it('still hits when a leak dedents out of a tab-padded item fence', () => {
+    // 标记 padding 按展开列宽计(第四十轮 Codex review):\`-\\t\\t\` 两个字符
+    // 展开后是 7 列 > 4,内容列是 2 而非 8 —— 其下 2 空格未闭合围栏绑定该
+    // 列表项,顶层 dedent 的真实泄漏不被吞到输入末尾。
+    expect(detectLeakedToolCallMarkup(`-\t\tExample\n  \`\`\`\n${CLASS_B_LEAK}`)).toEqual({
+      category: 'invoke-with-parameter',
+    });
+  });
+
+  it('does not hit when a single-tab item keeps its indented fence content', () => {
+    // 对照组:单 tab padding 是 3 列 ≤4,内容列 4,项内围栏照常剥离。
+    expect(
+      detectLeakedToolCallMarkup(
+        `-\tExample:\n    \`\`\`xml\n    invoke name="Bash">\n    <parameter name="command">ls</parameter>\n    \`\`\`\n完。`,
+      ),
+    ).toBeNull();
+  });
+
   it('does not treat a mixed-character line as a closing fence', () => {
     // CommonMark 闭栏必须与开栏同字符:``` 栏内出现 ```~~~ 行不是闭栏,块内
     // 后续的标记示例仍在围栏里,不命中。

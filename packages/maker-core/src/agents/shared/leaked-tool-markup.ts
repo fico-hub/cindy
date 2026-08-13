@@ -116,13 +116,21 @@ function blockBoundaryFor(line: string): string {
  */
 function listMarkerContentCols(markerPrefix: string, line: string): number[] {
   const cols: number[] = [];
-  const markerRe = /(?:[-*+]|\d{1,9}[.)])[ \t]{1,4}/y;
+  const markerRe = /([-*+]|\d{1,9}[.)])([ \t]{1,4})/y;
   markerRe.lastIndex = (/^ {0,3}/.exec(markerPrefix)?.[0] ?? '').length;
-  while (markerRe.exec(markerPrefix) !== null) {
-    cols.push(widthInColumns(markerPrefix.slice(0, markerRe.lastIndex)));
-  }
-  if (cols.length > 0 && /[ \t]/.test(line.charAt(markerPrefix.length))) {
-    cols[cols.length - 1] = widthInColumns(markerPrefix.replace(/[ \t]+$/, '')) + 1;
+  let m: RegExpExecArray | null;
+  while ((m = markerRe.exec(markerPrefix)) !== null) {
+    // padding 按**展开列宽**计(第四十轮 Codex review):正则按字符吞 1-4 个
+    // 空白,`-\t\t` 两个字符展开后是 7 列 —— 超过 4 列时只有 1 列算 padding,
+    // 内容列 = 标记末列 + 1;最后一段之后还跟着空白(≥5 个字符)同理。
+    const markerEndCol = widthInColumns(
+      markerPrefix.slice(0, markerRe.lastIndex - (m[2]?.length ?? 0)),
+    );
+    const wsEndCol = widthInColumns(markerPrefix.slice(0, markerRe.lastIndex));
+    const isLast = markerRe.lastIndex === markerPrefix.length;
+    const paddingOverflows =
+      wsEndCol - markerEndCol > 4 || (isLast && /[ \t]/.test(line.charAt(markerPrefix.length)));
+    cols.push(paddingOverflows ? markerEndCol + 1 : wsEndCol);
   }
   return cols;
 }
