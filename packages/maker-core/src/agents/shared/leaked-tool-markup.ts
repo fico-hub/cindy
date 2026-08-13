@@ -639,17 +639,28 @@ function stripBlockStructures(text: string, depth = 0): string {
     out.push(depth < 8 ? stripBlockStructures(inner, depth + 1) : inner);
     quoteRun = null;
   };
+  // prevBlank 近似「不在段落内」(与缩进代码状态机同取向,第三十四轮 Codex
+  // review):空行/文首之后的空标记行(`-` 单独成行)建立列表上下文,其内容
+  // 列 +3 的引用行(如 `-\n    > ```xml`)才能正确归入引用分组;段落内的
+  // 单独 `-` 是 setext 下划线,不建上下文。
+  let prevBlank = true;
   for (const line of afterFences) {
     const leadWsCols = leadingIndentColumns(line);
     const quoteIndentOk = leadWsCols <= 3 || (listCtx.col > 0 && leadWsCols <= listCtx.col + 3);
     if (quoteIndentOk && BLOCKQUOTE_LINE_RE.test(line)) {
       (quoteRun ??= []).push(line);
+      prevBlank = false;
     } else {
       flushQuote();
       if (!/^[ \t]*$/.test(line)) {
         const lm = LIST_MARKER_LINE_RE.exec(line);
+        const emptyLm = !lm && prevBlank ? EMPTY_LIST_MARKER_LINE_RE.exec(line) : null;
         if (lm) listCtx.enterItem(line, listMarkerContentCol(lm[1], line));
+        else if (emptyLm) listCtx.enterItem(line, widthInColumns(emptyLm[1]) + 1);
         else listCtx.onLine(line);
+        prevBlank = false;
+      } else {
+        prevBlank = true;
       }
       out.push(line);
     }

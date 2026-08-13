@@ -764,6 +764,16 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toBeNull();
   });
 
+  it('does not hit when a quoted fence example sits inside an empty-marker item', () => {
+    // 引用分组的列表上下文同样识别空标记行(第三十四轮 Codex review):
+    // `-` 项内 4 空格缩进的 > 行归入引用分组,引用里的围栏示例正常剥离。
+    expect(
+      detectLeakedToolCallMarkup(
+        `-\n    > \`\`\`xml\n    > invoke name="Bash">\n    > <parameter name="command">ls</parameter>\n    > \`\`\`\n完。`,
+      ),
+    ).toBeNull();
+  });
+
   it('does not treat a mixed-character line as a closing fence', () => {
     // CommonMark 闭栏必须与开栏同字符:``` 栏内出现 ```~~~ 行不是闭栏,块内
     // 后续的标记示例仍在围栏里,不命中。
