@@ -826,6 +826,26 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toEqual({ category: 'invoke-with-parameter' });
   });
 
+  it('still hits when a stripped fence separated a paragraph from an empty item', () => {
+    // 剥离块留边界哨兵(第三十八轮 Codex review):围栏剥掉后 `intro\n-` 不能
+    // 被重新拼成 setext —— `-` 仍是空列表项,项内 <script> 随 dedent 终止,
+    // 顶层的真实泄漏可见必须判。
+    expect(
+      detectLeakedToolCallMarkup(
+        `intro\n\`\`\`text\nexample\n\`\`\`\n-\n  <script>\ninvoke name="Bash">\n<parameter name="command">ls</parameter>`,
+      ),
+    ).toEqual({ category: 'invoke-with-parameter' });
+  });
+
+  it('does not hit when an item HTML block after a stripped fence keeps its content', () => {
+    // 对照组:同结构下块内(同缩进)的标记仍随块剥离。
+    expect(
+      detectLeakedToolCallMarkup(
+        `intro\n\`\`\`text\nexample\n\`\`\`\n-\n  <script>\n  invoke name="Bash">\n  <parameter name="command">ls</parameter>`,
+      ),
+    ).toBeNull();
+  });
+
   it('does not treat a mixed-character line as a closing fence', () => {
     // CommonMark 闭栏必须与开栏同字符:``` 栏内出现 ```~~~ 行不是闭栏,块内
     // 后续的标记示例仍在围栏里,不命中。

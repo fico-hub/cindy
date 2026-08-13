@@ -88,6 +88,25 @@ const LIST_MARKER_LINE_RE = /^( {0,3}(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})+)/;
 const EMPTY_LIST_MARKER_LINE_RE = /^( {0,3}(?:[-*+]|\d{1,9}[.)]))[ \t]*$/;
 
 /**
+ * 被剥离块的边界哨兵行(第三十八轮 Codex review):整块无占位地删除会让
+ * 相邻块重新拼接 —— `intro\n围栏\n-` 剥掉围栏后变成 `intro\n-`,下游
+ * 状态机把 `-` 误读成 setext 下划线,原本的空列表项与其中块的容器边界全部
+ * 丢失。剥离时留下「原行首缩进 + \u0000」的哨兵行:各状态机把它当块边界
+ * (收段落、不建段落、按缩进参与容器弹层),检测前统一转为空行(被剥块同时
+ * 成为段落屏障,行内 code span / 注释配对不跨越被剥块)。正文里行尾 \u0000
+ * 实际不出现;极端撞上也只是多切一个段落,方向无害。
+ */
+const STRIPPED_BLOCK_BOUNDARY = '\u0000';
+
+function isBlockBoundaryLine(line: string): boolean {
+  return line.endsWith(STRIPPED_BLOCK_BOUNDARY);
+}
+
+function blockBoundaryFor(line: string): string {
+  return (/^[ \t]*/.exec(line)?.[0] ?? '') + STRIPPED_BLOCK_BOUNDARY;
+}
+
+/**
  * 列表标记行前缀里**每一层**标记的内容列(外层在前)。叠加标记行
  * (`- - inner`)的每个标记都开启一层容器,只记录最内层会让外层项的续行
  * 把整个栈弹空(第三十六轮 Codex review)。最后一层应用「标记后空白 ≥5 列
@@ -174,6 +193,14 @@ function createBlockContext(): BlockContext {
     observe(line: string): void {
       if (/^[ \t]*$/.test(line)) {
         if (pendingEmptyItem) listCtx.dropTop();
+        pendingEmptyItem = false;
+        inPara = false;
+        quoteLazy = false;
+        return;
+      }
+      if (isBlockBoundaryLine(line)) {
+        // 被剥块的边界:收段落、按缩进弹层;空标记项后紧跟块即非空项。
+        listCtx.onLine(line);
         pendingEmptyItem = false;
         inPara = false;
         quoteLazy = false;
@@ -402,6 +429,7 @@ function stripFencedBlocks(lines: string[]): string[] {
           else if (contentIndent === 0 && prefixCols < listCtx.col) listCtx.onLine(line);
           inParagraph = false;
           quoteLazy = false;
+          out.push(blockBoundaryFor(line)); // 留块边界哨兵(第三十八轮)。
           continue;
         }
       }
@@ -494,10 +522,17 @@ function stripIndentedCodeBlocks(text: string): string {
       ctx.observe(line);
       continue; // 空行不改变 inCode:块内空行仍属于块。
     }
+    if (isBlockBoundaryLine(line)) {
+      inCode = false;
+      ctx.observe(line);
+      out.push(line);
+      continue;
+    }
     // 代码门槛:敞开的段落里缩进行是惰性延续;段落外(空行后、标题等块边界
     // 后)即代码 —— prevBlank 近似会把标题后的缩进代码当正文(第三十五轮
     // review)。代码行不推进状态(与既往剥离行为一致)。
     if (leadingIndentColumns(line) >= ctx.col + 4 && (inCode || !ctx.inParagraph)) {
+      if (!inCode) out.push(blockBoundaryFor(line)); // 留块边界哨兵(第三十八轮)。
       inCode = true;
       continue;
     }
@@ -614,6 +649,14 @@ function stripHtmlBlocks(lines: string[]): string[] {
         continue;
       }
     }
+    if (isBlockBoundaryLine(line)) {
+      // 上游剥离留下的块边界:收段落、按缩进弹层后原样传递。
+      listCtx.onLine(line);
+      inPara = false;
+      quoteLazy = false;
+      out.push(line);
+      continue;
+    }
     // 开栏缩进合法性与围栏同规则:标记开栏的前导空白 ≤3 列或(嵌套)
     // ≤ 内容列 + 3;纯空白开栏 ≤3 列或落在列表续行区间 [内容列, 内容列+3];
     // 更深的缩进是缩进代码,不是 HTML 块。
@@ -639,6 +682,7 @@ function stripHtmlBlocks(lines: string[]): string[] {
         if (isListOpener) listCtx.enterItem(line, listMarkerContentCols(prefix, line));
         inPara = false;
         quoteLazy = false;
+        out.push(blockBoundaryFor(line)); // 留块边界哨兵(第三十八轮)。
         if (t1) {
           const close = new RegExp(`</${t1[2]}>`, 'i');
           if (!close.test(line)) closeTag = close;
@@ -678,6 +722,7 @@ function stripHtmlBlocks(lines: string[]): string[] {
         if (isListOpener) listCtx.enterItem(line, listMarkerContentCols(prefix, line));
         inPara = false;
         quoteLazy = false;
+        out.push(blockBoundaryFor(line)); // 留块边界哨兵(第三十八轮)。
         inComment = true;
         continue;
       }
@@ -850,6 +895,11 @@ export function detectLeakedToolCallMarkup(rawText: string): LeakedToolMarkupHit
   // 组成注释(第二十三轮 Codex review);跨空行的块级注释由 stripHtmlBlocks
   // 的行首形态处理。
   const text = stripBlockStructures(rawText)
+    // 块边界哨兵转空行:被剥块处成为段落屏障(行内 code span / 注释配对不
+    // 跨越被剥块)。
+    .split('\n')
+    .map((l) => (isBlockBoundaryLine(l) ? '' : l))
+    .join('\n')
     .split(/\n[ \t]*\n/)
     .map((para) => stripInlineCodeSpansInParagraph(para).replace(HTML_COMMENT_RE, ''))
     .join('\n\n')
