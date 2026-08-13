@@ -774,6 +774,27 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toBeNull();
   });
 
+  it('does not hit when a quoted fence sits in an empty-marker item after a heading', () => {
+    // 引用分组的段落跟踪不再用「空行之后」近似(第三十五轮 review):标题后
+    // 无空行的 `-` 照常建立空列表项,项内 4 空格缩进的引用围栏归入引用分组。
+    expect(
+      detectLeakedToolCallMarkup(
+        `# 标题\n-\n    > \`\`\`xml\n    > invoke name="Bash">\n    > <parameter name="command">ls</parameter>\n    > \`\`\`\n完。`,
+      ),
+    ).toBeNull();
+  });
+
+  it('does not hit when indented code follows an empty item closed by a blank line', () => {
+    // CommonMark:空列表项之后紧跟空行即关闭(list item can begin with at
+    // most one blank line),其后 4 空格行是**顶层缩进代码**(渲染为可见
+    // 代码块的示例),不判 —— micromark 实测 `# H\n-\n\n    …` 即此形态。
+    expect(
+      detectLeakedToolCallMarkup(
+        `# H\n-\n\n    invoke name="Bash">\n    <parameter name="command">ls</parameter>`,
+      ),
+    ).toBeNull();
+  });
+
   it('does not treat a mixed-character line as a closing fence', () => {
     // CommonMark 闭栏必须与开栏同字符:``` 栏内出现 ```~~~ 行不是闭栏,块内
     // 后续的标记示例仍在围栏里,不命中。

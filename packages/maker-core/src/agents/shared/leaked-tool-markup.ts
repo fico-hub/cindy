@@ -111,6 +111,7 @@ interface ListContext {
   readonly col: number;
   enterItem(line: string, contentCol: number): void;
   onLine(line: string): void;
+  dropTop(): void;
 }
 
 function createListContext(): ListContext {
@@ -126,6 +127,78 @@ function createListContext(): ListContext {
     },
     onLine(line: string): void {
       while (stack.length && indentDefinitelyBelow(line, stack[stack.length - 1])) stack.pop();
+    },
+    dropTop(): void {
+      stack.pop();
+    },
+  };
+}
+
+/**
+ * 段落/引用/列表状态跟踪器:围栏与 HTML 状态机尾部的段落规则抽出共用
+ * (第三十五轮 review:引用分组与缩进代码两处的 prevBlank 近似在「标题后
+ * 无空行」的形态上失真 —— 标题等块边界之后没有敞开的段落,空列表项照常
+ * 成立)。observe(line) 按行推进状态并维护列表容器栈;inParagraph 为当前
+ * 是否有敞开的段落(引用惰性区不算)。空列表项之后紧跟空行时弹掉该层
+ * (CommonMark:list item can begin with at most one blank line —— `-` 后
+ * 的空行关闭空项,其后 4 空格行是顶层缩进代码,micromark 实测同)。
+ */
+interface BlockContext {
+  readonly col: number;
+  readonly inParagraph: boolean;
+  observe(line: string): void;
+}
+
+function createBlockContext(): BlockContext {
+  const listCtx = createListContext();
+  let inPara = false;
+  let quoteLazy = false;
+  let pendingEmptyItem = false;
+  return {
+    get col(): number {
+      return listCtx.col;
+    },
+    get inParagraph(): boolean {
+      return inPara;
+    },
+    observe(line: string): void {
+      if (/^[ \t]*$/.test(line)) {
+        if (pendingEmptyItem) listCtx.dropTop();
+        pendingEmptyItem = false;
+        inPara = false;
+        quoteLazy = false;
+        return;
+      }
+      const isThematicBreak = THEMATIC_BREAK_RE.test(line);
+      const lm = isThematicBreak ? null : LIST_MARKER_LINE_RE.exec(line);
+      const lmOrdered = lm ? /^ {0,3}(\d{1,9})[.)]/.exec(line) : null;
+      const lmIsParagraphText =
+        lm !== null &&
+        inPara &&
+        listCtx.col === 0 &&
+        lmOrdered !== null &&
+        lmOrdered[1] !== '1';
+      const emptyLm =
+        isThematicBreak || lm !== null || inPara ? null : EMPTY_LIST_MARKER_LINE_RE.exec(line);
+      if (lm && !lmIsParagraphText) listCtx.enterItem(line, listMarkerContentCol(lm[1], line));
+      else if (emptyLm) listCtx.enterItem(line, widthInColumns(emptyLm[1]) + 1);
+      else listCtx.onLine(line);
+      pendingEmptyItem = emptyLm !== null;
+      if (BLOCKQUOTE_LINE_RE.test(line)) {
+        inPara = false;
+        quoteLazy = true;
+      } else if (
+        isThematicBreak ||
+        (lm !== null && !lmIsParagraphText) ||
+        emptyLm !== null ||
+        ATX_HEADING_RE.test(line) ||
+        (inPara && SETEXT_UNDERLINE_RE.test(line))
+      ) {
+        inPara = false;
+        quoteLazy = false;
+      } else if (!quoteLazy) {
+        inPara = true;
+      }
     },
   };
 }
@@ -390,31 +463,27 @@ function stripFencedBlocks(lines: string[]): string[] {
 function stripIndentedCodeBlocks(text: string): string {
   if (!/^(?: {4}|\t)/m.test(text)) return text;
   const out: string[] = [];
-  let prevBlank = true; // 文首视同空行:开头的缩进行就是代码块。
   let inCode = false;
   // 缩进代码的门槛相对列表内容列 +4(第三十二轮 Codex review):内容列 4 的
   // 列表项里,空行后的 4 空格行是项内**正文**不是代码,剥掉会漏判可见泄漏。
   // 行首空白从第 0 列起算,tab 展开无歧义,直接按列宽比较。
-  const listCtx = createListContext();
+  const ctx = createBlockContext();
   for (const line of text.split('\n')) {
     const blank = /^[ \t]*$/.test(line);
     if (blank) {
       out.push(line);
-      prevBlank = true;
+      ctx.observe(line);
       continue; // 空行不改变 inCode:块内空行仍属于块。
     }
-    if (leadingIndentColumns(line) >= listCtx.col + 4 && (prevBlank || inCode)) {
+    // 代码门槛:敞开的段落里缩进行是惰性延续;段落外(空行后、标题等块边界
+    // 后)即代码 —— prevBlank 近似会把标题后的缩进代码当正文(第三十五轮
+    // review)。代码行不推进状态(与既往剥离行为一致)。
+    if (leadingIndentColumns(line) >= ctx.col + 4 && (inCode || !ctx.inParagraph)) {
       inCode = true;
       continue;
     }
     inCode = false;
-    const wasPrevBlank = prevBlank;
-    prevBlank = false;
-    const lm = LIST_MARKER_LINE_RE.exec(line);
-    const emptyLm = !lm && wasPrevBlank ? EMPTY_LIST_MARKER_LINE_RE.exec(line) : null;
-    if (lm) listCtx.enterItem(line, listMarkerContentCol(lm[1], line));
-    else if (emptyLm) listCtx.enterItem(line, widthInColumns(emptyLm[1]) + 1);
-    else listCtx.onLine(line);
+    ctx.observe(line);
     out.push(line);
   }
   return out.join('\n');
@@ -632,36 +701,24 @@ function stripBlockStructures(text: string, depth = 0): string {
   let quoteRun: string[] | null = null;
   // 引用行的前导空白按列宽校验(≤3 列,或列表续行区间上限 内容列+3):
   // 深于该区间的 > 行是缩进代码不是引用。
-  const listCtx = createListContext();
+  const ctx = createBlockContext();
   const flushQuote = (): void => {
     if (!quoteRun) return;
     const inner = quoteRun.map((l) => l.replace(BLOCKQUOTE_MARKER_RE, '')).join('\n');
     out.push(depth < 8 ? stripBlockStructures(inner, depth + 1) : inner);
     quoteRun = null;
   };
-  // prevBlank 近似「不在段落内」(与缩进代码状态机同取向,第三十四轮 Codex
-  // review):空行/文首之后的空标记行(`-` 单独成行)建立列表上下文,其内容
-  // 列 +3 的引用行(如 `-\n    > ```xml`)才能正确归入引用分组;段落内的
-  // 单独 `-` 是 setext 下划线,不建上下文。
-  let prevBlank = true;
+  // 共享段落跟踪器(第三十五轮 review):此前的 prevBlank 近似会把「标题后
+  // 无空行的空列表项」漏掉,项内 4 空格缩进的引用围栏不进引用分组而误报。
   for (const line of afterFences) {
     const leadWsCols = leadingIndentColumns(line);
-    const quoteIndentOk = leadWsCols <= 3 || (listCtx.col > 0 && leadWsCols <= listCtx.col + 3);
+    const quoteIndentOk = leadWsCols <= 3 || (ctx.col > 0 && leadWsCols <= ctx.col + 3);
     if (quoteIndentOk && BLOCKQUOTE_LINE_RE.test(line)) {
       (quoteRun ??= []).push(line);
-      prevBlank = false;
+      ctx.observe(line);
     } else {
       flushQuote();
-      if (!/^[ \t]*$/.test(line)) {
-        const lm = LIST_MARKER_LINE_RE.exec(line);
-        const emptyLm = !lm && prevBlank ? EMPTY_LIST_MARKER_LINE_RE.exec(line) : null;
-        if (lm) listCtx.enterItem(line, listMarkerContentCol(lm[1], line));
-        else if (emptyLm) listCtx.enterItem(line, widthInColumns(emptyLm[1]) + 1);
-        else listCtx.onLine(line);
-        prevBlank = false;
-      } else {
-        prevBlank = true;
-      }
+      ctx.observe(line);
       out.push(line);
     }
   }
