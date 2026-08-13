@@ -880,6 +880,24 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toEqual({ category: 'invoke-with-parameter' });
   });
 
+  it('still hits when a leak dedents out of an item fence after a lazy continuation', () => {
+    // 惰性延续行不弹列表上下文(第四十二轮 Codex review):`- item\\nlazy` 的
+    // lazy 仍在项内,其后 2 空格未闭合围栏绑定该项,顶层 dedent 的真实泄漏
+    // 不被吞到输入末尾。
+    expect(
+      detectLeakedToolCallMarkup(`- item\nlazy\n  \`\`\`xml\n  content\n${CLASS_B_LEAK}`),
+    ).toEqual({ category: 'invoke-with-parameter' });
+  });
+
+  it('does not hit when the markers stay inside a lazy-continued item fence', () => {
+    // 对照组:惰性延续后项内正常闭合的围栏照常剥离。
+    expect(
+      detectLeakedToolCallMarkup(
+        `- item\nlazy\n  \`\`\`xml\n  invoke name="Bash">\n  <parameter name="command">ls</parameter>\n  \`\`\`\n完。`,
+      ),
+    ).toBeNull();
+  });
+
   it('does not treat a mixed-character line as a closing fence', () => {
     // CommonMark 闭栏必须与开栏同字符:``` 栏内出现 ```~~~ 行不是闭栏,块内
     // 后续的标记示例仍在围栏里,不命中。

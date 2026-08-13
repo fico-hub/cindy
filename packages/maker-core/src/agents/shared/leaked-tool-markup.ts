@@ -225,19 +225,37 @@ function createBlockContext(): BlockContext {
         lmOrdered[1] !== '1';
       const emptyLm =
         isThematicBreak || lm !== null || inPara ? null : EMPTY_LIST_MARKER_LINE_RE.exec(line);
+      const isQuote = BLOCKQUOTE_LINE_RE.test(line);
+      const isHeading = ATX_HEADING_RE.test(line);
+      const isSetext = inPara && SETEXT_UNDERLINE_RE.test(line);
+      // 敞开段落的纯段落行是惰性延续,不弹层(第四十二轮 Codex review:
+      // `- item\nlazy` 的 lazy 仍在列表项里,其后 2 空格围栏属于该项);
+      // 标记行的普通文本内容敞开项内段落,让后续惰性行可识别。
+      const isLazy =
+        inPara && !lm && !emptyLm && !isThematicBreak && !isHeading && !isSetext && !isQuote;
+      const lmContent = lm ? line.slice(lm[1].length) : '';
+      const lmOpensParagraph =
+        lm !== null &&
+        !lmIsParagraphText &&
+        /\S/.test(lmContent) &&
+        !ATX_HEADING_RE.test(lmContent) &&
+        !THEMATIC_BREAK_RE.test(lmContent);
       if (lm && !lmIsParagraphText) listCtx.enterItem(line, listMarkerContentCols(lm[1], line));
       else if (emptyLm) listCtx.enterItem(line, [widthInColumns(emptyLm[1]) + 1]);
-      else listCtx.onLine(line);
+      else if (!isLazy) listCtx.onLine(line);
       pendingEmptyItem = emptyLm !== null;
-      if (BLOCKQUOTE_LINE_RE.test(line)) {
+      if (isQuote) {
         inPara = false;
         quoteLazy = true;
+      } else if (lmOpensParagraph) {
+        inPara = true;
+        quoteLazy = false;
       } else if (
         isThematicBreak ||
         (lm !== null && !lmIsParagraphText) ||
         emptyLm !== null ||
-        ATX_HEADING_RE.test(line) ||
-        (inPara && SETEXT_UNDERLINE_RE.test(line))
+        isHeading ||
+        isSetext
       ) {
         inPara = false;
         quoteLazy = false;
@@ -462,12 +480,25 @@ function stripFencedBlocks(lines: string[]): string[] {
         isThematicBreak || lm !== null || inParagraph
           ? null
           : EMPTY_LIST_MARKER_LINE_RE.exec(line);
+      const isQuoteLine = BLOCKQUOTE_LINE_RE.test(line);
+      const isHeadingLine = ATX_HEADING_RE.test(line);
+      const isSetextLine = inParagraph && SETEXT_UNDERLINE_RE.test(line);
+      // 敞开段落的纯段落行是惰性延续,不弹层(第四十二轮 Codex review:
+      // `- item\nlazy` 的 lazy 仍在列表项里,其后 2 空格围栏属于该项)。
+      const isLazy =
+        inParagraph &&
+        !lm &&
+        !emptyLm &&
+        !isThematicBreak &&
+        !isHeadingLine &&
+        !isSetextLine &&
+        !isQuoteLine;
       if (lm && !lmIsParagraphText) {
         listCtx.enterItem(line, listMarkerContentCols(lm[1], line));
       } else if (emptyLm) {
         listCtx.enterItem(line, [widthInColumns(emptyLm[1]) + 1]);
         pendingEmptyItem = true;
-      } else {
+      } else if (!isLazy) {
         listCtx.onLine(line);
       }
       // 标题/分隔线之后没有敞开的段落;setext 下划线只在紧跟段落时是标题
@@ -477,6 +508,15 @@ function stripFencedBlocks(lines: string[]): string[] {
       // 段落:实测缩进代码块后的非 1 有序行仍按段落文本解析,惰性延续行则
       // 本就在段落里 —— 两种形态都维持现状即正确。
       const hc = htmlBlockCloseForParagraph(line, listCtx.col);
+      // 标记行的普通文本内容敞开项内段落,让后续惰性延续行可识别
+      // (第四十二轮 Codex review)。
+      const lmContent = lm ? line.slice(lm[1].length) : '';
+      const lmOpensParagraph =
+        lm !== null &&
+        !lmIsParagraphText &&
+        /\S/.test(lmContent) &&
+        !ATX_HEADING_RE.test(lmContent) &&
+        !THEMATIC_BREAK_RE.test(lmContent);
       if (hc) {
         if (hc.close !== 'closed') {
           htmlClose = hc.close;
@@ -484,15 +524,18 @@ function stripFencedBlocks(lines: string[]): string[] {
         }
         inParagraph = false;
         quoteLazy = false;
-      } else if (BLOCKQUOTE_LINE_RE.test(line)) {
+      } else if (isQuoteLine) {
         inParagraph = false;
         quoteLazy = true;
+      } else if (lmOpensParagraph) {
+        inParagraph = true;
+        quoteLazy = false;
       } else if (
         isThematicBreak ||
         (lm !== null && !lmIsParagraphText) ||
         emptyLm !== null ||
-        ATX_HEADING_RE.test(line) ||
-        (inParagraph && SETEXT_UNDERLINE_RE.test(line))
+        isHeadingLine ||
+        isSetextLine
       ) {
         inParagraph = false;
         quoteLazy = false;
@@ -742,20 +785,43 @@ function stripHtmlBlocks(lines: string[]): string[] {
       const lmIsParagraphText =
         lm !== null && inPara && listCtx.col === 0 && lmOrdered !== null && lmOrdered[1] !== '1';
       const emptyLm = lm !== null || inPara ? null : EMPTY_LIST_MARKER_LINE_RE.exec(line);
+      const isQuoteLine = BLOCKQUOTE_LINE_RE.test(line);
+      const isHeadingLine = ATX_HEADING_RE.test(line);
+      const isSetextLine = inPara && SETEXT_UNDERLINE_RE.test(line);
+      // 惰性延续不弹层、标记行的普通内容敞开项内段落(第四十二轮 Codex
+      // review,与围栏状态机同规则)。
+      const isLazy =
+        inPara &&
+        !lm &&
+        !emptyLm &&
+        !isThematicBreak &&
+        !isHeadingLine &&
+        !isSetextLine &&
+        !isQuoteLine;
+      const lmContent = lm ? line.slice(lm[1].length) : '';
+      const lmOpensParagraph =
+        lm !== null &&
+        !lmIsParagraphText &&
+        /\S/.test(lmContent) &&
+        !ATX_HEADING_RE.test(lmContent) &&
+        !THEMATIC_BREAK_RE.test(lmContent);
       if (lm && !lmIsParagraphText) listCtx.enterItem(line, listMarkerContentCols(lm[1], line));
       else if (emptyLm) {
         listCtx.enterItem(line, [widthInColumns(emptyLm[1]) + 1]);
         pendingEmptyItem = true;
-      } else listCtx.onLine(line);
-      if (BLOCKQUOTE_LINE_RE.test(line)) {
+      } else if (!isLazy) listCtx.onLine(line);
+      if (isQuoteLine) {
         inPara = false;
         quoteLazy = true;
+      } else if (lmOpensParagraph) {
+        inPara = true;
+        quoteLazy = false;
       } else if (
         isThematicBreak ||
         (lm !== null && !lmIsParagraphText) ||
         emptyLm !== null ||
-        ATX_HEADING_RE.test(line) ||
-        (inPara && SETEXT_UNDERLINE_RE.test(line))
+        isHeadingLine ||
+        isSetextLine
       ) {
         inPara = false;
         quoteLazy = false;
