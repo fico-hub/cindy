@@ -872,6 +872,14 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toBeNull();
   });
 
+  it('still hits when escaped backticks surround a real leak', () => {
+    // \\\` 是转义的字面反引号不是 span 分隔符(第四十一轮 Codex review):
+    // 两个转义反引号之间的可见泄漏必须判。
+    expect(
+      detectLeakedToolCallMarkup(`看 \\\` 记号\n${CLASS_B_LEAK}结束 \\\` 后文`),
+    ).toEqual({ category: 'invoke-with-parameter' });
+  });
+
   it('does not treat a mixed-character line as a closing fence', () => {
     // CommonMark 闭栏必须与开栏同字符:``` 栏内出现 ```~~~ 行不是闭栏,块内
     // 后续的标记示例仍在围栏里,不命中。

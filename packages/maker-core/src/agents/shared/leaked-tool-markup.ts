@@ -815,38 +815,57 @@ function stripBlockStructures(text: string, depth = 0): string {
  */
 function stripInlineCodeSpansInParagraph(segment: string): string {
   if (!segment.includes('`')) return segment;
+  // 反斜杠转义的反引号是字面量不是分隔符(第四十一轮 Codex review):
+  // \` 渲染为普通文本,不能与后文的转义反引号配对成 span 把中间可见泄漏
+  // 吞掉。转义只吞运行的首个反引号,剩余仍可作(更短的)分隔符;单层
+  // lookbehind 近似与其余正则一致。
+  const nextRun = (from: number): { start: number; end: number } | null => {
+    let probe = from;
+    while (probe < segment.length) {
+      const t = segment.indexOf('`', probe);
+      if (t === -1) return null;
+      let start = t;
+      if (start > 0 && segment[start - 1] === '\\') {
+        start += 1;
+        if (start >= segment.length || segment[start] !== '`') {
+          probe = start;
+          continue;
+        }
+      }
+      let e = start;
+      while (e < segment.length && segment[e] === '`') e += 1;
+      return { start, end: e };
+    }
+    return null;
+  };
   let out = '';
   let cursor = 0;
   while (cursor < segment.length) {
-    const tick = segment.indexOf('`', cursor);
-    if (tick === -1) {
+    const open = nextRun(cursor);
+    if (!open) {
       out += segment.slice(cursor);
       break;
     }
-    let openEnd = tick;
-    while (openEnd < segment.length && segment[openEnd] === '`') openEnd += 1;
-    const runLength = openEnd - tick;
+    const runLength = open.end - open.start;
     // 找等长闭合运行:逐个 backtick 运行推进,线性复杂度。
-    let closeStart = -1;
-    let probe = openEnd;
-    while (probe < segment.length) {
-      const t = segment.indexOf('`', probe);
-      if (t === -1) break;
-      let e = t;
-      while (e < segment.length && segment[e] === '`') e += 1;
-      if (e - t === runLength) {
-        closeStart = t;
+    let close: { start: number; end: number } | null = null;
+    let probe = open.end;
+    while (true) {
+      const r = nextRun(probe);
+      if (r === null) break;
+      if (r.end - r.start === runLength) {
+        close = r;
         break;
       }
-      probe = e;
+      probe = r.end;
     }
-    if (closeStart === -1) {
+    if (close === null) {
       // 无闭合:backtick 运行是字面量,保留后继续扫其后正文。
-      out += segment.slice(cursor, openEnd);
-      cursor = openEnd;
+      out += segment.slice(cursor, open.end);
+      cursor = open.end;
     } else {
-      out += segment.slice(cursor, tick);
-      cursor = closeStart + runLength;
+      out += segment.slice(cursor, open.start);
+      cursor = close.end;
     }
   }
   return out;
