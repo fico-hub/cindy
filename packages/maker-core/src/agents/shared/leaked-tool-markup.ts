@@ -637,7 +637,7 @@ const BLOCKQUOTE_MARKER_RE = /^[ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})*> ?/;
 const HTML_BLOCK_TYPE1_OPEN_RE =
   /^([ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})*)<(script|pre|style|textarea)(?=[ \t>]|$)/i;
 const HTML_BLOCK_TYPE6_RE =
-  /^([ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})*)<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?=[ \t>]|\/>|$)/i;
+  /^([ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})*)<\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?=[ \t>]|\/>|$)/i;
 
 /** 行首(允许列表标记前缀)开启且同一行未闭合的 HTML 注释。 */
 const HTML_COMMENT_OPEN_RE = /^([ \t]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]{1,4})*)<!--/;

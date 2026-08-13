@@ -908,6 +908,14 @@ describe('detectLeakedToolCallMarkup (#2518)', () => {
     ).toBeNull();
   });
 
+  it('does not hit when the markers sit inside a param type-6 block', () => {
+    // `param` 在 CommonMark type-6 标签表里(micromark htmlBlockNames 逐项
+    // 比对后本表唯一缺项,第四十四轮 Codex review):块到空行为止整块隐藏。
+    expect(
+      detectLeakedToolCallMarkup(`<param demo>\n${CLASS_B_LEAK}以上是说明。`),
+    ).toBeNull();
+  });
+
   it('does not treat a mixed-character line as a closing fence', () => {
     // CommonMark 闭栏必须与开栏同字符:``` 栏内出现 ```~~~ 行不是闭栏,块内
     // 后续的标记示例仍在围栏里,不命中。
