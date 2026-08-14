@@ -61,20 +61,6 @@ export interface TurnState {
    */
   uiEmittedText: string;
   /**
-   * 最后一次结构化 tool_use 发生时 uiEmittedText 的长度。泄漏标记检测(#2518
-   * 类 B)只扫描该偏移之后的正文:之前的文本属于已正常执行过工具的讨论语境,
-   * 之后再出现的泄漏标记(先成功调了 N 个工具、第 N+1 个写坏成纯文本)仍要判
-   * ——单纯 toolUses > 0 全免会漏掉这种"干到一半最后一步静默掉了"的形态。
-   */
-  uiTextLenAtLastToolUse: number;
-  /**
-   * tool_use 推进扫描偏移前,对被跳过的前段正文做检测留下的命中。平行调用里
-   * 前一个写坏成纯文本、后一个正常解析时,坏调用文本落在 tool_use 之前的段
-   * —— 不能把它一律当讨论语境跳过(Codex review);围栏/行内代码内的演示仍
-   * 被检测器剥离,不误伤。收口时与尾段检测一起判。
-   */
-  leakedMarkupBeforeToolUse: LeakedToolMarkupHit | null;
-  /**
    * SDK API retry / assistant error envelope 的暂存详情。两者都不是可靠的 turn
    * 终态: Claude Code 可能随后自动重试并返回成功 result。只有最终
    * result.is_error 才把它推成 terminal error；成功 result 直接丢弃，避免下游
@@ -188,8 +174,6 @@ function resetTurnState(turn: TurnState): void {
   turn.sawCompactBoundary = false;
   turn.hasEmittedText = false;
   turn.uiEmittedText = '';
-  turn.uiTextLenAtLastToolUse = 0;
-  turn.leakedMarkupBeforeToolUse = null;
   turn.pendingApiError = null;
   turn.interruptRequested = false;
   turn.lastAssistantMsgHadSubstance = true;
@@ -1162,15 +1146,7 @@ function handleAssistant(
         agentMeta: assistantMeta,
       });
     } else if (block.type === 'tool_use') {
-      // 推进扫描偏移前先检测被跳过的前段:平行调用里前一个写坏成纯文本、后一个
-      // 正常解析时,坏调用文本就落在这段里(见 TurnState.leakedMarkupBeforeToolUse)。
-      if (!ctx.turn.leakedMarkupBeforeToolUse) {
-        ctx.turn.leakedMarkupBeforeToolUse = detectLeakedToolCallMarkup(
-          ctx.turn.uiEmittedText.slice(ctx.turn.uiTextLenAtLastToolUse),
-        );
-      }
       ctx.turn.toolUses += 1;
-      ctx.turn.uiTextLenAtLastToolUse = ctx.turn.uiEmittedText.length;
       // ctx.log.info('SDK ▷ tool_use', {
       //   toolName: block.name,
       //   toolUseId: block.id,
@@ -1792,39 +1768,31 @@ function handleResult(
     ctx.onTurnEnd?.();
     return;
   }
-  // 泄漏工具调用标记(#2518 类 B):模型把写坏的工具调用块(如缺失前导 < 的
-  // invoke 开标签)当**普通正文**输出,SDK 解析器从未进入工具调用状态,全轮
-  // 没有任何结构化 tool_use —— 不能按成功收口:工具没执行,用户无从分辨
-  // 「做完了」和「压根没跑」。这里推一条带稳定 reason 的 terminal error
-  // (main 的有界自动续跑按 reason 放行,续跑提示让模型基于上下文重发调用),
-  // 然后**继续**走下方 status Done + done —— 本轮有真实用量,砍 done 会丢
-  // 整轮账(与 is_error 失败序列同构;empty-response 只发 error 是因为零用量
-  // 无账可丢)。
-  // 扫描域两个边界(Greptile/Codex review):
-  //  - 正文取「用户实际看到的全文」= emitted + fallbackTail —— 泄漏标记可能只
-  //    存在于 result.result 兜出的未流式尾段(上方刚补推给 UI),只扫 emitted
-  //    会漏;mismatch 分支(fallbackTail 为空)由下方零 tool 轮补扫兜底。
-  //  - 起点取最后一次结构化 tool_use 时的已推正文长度 —— 之前的文本属于已正常
-  //    执行过工具的讨论语境不判;之后再出现的泄漏(先成功调 N 个工具、第 N+1 个
-  //    写坏成纯文本)仍要判。零 tool 轮偏移为 0,即全文。
+  // 泄漏工具调用标记(#2518 类 B,临时兜底,按维护者 2026-08-13 review 收窄):
+  // 模型把写坏的工具调用块(缺失前导 < 的 invoke 开标签)当**普通正文**输出,
+  // SDK 解析器从未进入工具调用状态 —— 不能按成功收口:工具没执行,用户无从
+  // 分辨「做完了」和「压根没跑」。**仅在没有任何结构化 tool_use 的回合触发**
+  // (已观测协议特征;有 tool_use 的回合一律不判),命中推一条带稳定 reason
+  // 的 terminal error(main 的有界自动续跑按 reason 放行,不执行泄漏文本、不
+  // 重发原请求),然后**继续**走下方 status Done + done —— 本轮有真实用量,
+  // 砍 done 会丢整轮账(与 is_error 失败序列同构;empty-response 只发 error
+  // 是因为零用量无账可丢)。移除条件见 shared/leaked-tool-markup.ts 文件头。
+  // 正文取「用户实际看到的全文」= emitted + fallbackTail —— 泄漏标记可能只
+  // 存在于 result.result 兜出的未流式尾段;mismatch 分支由下方补扫兜底。
   const leakedMarkupGuard =
-    !msg.is_error && !ctx.turn.interruptRequested && !ctx.turn.sawCompactBoundary;
-  let leakedMarkupBody = (emitted + fallbackTail).slice(ctx.turn.uiTextLenAtLastToolUse);
-  // 尾段检测之外还要并入 tool_use 推进偏移时留下的前段命中(平行调用里前一个
-  // 写坏、后一个正常解析的形态,见 TurnState.leakedMarkupBeforeToolUse)。
-  let leakedToolMarkup = leakedMarkupGuard
-    ? detectLeakedToolCallMarkup(leakedMarkupBody) ?? ctx.turn.leakedMarkupBeforeToolUse
-    : null;
+    !msg.is_error &&
+    !ctx.turn.interruptRequested &&
+    !ctx.turn.sawCompactBoundary &&
+    ctx.turn.toolUses === 0;
+  let leakedMarkupBody = emitted + fallbackTail;
+  let leakedToolMarkup = leakedMarkupGuard ? detectLeakedToolCallMarkup(leakedMarkupBody) : null;
   // mismatch 分支补扫(Greptile review):full 与 emitted 前缀对不上时 fallbackTail
   // 为空、full 未展示,但泄漏若只在 full 里,「工具没执行却按成功收口」的实质
-  // 伤害不变 —— 检测依据是本轮模型输出,不限于已展示部分。只在零 tool 轮补扫:
-  // 有 tool 轮的 uiTextLenAtLastToolUse 偏移建立在 emitted 之上,无法映射进
-  // 错位的 full,保守跳过(展示路径已覆盖其主形态)。complete/tail 分支的 full
-  // 已被 emitted + fallbackTail 全量覆盖,不会走到这里。
+  // 伤害不变 —— 检测依据是本轮模型输出,不限于已展示部分。complete/tail 分支的
+  // full 已被 emitted + fallbackTail 全量覆盖,不会走到这里。
   if (
     leakedMarkupGuard &&
     !leakedToolMarkup &&
-    ctx.turn.toolUses === 0 &&
     full.length > 0 &&
     fallbackTail.length === 0 &&
     full !== emitted
@@ -1833,7 +1801,8 @@ function handleResult(
     if (leakedToolMarkup) leakedMarkupBody = full;
   }
   if (leakedToolMarkup) {
-    // 只记类别与长度,不记正文 —— 泄漏内容可能含命令参数等敏感信息。
+    // 匿名命中统计(评估移除时机用):只记类别与长度,不记正文 —— 泄漏内容
+    // 可能含命令参数等敏感信息。
     ctx.log.warn('SDK ◀ turn leaked malformed tool-call markup as plain text', {
       category: leakedToolMarkup.category,
       textLength: leakedMarkupBody.length,
