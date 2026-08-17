@@ -561,6 +561,63 @@ describe('readReviewWorkspaceSnapshot', () => {
     expect(readSubmoduleIdentity.mock.calls[0]?.[1]).toContain(submodulePath);
   });
 
+  it('binds a status-only dirty submodule missing from every diff bucket (#2463 review)', async () => {
+    // ignoreWhitespace 下只含 untracked 内部内容的子仓没有 numstat 条目,
+    // summary 构建把它当空白改动滤掉;unstaged bucket 又处于 capped、不建
+    // detail diff——此时它只存在于 status 里。身份收集必须从净化后的
+    // status 记录补齐,否则内层同尺寸替换可穿过两道新鲜度门(Codex review)。
+    const repoRoot = await tempDir();
+    const cappedPath = 'src/big.ts';
+    const submodulePath = 'vendor/lib';
+    await fs.mkdir(path.join(repoRoot, submodulePath), { recursive: true });
+    const data = cappedReviewData(repoRoot, cappedPath);
+    readReviewDataMock.mockResolvedValue({
+      ...data,
+      status: data.status
+        ? {
+            ...data.status,
+            files: [
+              ...data.status.files,
+              {
+                path: submodulePath,
+                oldPath: null,
+                indexStatus: null,
+                worktreeStatus: 'modified' as const,
+                isUntracked: false,
+                isUnmerged: false,
+                isSubmodule: true,
+                sources: ['unstaged' as const],
+                rawXY: ' M',
+              },
+            ],
+          }
+        : data.status,
+      // diffs 保持原样:capped bucket 与 detail diffs 都不含该子仓。
+    });
+    const fingerprintCappedWorkspaceFiles = vi.fn(
+      async (_repoRoot: string, _paths: readonly string[]) => 'digest',
+    );
+    const readSubmoduleIdentity = vi.fn(
+      async (_repoRoot: string, _paths: readonly string[]) => ({
+        identities: [],
+        hashedContent: false,
+      }),
+    );
+
+    await expect(
+      readReviewWorkspaceSnapshot('source', {
+        fingerprintCappedWorkspaceFiles,
+        readSubmoduleIdentity,
+      }),
+    ).resolves.toBeTruthy();
+    expect(readSubmoduleIdentity).toHaveBeenCalled();
+    expect(readSubmoduleIdentity.mock.calls[0]?.[1]).toContain(submodulePath);
+    // 子仓仍不得进入普通文件指纹器。
+    for (const [, paths] of fingerprintCappedWorkspaceFiles.mock.calls) {
+      expect(paths).not.toContain(submodulePath);
+    }
+  });
+
   it('routes submodule evidence to the identity reader and binds the manifest (#2463)', async () => {
     const repoRoot = await tempDir();
     const submodulePath = 'vendor/lib';
