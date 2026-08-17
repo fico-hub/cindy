@@ -277,14 +277,26 @@ function stagedEvidencePaths(workspace: ReviewWorkspaceEvidence): string[] {
  * and porcelain keeps only a dirty boolean, so a submodule-aware reader binds
  * the gitlink oids, the inner HEAD and the inner dirty file identities.
  */
-function submoduleEvidencePaths(workspace: ReviewWorkspaceEvidence): string[] {
+function submoduleEvidencePaths(
+  workspace: ReviewWorkspaceEvidence,
+  sanitizedStatusFiles: readonly { path: string; isSubmodule: boolean }[],
+): string[] {
   const capped = [workspace.diffs.capped?.staged, workspace.diffs.capped?.unstaged].flatMap(
     (bucket) => (bucket ? bucket.files.filter((file) => file.isSubmodule).map((file) => file.path) : []),
   );
   const diffs = [...workspace.diffs.staged, ...workspace.diffs.unstaged]
     .filter((diff) => diff.isSubmodule)
     .map((diff) => diff.path);
-  return [...new Set([...diffs, ...capped])];
+  // Diffs alone can miss a dirty submodule: one whose only change is untracked
+  // inner content has no numstat entry, so with ignoreWhitespace enabled the
+  // summary builder drops it as a whitespace-only modification — and when the
+  // unstaged bucket is capped there is no detailed diff to catch it either.
+  // Status still lists it, so bind from the sanitized status records as well
+  // (Codex review #2515).
+  const status = sanitizedStatusFiles
+    .filter((file) => file.isSubmodule)
+    .map((file) => file.path);
+  return [...new Set([...diffs, ...capped, ...status])];
 }
 
 async function buildReviewWorkspaceSnapshot(
@@ -307,7 +319,10 @@ async function buildReviewWorkspaceSnapshot(
     stagedPaths.length > 0 && reviewData.scope.repoRoot
       ? await deps.readStagedIndexIdentity(reviewData.scope.repoRoot, stagedPaths)
       : null;
-  const submodulePaths = submoduleEvidencePaths(workspace);
+  const submodulePaths = submoduleEvidencePaths(
+    workspace,
+    sanitizeReviewStatusFiles(reviewData.status?.files ?? []),
+  );
   const submoduleIdentity =
     submodulePaths.length > 0 && reviewData.scope.repoRoot
       ? await deps.readSubmoduleIdentity(reviewData.scope.repoRoot, submodulePaths)
