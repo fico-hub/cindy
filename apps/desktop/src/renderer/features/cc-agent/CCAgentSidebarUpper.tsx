@@ -182,7 +182,8 @@ import {
   SidebarIconButton,
   SIDEBAR_RAIL_ICON_BUTTON_CLASS,
 } from '@/components/sidebar/SidebarIconButton';
-import { RailNav, remoteLampOf } from './sidebar/RailNav';
+import { RailNav } from './sidebar/RailNav';
+import { aggregateSessionLamps, remoteLampOf } from './lib/sessionLampAggregation';
 import {
   panelHasBlockingOverlay,
   panelHasEditingFocus,
@@ -1117,6 +1118,31 @@ function ExpandedView({
     }
     return next;
   }, [effectiveRunningSessionIds, backgroundActivitySessionIds, orcaLeadWorkerMap]);
+
+  // 置顶区项目行的聚合灯(ProjectsSection.lampAgg / rail projectAgg 同款口径):
+  // 聚合集合 = 该行下实际渲染的会话(displaySessions ?? project.sessions),
+  // 灯亮进去一定找得到亮的行。revision 订阅让 device-link 远程镜像推送能触发重算。
+  const pinnedRemoteActivityRevision = useRemoteSessionActivityRevision();
+  const pinnedProjectLamp = useCallback(
+    (list: readonly Session[]) =>
+      aggregateSessionLamps(
+        list.map((s) => s.id),
+        {
+          runningSessionIds: displayRunningSessionIds,
+          notifications: sidebarNotifications,
+          attentionKinds,
+          urgentSessionIds: urgentSet,
+        },
+      ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- pinnedRemoteActivityRevision 代表 remoteLampOf 读到的整表内容
+    [
+      displayRunningSessionIds,
+      sidebarNotifications,
+      attentionKinds,
+      urgentSet,
+      pinnedRemoteActivityRevision,
+    ],
+  );
 
   // 本地会话用 effectiveIncludeArchived（snapshot 实际所属桶）避免切桶时先闪空；
   // device-link 远程镜像同时持有 active / archived 两桶，必须独立按 filter.status 筛选，
@@ -3346,6 +3372,7 @@ function ExpandedView({
                     statusFilter={filter.status}
                     isCollapsed={collapse.collapsed.has(project.projectKey)}
                     parentSectionCollapsed={parentSectionCollapsed}
+                    lamp={pinnedProjectLamp(displaySessions ?? project.sessions)}
                     activeSessionId={activeSessionId}
                     runningSessionIds={displayRunningSessionIds}
                     attachedSessionIds={attachedSessionIds}
@@ -4024,35 +4051,14 @@ function RailPanels({
   // 只喂给折叠豁免(isActiveEntry)与行高亮;点击导航仍走真实 activeSessionId。
   const visibilityActiveId = activeSessionId ?? viewedSessionId;
 
+  // 聚合口径的唯一事实源(sessionLampAggregation):本地链路 + device-link 远程
+  // 镜像。远程不并入会出现「段灯亮、项目行不亮」(codex review)。
   const projectAgg = useCallback(
-    (list: readonly Session[]) => {
-      let running = false;
-      let best: 'error' | 'awaiting' | 'done' | null = null;
-      const rank = { error: 3, awaiting: 2, done: 1 } as const;
-      const consider = (tone: 'error' | 'awaiting' | 'done' | null) => {
-        if (tone && (!best || rank[tone] > rank[best])) best = tone;
-      };
-      for (const s of list) {
-        if (runningSessionIds.has(s.id)) running = true;
-        // 远程会话灯语与 rail 段灯同源(remoteLampOf):本地 running/attention
-        // 对被控端后台会话是盲区,不并入会出现「段灯亮、项目行不亮」(codex review)。
-        const remote = remoteLampOf(s.id);
-        if (remote) {
-          if (remote.running) running = true;
-          consider(remote.tone);
-        }
-        if (!notifications.has(s.id)) continue;
-        const kind = attentionKinds.get(s.id);
-        consider(
-          kind === 'error' || urgentSet.has(s.id)
-            ? 'error'
-            : kind === 'awaiting'
-              ? 'awaiting'
-              : 'done',
-        );
-      }
-      return { running, dotTone: best };
-    },
+    (list: readonly Session[]) =>
+      aggregateSessionLamps(
+        list.map((s) => s.id),
+        { runningSessionIds, notifications, attentionKinds, urgentSessionIds: urgentSet },
+      ),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- remoteActivityRevision 代表 remoteLampOf 读到的整表内容
     [runningSessionIds, notifications, attentionKinds, urgentSet, remoteActivityRevision],
   );
