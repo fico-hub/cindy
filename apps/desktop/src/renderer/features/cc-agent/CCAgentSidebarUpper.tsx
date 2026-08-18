@@ -1573,6 +1573,23 @@ function ExpandedView({
     });
   }, [visiblePinnedSessions, visiblePinnedProjects, filter.manualPinnedOrder]);
 
+  // 置顶项目行的折叠豁免追加集合:base 豁免(notifications ∪ runningSessionIds)
+  // 只覆盖本地链路,device-link 远程 running/未读只活在远程镜像里——灯为它们
+  // 点亮时,行不能被折进「显示全部」(codex review;与 ProjectsSection 的
+  // lampFoldExemptIds、rail 面板的 panelNotifications 同语义)。只扫置顶项目
+  // 下实际渲染的会话,集合与灯的聚合来源一致。
+  const pinnedFoldExemptIds = useMemo(() => {
+    const next = new Set<string>();
+    for (const entry of visiblePinnedEntries) {
+      if (entry.kind !== 'project') continue;
+      for (const s of entry.displaySessions ?? entry.project.sessions) {
+        if (remoteLampOf(s.id)) next.add(s.id);
+      }
+    }
+    return next;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- pinnedRemoteActivityRevision 代表 remoteLampOf 读到的整表内容
+  }, [visiblePinnedEntries, pinnedRemoteActivityRevision]);
+
   const visibleUnclassified = useMemo(() => {
     const sessions = vendorPredicate
       ? groups.unclassified.filter(vendorPredicate)
@@ -3373,6 +3390,7 @@ function ExpandedView({
                     isCollapsed={collapse.collapsed.has(project.projectKey)}
                     parentSectionCollapsed={parentSectionCollapsed}
                     lamp={pinnedProjectLamp(displaySessions ?? project.sessions)}
+                    foldExemptSessionIds={pinnedFoldExemptIds}
                     activeSessionId={activeSessionId}
                     runningSessionIds={displayRunningSessionIds}
                     attachedSessionIds={attachedSessionIds}
