@@ -457,9 +457,15 @@ export function ProjectsSection({
     [],
   );
   // 折叠视图共用一份参数:非设备分组 = 全列表一份;设备分组 = 每段各一份(见
-  // deviceSections)。attention 豁免用 priorityContext.attentionSessionIds——与
-  // 排序同一口径(含远程活动镜像),远程 waiting/unread 的条目不能被折进
-  // 「显示全部」。
+  // deviceSections)。豁免口径 = attention ∪ running(priorityContext,含远程
+  // 活动镜像)——与聚合灯同口径:上层灯为哪条会话点亮(未读或 running),
+  // 该条目就不能被折进「显示全部」(Greptile P1:此前只豁免 attention,
+  // running-only 会话会让呼吸灯指向不可见的条目)。
+  const lampFoldExemptIds = useMemo(() => {
+    const next = new Set(priorityContext.attentionSessionIds);
+    for (const id of priorityContext.runningSessionIds) next.add(id);
+    return next;
+  }, [priorityContext]);
   const collapseEntries = useCallback(
     (entries: readonly MainListEntry[], showAll: boolean) =>
       getSessionListCollapseView({
@@ -470,9 +476,9 @@ export function ProjectsSection({
         isFiltering: false,
         isActiveEntry: (entry) => entrySessions(entry).some((s) => s.id === viewedIdForSort),
         hasAttentionEntry: (entry) =>
-          entrySessions(entry).some((s) => priorityContext.attentionSessionIds.has(s.id)),
+          entrySessions(entry).some((s) => lampFoldExemptIds.has(s.id)),
       }),
-    [viewedIdForSort, entrySessions, priorityContext],
+    [viewedIdForSort, entrySessions, lampFoldExemptIds],
   );
   const {
     visibleEntries: visibleMixedEntries,
@@ -644,6 +650,7 @@ export function ProjectsSection({
       isCollapsed={collapsed.has(project.projectKey)}
       parentSectionCollapsed={false}
       lamp={lampAgg(project.sessions)}
+      foldExemptSessionIds={lampFoldExemptIds}
       activeSessionId={activeSessionId}
       runningSessionIds={runningSessionIds}
       attachedSessionIds={attachedSessionIds}
@@ -728,6 +735,7 @@ export function ProjectsSection({
           key={`dialogue-group:${dialogueGroupKey}`}
           sessions={entry.sessions}
           lamp={lampAgg(entry.sessions)}
+          foldExemptSessionIds={lampFoldExemptIds}
           collapsed={isCollapsed}
           onToggle={() => setDialogueCollapsed([dialogueGroupKey], !isCollapsed)}
           onCreateDialogue={() => onCreateDialogue(dialogueDeviceTarget)}
@@ -964,6 +972,7 @@ export function ProjectsSection({
 function DialogueGroupNode({
   sessions,
   lamp,
+  foldExemptSessionIds,
   collapsed,
   onToggle,
   onCreateDialogue,
@@ -990,6 +999,8 @@ function DialogueGroupNode({
   /** 组头聚合灯(ProjectNode.lamp 同款语义):running → 图标呼吸橙;
    *  dotTone → 标题右侧 AttentionDot。聚合集合 = 组内会话(与渲染一致)。 */
   lamp: SessionLampAggregate;
+  /** 透传给组内 SessionEntryList 的折叠豁免追加集合(语义见其 prop 注释)。 */
+  foldExemptSessionIds?: ReadonlySet<string>;
   collapsed: boolean;
   onToggle: () => void;
   /**
@@ -1123,6 +1134,7 @@ function DialogueGroupNode({
             collapsible
             collapseLimit={getProjectSessionCollapseLimit()}
             disableCollapse={disableSessionCollapse}
+            foldExemptSessionIds={foldExemptSessionIds}
             sectionCollapsed={parentSectionCollapsed || collapsed}
             sessionVariant={sessionVariant}
           />

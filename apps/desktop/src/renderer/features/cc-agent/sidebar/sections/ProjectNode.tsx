@@ -97,6 +97,8 @@ export interface ProjectNodeProps {
    * 一定找得到亮的行。不传 = 不显示(兼容旧调用点)。
    */
   lamp?: SessionLampAggregate;
+  /** 透传给项目内 SessionEntryList 的折叠豁免追加集合(语义见其 prop 注释)。 */
+  foldExemptSessionIds?: ReadonlySet<string>;
   onToggle: (projectKey: string) => void;
   /** Project pin is independent from conversation pin state. */
   isProjectPinned: boolean;
@@ -143,6 +145,7 @@ export function ProjectNode({
   disableSessionCollapse,
   hideRemoteMachineLabel = false,
   lamp,
+  foldExemptSessionIds,
   onToggle,
   isProjectPinned,
   onToggleProjectPin,
@@ -592,6 +595,7 @@ export function ProjectNode({
             collapsible
             collapseLimit={getProjectSessionCollapseLimit()}
             disableCollapse={disableSessionCollapse}
+            foldExemptSessionIds={foldExemptSessionIds}
             sectionCollapsed={isCollapsed || parentSectionCollapsed}
             onSessionClick={onSessionClick}
             onAction={onAction}
