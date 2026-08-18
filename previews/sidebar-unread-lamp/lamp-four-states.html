@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>侧栏未读聚合灯 · 四形态状态全集</title>
+  <style>
+    :root {
+      --surface: hsl(60 12.5% 97%);
+      --surface-elevated: #ffffff;
+      --sidebar-border: #d7d7d4;
+      --sidebar-item-hover: #e5e5e5;
+      --foreground: #262626;
+      --muted: #737373;
+      --tertiary: #a3a3a3;
+      --disabled: #d4d4d4;
+      --accent: #EA6B17;           /* Thinking Orange: running 呼吸 */
+      --status-error: #D91F37;
+      --status-awaiting: #19D2C1;
+      --status-done: #2AAE5B;
+      --focus-ring: #417CDD;
+      --font: Inter, -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 26px 30px 60px; background: var(--surface); color: var(--foreground); font-family: var(--font); -webkit-font-smoothing: antialiased; }
+    .page { max-width: 1280px; margin: 0 auto; }
+    h1 { margin: 0 0 6px; font-size: 21px; letter-spacing: -.02em; }
+    .intro { margin: 0 0 8px; color: var(--muted); font-size: 12.5px; line-height: 1.75; max-width: 1020px; }
+    .intro b, .rules b { color: var(--foreground); }
+    code { font-size: 11px; background: rgba(0,0,0,.05); border-radius: 4px; padding: 1px 4px; }
+    .form-head { display: flex; align-items: baseline; gap: 10px; margin: 26px 0 4px; }
+    .form-head .no { font-size: 22px; font-weight: 900; color: var(--tertiary); }
+    .form-head .name { font-size: 16px; font-weight: 800; }
+    .form-head .tag { font-size: 10.5px; font-weight: 700; border-radius: 999px; padding: 2px 8px; }
+    .tag.changed { color: #fff; background: var(--focus-ring); }
+    .tag.same { color: var(--muted); background: #e5e5e5; }
+    .rules { margin: 2px 0 12px; color: var(--muted); font-size: 12px; line-height: 1.8; max-width: 1020px; }
+    .row-flex { display: flex; gap: 30px; align-items: flex-start; flex-wrap: wrap; }
+    .case-label { font-size: 11px; color: var(--muted); margin: 0 0 6px; }
+    .case-label b { color: var(--foreground); }
+    .star { color: var(--focus-ring); font-weight: 800; }
+    .callout { position: relative; }
+    .callout::after { content: attr(data-tip); position: absolute; left: 100%; top: 50%; transform: translateY(-50%); margin-left: 10px;
+      font-size: 10px; font-weight: 700; color: var(--focus-ring); white-space: nowrap; z-index: 5; }
+
+    .sidebar { border: 1px solid var(--sidebar-border); border-radius: 14px; background: var(--surface); padding: 10px 8px 12px; }
+    .breathing { color: var(--accent) !important; }
+    .dot { display: inline-block; border-radius: 50%; flex-shrink: 0; }
+    .dot.d5 { width: 5px; height: 5px; }
+    .dot.d6 { width: 6px; height: 6px; }
+    .dot.done { background: var(--status-done); } .dot.awaiting { background: var(--status-awaiting); } .dot.error { background: var(--status-error); }
+    .dot.online { background: var(--status-done); } .dot.offline-g { background: var(--tertiary); }
+
+    /* 设备段头:h-6, chevron 12 + 设备图标 13 + 名称 text-xs + 在线点 size-1.5 + 右侧灯组 */
+    .dev { display: flex; align-items: center; gap: 6px; height: 24px; padding: 0 6px; border-radius: 6px; color: var(--muted); font-size: 12px; font-weight: 500; }
+    .dev:hover { color: var(--foreground); }
+    .dev svg { flex-shrink: 0; }
+    .dev .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .dev .right { margin-left: auto; display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+    .dev .off { font-size: 12px; color: var(--tertiary); }
+
+    /* 项目/对话组行:h-8 药丸, 图标15, 名称 muted, 聚合点 5px 紧跟标题 */
+    .prow { display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 4px 0 12px; border-radius: 999px; font-size: 13.5px; color: var(--muted); }
+    .prow:hover { background: var(--sidebar-item-hover); }
+    .prow .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .prow .grp { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1; }
+    .prow svg { flex-shrink: 0; }
+    .indent { padding-left: 8px; }
+
+    /* 会话行(最底层,原有行为,对照用) */
+    .srow { display: flex; align-items: center; gap: 10px; height: 30px; padding: 0 8px 0 30px; border-radius: 999px; font-size: 13px; color: var(--foreground); }
+    .srow:hover { background: var(--sidebar-item-hover); }
+    .srow .aa { font-size: 11px; font-weight: 900; letter-spacing: -.08em; color: var(--tertiary); flex-shrink: 0; }
+    .srow .nm { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .srow .tm { font-size: 11.5px; color: var(--tertiary); font-variant-numeric: tabular-nums; flex-shrink: 0; }
+    .spinner { width: 11px; height: 11px; border: 2px solid var(--disabled); border-top-color: var(--muted); border-radius: 50%; flex-shrink: 0; }
+
+    /* 置顶卡片 */
+    .sec-t { display: flex; align-items: center; gap: 4px; padding: 4px 6px 2px; font-size: 12px; font-weight: 700; color: var(--muted); }
+    .cards { display: grid; gap: 8px; padding: 4px 4px 8px; }
+    .card { border: 1px solid var(--sidebar-border); border-radius: 12px; background: var(--surface-elevated); padding: 9px 11px 10px; }
+    .card .t { font-size: 12.5px; font-weight: 700; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .card .p { margin-top: 3px; font-size: 10.5px; line-height: 1.45; color: var(--muted);
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .card .m { margin-top: 6px; font-size: 9.5px; color: var(--tertiary); display: flex; align-items: center; gap: 4px; }
+
+    /* rail(形态①,无回归对照) */
+    .rail { width: 64px; border: 1px solid var(--sidebar-border); border-radius: 14px; background: var(--surface);
+      display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 12px 0; }
+    .rail-sep { margin: 7px 0; height: 1px; width: 22px; background: var(--sidebar-border); }
+    .fn { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 999px; border: none; background: transparent; color: var(--muted); }
+    .fn.active { background: #e5e5e5; color: var(--foreground); }
+    .panel { width: 250px; border: 1px solid var(--sidebar-border); border-radius: 12px; background: var(--surface-elevated); padding: 6px; box-shadow: 0 6px 24px rgba(0,0,0,.07); }
+    .p-head { display: flex; align-items: baseline; gap: 6px; padding: 6px 10px 4px; }
+    .p-head .n { flex: 1; font-size: 12.5px; font-weight: 800; }
+    .p-head .c { font-size: 10px; color: var(--tertiary); }
+    .pjrow { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 6px 0 10px; border-radius: 8px; font-size: 13px; font-weight: 500; }
+    .pjrow:hover { background: var(--sidebar-item-hover); }
+    .pjrow .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pjrow .c { font-size: 10px; color: var(--tertiary); font-variant-numeric: tabular-nums; flex-shrink: 0; }
+  </style>
+</head>
+<body>
+<div class="page">
+  <h1>侧栏未读聚合灯 · 四形态状态全集(fix/sidebar-unread-aggregation)</h1>
+  <p class="intro">
+    改动:未读/运行灯语从最底层会话行<b>补全到每一层</b>——项目行(含置顶区)、「对话」组行、设备段头。
+    聚合口径 = rail 已有灯语的同一事实源(<code>sessionLampAggregation</code>,本地链路 ∪ device-link 远程镜像):
+    running → 图标呼吸橙(<code>--status-bar-accent</code>);未读 → AttentionDot,<b>红 error &gt; 蓝 awaiting &gt; 绿 done</b> 取聚合最高档。
+    各层聚合集合 = 该层下实际渲染的行,<b>灯亮进去一定找得到亮的行</b>。演示数据,Default Light,色值即对应 token 取值。
+  </p>
+
+  <!-- ═══════ 形态② 一列(改动主战场,放最前) ═══════ -->
+  <section id="f2">
+    <div class="form-head"><span class="no">②</span><span class="name">一列卡片(窄展开 · 按设备分组)</span><span class="tag changed">新增灯语全集</span></div>
+    <div>
+      <div class="sidebar" style="width:300px">
+        <!-- 本机段:段内有 running → 图标呼吸橙;有未读 → 右侧聚合点(取最高档=红) -->
+        <div class="dev callout" data-tip="★ 设备段头:图标呼吸橙(段内 running)+ 右侧聚合点(最高档)">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
+          <svg class="breathing" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="12" rx="2"/><path d="M12 20h.01M7 20h10"/></svg>
+          <span class="nm">本机</span><span class="dot online" style="width:6px;height:6px"></span>
+          <span class="right"><span class="dot d6 error"></span></span>
+        </div>
+        <div class="indent">
+          <!-- 项目行:running 呼吸橙文件夹 + 红点(error 未读) -->
+          <div class="prow callout" data-tip="★ 项目行:呼吸橙 + 聚合点">
+            <span class="grp">
+              <svg class="breathing" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 14.5c0-1 .8-2 1.8-2h12.4c1.2 0 2 1.1 1.7 2.2l-1.1 4A2 2 0 0 1 18.9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.7.9l.8 1.2c.4.55 1 .9 1.7.9H18a2 2 0 0 1 2 2v2"/></svg>
+              <span class="nm">cindy-rail-live</span>
+              <span class="dot d5 error"></span>
+            </span>
+          </div>
+          <div class="srow"><span class="aa">AI</span><span class="nm" style="color:var(--muted)">worktree 依赖安装</span><span class="spinner"></span></div>
+          <div class="srow"><span class="aa">AI</span><span class="nm">键盘可达性修复</span><span class="dot d6 error" style="width:8px;height:8px"></span></div>
+          <!-- 项目行:绿点(完成未读) -->
+          <div class="prow">
+            <span class="grp">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+              <span class="nm">session-backup</span>
+              <span class="dot d5 done"></span>
+            </span>
+          </div>
+          <!-- 项目行:无灯(全部已读、无运行) -->
+          <div class="prow">
+            <span class="grp">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+              <span class="nm">docs-site</span>
+            </span>
+          </div>
+          <!-- 对话组行:蓝点(awaiting) -->
+          <div class="prow callout" data-tip="★「对话」组行同款">
+            <span class="grp">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 9a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2z"/><path d="M18 9h2a2 2 0 0 1 2 2v11l-4-4h-6a2 2 0 0 1-2-2v-1"/></svg>
+              <span class="nm">对话</span>
+              <span class="dot d5 awaiting"></span>
+            </span>
+          </div>
+        </div>
+        <!-- 远程段(折叠 + 离线):折叠时也一眼看到未读藏在哪台 -->
+        <div class="dev callout" data-tip="★ 折叠段:未读不再被藏起来">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="12" rx="2"/><path d="M12 20h.01M7 20h10"/></svg>
+          <span class="nm">FicoMini.local</span><span class="dot offline-g" style="width:6px;height:6px"></span>
+          <span class="right"><span class="dot d6 done"></span><span class="off">离线</span></span>
+        </div>
+      </div>
+      <div style="max-width:720px;margin-top:14px">
+        <p class="rules">
+          <b>层级链路:</b>设备段头 → 项目/对话组行 → 会话行,三层同一灯语,一路点着灯找下去。<br/>
+          <b>设备段头(★新增):</b>图标 running 呼吸橙;右侧聚合未读点(size 6,静态,rail 段钮同款),与「离线」标注同组靠右。折叠段/超出折叠上限的未读不再不可见。<br/>
+          <b>项目行/「对话」组行(★新增):</b>图标 running 呼吸橙;标题右侧聚合点(size 5,静态,rail 浮层面板项目行同款)。置顶区的项目行同样生效。<br/>
+          <b>会话行(原有,不变):</b>行内状态点/呼吸为既有行为,作最底层对照。<br/>
+          <b>注意:</b>设备名旁的 6px 小点是<b>在线状态</b>(绿在线/灰离线,既有设计,未动)——它与未读点同绿,位置不同(名旁 vs 行尾)。是否要给在线点换形态以彻底区分,留待定夺。
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════ 形态③ 两列 ═══════ -->
+  <section id="f3">
+    <div class="form-head"><span class="no">③</span><span class="name">两列卡片(中宽展开)</span><span class="tag changed">灯语同②,置顶两列</span></div>
+    <div class="row-flex">
+      <div class="sidebar" style="width:430px">
+        <div class="sec-t">置顶</div>
+        <div class="cards" style="grid-template-columns:1fr 1fr">
+          <div class="card"><div class="t">部门 QBR 制作</div><div class="p">汇总玩家核心反馈,提炼汇报重点。</div><div class="m"><span class="dot d6 awaiting"></span>待回复 · 刚刚</div></div>
+          <div class="card"><div class="t" style="color:var(--muted)">实时运营周报生成</div><div class="p">正在分析本周项目数据。</div><div class="m">已运行 6 分</div></div>
+        </div>
+        <div class="sec-t">置顶项目</div>
+        <div class="prow callout" data-tip="★ 置顶区项目行同样点灯">
+          <span class="grp">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+            <span class="nm">cindy-rail-live</span>
+            <span class="dot d5 done"></span>
+          </span>
+        </div>
+        <div class="dev"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="12" rx="2"/><path d="M12 20h.01M7 20h10"/></svg>
+          <span class="nm">本机</span><span class="dot online" style="width:6px;height:6px"></span>
+          <span class="right"><span class="dot d6 awaiting"></span></span>
+        </div>
+        <div class="indent">
+          <div class="prow"><span class="grp">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+            <span class="nm">对话</span><span class="dot d5 awaiting"></span></span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════ 形态④ 三列 ═══════ -->
+  <section id="f4">
+    <div class="form-head"><span class="no">④</span><span class="name">三列卡片(宽展开 · 置顶三列)</span><span class="tag changed">灯语同②,置顶三列</span></div>
+    <div class="row-flex">
+      <div class="sidebar" style="width:560px">
+        <div class="sec-t">置顶</div>
+        <div class="cards" style="grid-template-columns:1fr 1fr 1fr">
+          <div class="card"><div class="t">部门 QBR 制作</div><div class="p">汇总玩家核心反馈。</div><div class="m"><span class="dot d6 awaiting"></span>待回复 · 刚刚</div></div>
+          <div class="card"><div class="t" style="color:var(--muted)">实时运营周报生成</div><div class="p">正在分析本周数据。</div><div class="m">已运行 6 分</div></div>
+          <div class="card"><div class="t">审批材料补充</div><div class="p">整理证照与授权文件。</div><div class="m"><span class="dot d6 error"></span>出错 · 1 小时</div></div>
+        </div>
+        <div class="dev">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg>
+          <svg class="breathing" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="12" rx="2"/><path d="M12 20h.01M7 20h10"/></svg>
+          <span class="nm">本机</span><span class="dot online" style="width:6px;height:6px"></span>
+          <span class="right"><span class="dot d6 error"></span></span>
+        </div>
+        <div class="indent">
+          <div class="prow"><span class="grp">
+            <svg class="breathing" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 14.5c0-1 .8-2 1.8-2h12.4c1.2 0 2 1.1 1.7 2.2l-1.1 4A2 2 0 0 1 18.9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.7.9l.8 1.2c.4.55 1 .9 1.7.9H18a2 2 0 0 1 2 2v2"/></svg>
+            <span class="nm">cindy-rail-live</span><span class="dot d5 error"></span></span></div>
+          <div class="prow"><span class="grp">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+            <span class="nm">session-backup</span><span class="dot d5 done"></span></span></div>
+        </div>
+        <div class="dev">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 18 6-6-6-6"/></svg>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="12" rx="2"/><path d="M12 20h.01M7 20h10"/></svg>
+          <span class="nm">FicoMini.local</span><span class="dot offline-g" style="width:6px;height:6px"></span>
+          <span class="right"><span class="dot d6 done"></span><span class="off">离线</span></span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══════ 形态① 最小化(无回归对照) ═══════ -->
+  <section id="f1">
+    <div class="form-head"><span class="no">①</span><span class="name">最小化(64px rail + 浮层面板)</span><span class="tag same">行为不变(聚合改共享实现,无视觉 diff)</span></div>
+    <p class="rules">
+      rail 段钮与浮层面板项目行的灯语<b>本来就有</b>(本次的参照系),重构为共享 <code>sessionLampAggregation</code> 后行为逐一保持:
+      段钮聚合点 6px(右上角)、面板项目行聚合点 5px、running 呼吸橙。单测钉住口径(tone 优先级 / 未读集合门槛 / 远程镜像并入)。
+    </p>
+    <div class="row-flex">
+      <div class="rail">
+        <button class="fn"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg></button>
+        <div class="rail-sep"></div>
+        <button class="fn" title="项目"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg><span class="dot d6 error" style="position:absolute;right:6px;top:6px"></span></button>
+        <button class="fn active" title="对话"><span class="breathing" style="display:inline-flex"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg></span><span class="dot d6 done" style="position:absolute;right:6px;top:6px"></span></button>
+      </div>
+      <div class="panel">
+        <div class="p-head"><span class="n">项目</span><span class="c">22 个对话</span></div>
+        <div class="pjrow"><svg class="breathing" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg><span class="nm">cindy-rail-live</span><span class="dot d5 error"></span><span class="c">16</span><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--tertiary)"><path d="m9 18 6-6-6-6"/></svg></div>
+        <div class="pjrow"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--tertiary)"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg><span class="nm">session-backup</span><span class="dot d5 done"></span><span class="c">4</span><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--tertiary)"><path d="m9 18 6-6-6-6"/></svg></div>
+        <div class="pjrow"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--tertiary)"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg><span class="nm">docs-site</span><span class="c">3</span><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--tertiary)"><path d="m9 18 6-6-6-6"/></svg></div>
+      </div>
+    </div>
+  </section>
+</div>
+</body>
+</html>
