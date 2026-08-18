@@ -128,4 +128,28 @@ describe('git-review statusReader', () => {
       maxStdoutBytes: 128 * 1024 * 1024,
     });
   });
+
+  it('passes --ignore-submodules=none so ignore-configured submodules stay visible (#2463 review)', async () => {
+    // submodule.<name>.ignore=all/dirty 会让 status 省略脏子仓,dirty 内容进不了
+    // Review 发现链;submoduleEvidencePaths() 的 status 兜底显式依赖这个 flag。
+    // flag 被静默丢掉时新鲜度绕过会复现,必须有断言拦住。
+    runGitMock.mockImplementation(async (args: readonly string[]) => {
+      if (args[0] === 'status') {
+        return {
+          stdout: ['# branch.oid abcdef', '# branch.head main', ''].join('\0'),
+          stderr: '',
+          exitCode: 0,
+        };
+      }
+      if (args[0] === 'rev-parse') {
+        return { stdout: `/repo/.git/${args.at(-1) ?? 'marker'}\n`, stderr: '', exitCode: 0 };
+      }
+      throw new Error(`unexpected git args: ${args.join(' ')}`);
+    });
+
+    await readStatus(scope);
+
+    const statusCall = runGitMock.mock.calls.find(([args]) => (args as readonly string[])[0] === 'status');
+    expect(statusCall?.[0]).toContain('--ignore-submodules=none');
+  });
 });

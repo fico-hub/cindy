@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.setConfig({ testTimeout: process.platform === 'win32' ? 120_000 : 60_000 });
 
 import { runGit } from '../../git-review/gitRunner';
+import { readStatus } from '../../git-review/statusReader';
+import type { ReviewScope } from '../../git-review/types';
 import { readReviewSubmoduleIdentity } from '../reviewSubmoduleIdentity';
 
 let workRoot: string;
@@ -550,5 +552,41 @@ describe('readReviewSubmoduleIdentity index 已删的嵌套 gitlink (#2463 revie
     // index 里已无 gitlink:indexRecord 记 absent,但 HEAD 记录与内层身份仍绑定。
     expect(nested[0].indexRecord).toBe('absent');
     expect(nested[0].subHead).not.toBe('uninitialized');
+  });
+});
+
+describe('顶层 readStatus 的 --ignore-submodules=none (#2463 维护者 review)', () => {
+  it('keeps an ignore=all submodule with untracked-only content visible in top-level status', async () => {
+    // 父仓配置 submodule.<name>.ignore=all 时,不带 --ignore-submodules=none
+    // 的 git status 会整个省略脏子仓;submoduleEvidencePaths() 的 status 兜底
+    // 依赖顶层 readStatus() 显式覆盖该配置——这里用真实仓库锁住这个行为
+    // (untracked-only 内部内容同时也是无 numstat 条目的形态)。
+    const { parent } = await setupNestedChain(1);
+    parentPath = parent;
+    await runGit(['config', 'submodule.vendor/lib.ignore', 'all'], { cwd: parent });
+    await fs.writeFile(path.join(parent, 'vendor', 'lib', 'untracked.txt'), 'u\n');
+
+    const scope: ReviewScope = {
+      sessionId: 's-status',
+      workdir: parent,
+      worktreePath: parent,
+      workingDir: parent,
+      repoRoot: parent,
+      branch: null,
+      headOid: null,
+      isDetached: false,
+      isUnborn: false,
+      source: 'worktree',
+      aheadBehind: { ahead: 0, behind: 0, upstream: null, stale: true },
+      disabledReason: null,
+      disabledMessage: null,
+      resolutionChain: [],
+    };
+    const status = await readStatus(scope);
+
+    const entry = status.files.find((file) => file.path === 'vendor/lib');
+    expect(entry).toBeTruthy();
+    expect(entry?.isSubmodule).toBe(true);
+    expect(entry?.worktreeStatus).toBe('modified');
   });
 });
