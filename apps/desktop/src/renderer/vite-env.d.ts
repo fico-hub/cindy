@@ -1198,6 +1198,11 @@ interface ElectronAPI {
     ) => () => void;
   };
 
+  /** 区域截图 (capture-region 快捷键) —— 契约见 shared/screenCapture.ts, 仅 darwin。 */
+  screenCapture: {
+    captureRegion: () => Promise<import('../shared/screenCapture').ScreenCaptureRegionResult>;
+  };
+
   /** 主界面布局树 —— 数据模型与校验见 shared/layoutTree.ts,main 端见 main/layout/。 */
   layout: {
     /** 首帧同步拉取(规则 7:布局第一帧就位,不允许默认→用户布局的跳变)。 */

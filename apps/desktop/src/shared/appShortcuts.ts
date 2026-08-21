@@ -43,6 +43,7 @@ export const APP_SHORTCUT_IDS = [
   'search-in-project',
   'save-file',
   'open-terminal',
+  'capture-region',
   'zoom-in',
   'zoom-out',
   'zoom-reset',
@@ -164,6 +165,17 @@ export const APP_SHORTCUT_DEFINITIONS: ReadonlyArray<AppShortcutDefinition> = [
     descriptionKey: 'settings.shortcuts.items.cycle-permission-mode.description',
     rebindable: true,
     getDefaultCombos: () => [combo('Tab', { shift: true })],
+  },
+  // 区域截图: 调起 macOS 原生 screencapture -i 拉框选区, 结果走剪贴板图片
+  // 粘贴同一管线进入当前会话输入框。仅 darwin (依赖系统 screencapture CLI)。
+  {
+    id: 'capture-region',
+    scope: 'app',
+    labelKey: 'settings.shortcuts.items.capture-region.label',
+    descriptionKey: 'settings.shortcuts.items.capture-region.description',
+    rebindable: true,
+    platforms: ['darwin'],
+    getDefaultCombos: () => [combo('KeyS', { meta: true, shift: true })],
   },
   // ⌘W / Ctrl+W 是系统级惯例键 (keyboardReserved 保留组合), 不开放改绑与设置页
   // 展示。行为按焦点分派: 焦点在右侧栏内 → 关激活 tab; 否则 mac 关(隐藏)当前

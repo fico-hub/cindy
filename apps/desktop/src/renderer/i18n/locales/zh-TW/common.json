@@ -3885,6 +3885,10 @@
           "label": "開啟命令列",
           "description": "在右側欄開啟終端（已開啟則聚焦）"
         },
+        "capture-region": {
+          "label": "區域截圖",
+          "description": "拉框擷取螢幕區域並加入對話輸入框（僅 macOS）"
+        },
         "switch-session-1": {
           "label": "切換到第 1 個任務",
           "description": "跳轉到側邊欄第 1 個可見任務"

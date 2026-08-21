@@ -1019,6 +1019,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onChanged: fanOutAppShortcutsChanged,
   },
 
+  // 区域截图 (capture-region 快捷键, shared/screenCapture.ts 契约, 仅 darwin)。
+  screenCapture: {
+    captureRegion: (): Promise<{ ok: true; cancelled: boolean; data?: Uint8Array }> =>
+      ipcRenderer.invoke('screen-capture:region'),
+  },
+
   // 主界面布局树 (shared/layoutTree.ts)。getStateSync 走 sendSync:布局必须
   // 首帧就位,禁止"先渲染默认再跳成用户布局"(设计规范规则 7);文件极小,
   // 同步读不卡启动,与 app-shortcuts:get 同模式。
