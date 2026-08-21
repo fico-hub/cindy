@@ -8,6 +8,23 @@
  */
 export const SCREEN_CAPTURE_REGION_CHANNEL = 'screen-capture:region';
 
+/**
+ * 覆盖层配色(win/linux): renderer 在触发瞬间解析当前主题语义 token 的计算值
+ * 随 invoke 传入 —— 覆盖层是 main 自生成页面, 不加载 renderer 的主题 CSS 变量,
+ * 传"解析后的值"让 Light/Dark 与自定义主题 override 都自然生效(DESIGN.md
+ * 双模式门槛)。main 侧逐字段做严格色值格式校验, 非法则回退内置默认。
+ */
+export interface ScreenCaptureOverlayPalette {
+  /** 未选区/选区外遮罩 — token `--overlay-modal`。 */
+  scrim: string;
+  /** 选框描边 — token `--region-capture-selection-border`。 */
+  selectionBorder: string;
+  /** 尺寸标签/提示条底色 — token `--tooltip-bg`。 */
+  pillBg: string;
+  /** 尺寸标签/提示条文字 — token `--tooltip-text`。 */
+  pillFg: string;
+}
+
 export interface ScreenCaptureRegionResult {
   ok: true;
   /**

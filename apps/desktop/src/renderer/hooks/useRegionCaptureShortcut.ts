@@ -20,6 +20,7 @@ import {
 } from '../lib/composerDraftStore';
 import { createLogger } from '../lib/logger';
 import type { AttachedFile } from '../lib/fileTypes';
+import type { ScreenCaptureOverlayPalette } from '../../shared/screenCapture';
 import { useAppShortcut } from './useAppShortcut';
 
 const log = createLogger('useRegionCaptureShortcut');
@@ -63,6 +64,26 @@ export function resolveRegionCaptureTargetFromPath(pathname: string): RegionCapt
     return { sessionId, draftKey: sessionId };
   }
   return null;
+}
+
+/**
+ * 触发瞬间解析当前主题语义 token 的计算值 → 覆盖层配色(win/linux)。覆盖层是
+ * main 自生成页面, 不加载 renderer 的主题 CSS 变量; 传"解析后的值"让
+ * Light/Dark 与自定义主题 override 都自然生效(DESIGN.md 双模式门槛, review P1)。
+ * fallback 与 main 侧 DEFAULT_OVERLAY_PALETTE 一致; 非法值由 main 严格校验兜底。
+ */
+function resolveOverlayPalette(): ScreenCaptureOverlayPalette {
+  const styles = getComputedStyle(document.documentElement);
+  const read = (token: string, fallback: string): string => {
+    const value = styles.getPropertyValue(token).trim();
+    return value || fallback;
+  };
+  return {
+    scrim: read('--overlay-modal', 'rgba(0, 0, 0, 0.7)'),
+    selectionBorder: read('--region-capture-selection-border', 'rgba(255, 255, 255, 0.9)'),
+    pillBg: read('--tooltip-bg', '#1f1f1e'),
+    pillFg: read('--tooltip-text', '#ffffff'),
+  };
 }
 
 /** Uint8Array → base64(草稿态无会话目录时的附件形态, 与 useAttachments F6 fallback 对齐)。 */
@@ -179,6 +200,7 @@ export function useRegionCaptureShortcut(): () => boolean {
       try {
         const result = await window.electronAPI.screenCapture.captureRegion({
           overlayHint: overlayHintRef.current,
+          overlayPalette: resolveOverlayPalette(),
         });
         if (result.cancelled || !result.data) return;
         if (!isTargetStillValid()) return;

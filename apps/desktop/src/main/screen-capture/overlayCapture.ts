@@ -6,6 +6,7 @@ import {
   SCREEN_CAPTURE_OVERLAY_READY_CHANNEL,
   SCREEN_CAPTURE_OVERLAY_RESULT_CHANNEL,
   type ScreenCaptureOverlayInitPayload,
+  type ScreenCaptureOverlayPalette,
   type ScreenCaptureOverlayRect,
   type ScreenCaptureOverlayResult,
 } from '../../shared/screenCapture.js';
@@ -65,6 +66,7 @@ function parseOverlayResult(value: unknown): ScreenCaptureOverlayResult | null {
 export async function captureRegionViaOverlay(
   timeoutMs: number,
   hintText: string,
+  palette: ScreenCaptureOverlayPalette,
 ): Promise<OverlayCaptureOutcome> {
   const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
   const scaleFactor = display.scaleFactor || 1;
@@ -194,7 +196,7 @@ export async function captureRegionViaOverlay(
       ipcMain.on(SCREEN_CAPTURE_OVERLAY_READY_CHANNEL, onReady);
       overlay.on('closed', onClosed);
 
-      const html = buildRegionCaptureOverlayHtml(hintText);
+      const html = buildRegionCaptureOverlayHtml(hintText, palette);
       overlay
         .loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
         .then(() => {

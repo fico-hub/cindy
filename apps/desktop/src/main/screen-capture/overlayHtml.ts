@@ -6,7 +6,8 @@
  * 主 renderer bundle, 不承载主窗口 bridge(最小权限, review P1)。样式内嵌
  * raw CSS(sessionDragPreviewHtml 同款形态), 字号 11/13px 落在 DESIGN.md §3
  * 白名单档位内。CSP 采用 sha256 hash 白名单(不引入 'unsafe-inline', 仓库
- * 安全约束): 内联样式/脚本是固定常量, hint 只进 HTML 转义后的文本节点。
+ * 安全约束): 脚本是固定常量; 样式由主题配色生成, hash 按最终样式串运行时
+ * 计算, 配色值经 main 严格格式校验、hint 只进 HTML 转义后的文本节点。
  *
  * 交互契约(与 main 侧 overlayCapture 对齐):
  * - DOMContentLoaded → announceReady → 收到 init 后展示冻结帧;
@@ -15,6 +16,8 @@
  */
 
 import { createHash } from 'node:crypto';
+
+import type { ScreenCaptureOverlayPalette } from '../../shared/screenCapture.js';
 
 function escapeHtml(value: string): string {
   return value
@@ -30,13 +33,21 @@ function cspHash(source: string): string {
   return `'sha256-${createHash('sha256').update(source, 'utf8').digest('base64')}'`;
 }
 
-const OVERLAY_STYLE = `
+/**
+ * 样式按主题配色生成(Light/Dark 双模式, DESIGN.md 门槛): 色值由 renderer 解析
+ * 当前主题语义 token 后随 invoke 传入, main 已做严格格式校验(sanitizeOverlayPalette,
+ * 仅放行 #hex / rgb[a] / hsl[a] 字面量), 非法值到不了这里 —— CSP 的 style hash
+ * 由最终样式串运行时计算, 动态配色不破坏白名单。
+ */
+function buildOverlayStyle(palette: ScreenCaptureOverlayPalette): string {
+  return `
   html, body { margin: 0; width: 100vw; height: 100vh; overflow: hidden; background: #000; cursor: crosshair; user-select: none; }
   #frame { position: absolute; inset: 0; width: 100%; height: 100%; display: none; }
-  #mask { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.4); }
-  #sel { position: absolute; display: none; border: 1px solid rgba(255, 255, 255, 0.9); box-shadow: 0 0 0 100000px rgba(0, 0, 0, 0.4); }
-  #size { position: absolute; top: -24px; left: 0; padding: 2px 6px; border-radius: 4px; background: rgba(0, 0, 0, 0.7); color: #fff; font-family: ui-monospace, monospace; font-size: 11px; white-space: nowrap; }
-  #hint { position: absolute; top: 32px; left: 50%; transform: translateX(-50%); padding: 6px 12px; border-radius: 6px; background: rgba(0, 0, 0, 0.7); color: #fff; font-family: system-ui, sans-serif; font-size: 13px; white-space: nowrap; }`;
+  #mask { position: absolute; inset: 0; background: ${palette.scrim}; }
+  #sel { position: absolute; display: none; border: 1px solid ${palette.selectionBorder}; box-shadow: 0 0 0 100000px ${palette.scrim}; }
+  #size { position: absolute; top: -24px; left: 0; padding: 2px 6px; border-radius: 4px; background: ${palette.pillBg}; color: ${palette.pillFg}; font-family: ui-monospace, monospace; font-size: 11px; white-space: nowrap; }
+  #hint { position: absolute; top: 32px; left: 50%; transform: translateX(-50%); padding: 6px 12px; border-radius: 6px; background: ${palette.pillBg}; color: ${palette.pillFg}; font-family: system-ui, sans-serif; font-size: 13px; white-space: nowrap; }`;
+}
 
 const OVERLAY_SCRIPT = `
 (function () {
@@ -119,12 +130,16 @@ const OVERLAY_SCRIPT = `
   api.announceReady();
 })();`;
 
-export function buildRegionCaptureOverlayHtml(hintText: string): string {
+export function buildRegionCaptureOverlayHtml(
+  hintText: string,
+  palette: ScreenCaptureOverlayPalette,
+): string {
   const hint = escapeHtml(hintText);
+  const style = buildOverlayStyle(palette);
   const csp = [
     "default-src 'none'",
     'img-src data:',
-    `style-src ${cspHash(OVERLAY_STYLE)}`,
+    `style-src ${cspHash(style)}`,
     `script-src ${cspHash(OVERLAY_SCRIPT)}`,
   ].join('; ');
   return `<!doctype html>
@@ -132,7 +147,7 @@ export function buildRegionCaptureOverlayHtml(hintText: string): string {
 <head>
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="${csp}">
-<style>${OVERLAY_STYLE}</style>
+<style>${style}</style>
 </head>
 <body>
 <img id="frame" alt="" draggable="false">

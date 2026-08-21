@@ -32,7 +32,7 @@ vi.mock('../../logger.js', () => ({
 
 import { registerScreenCaptureIpc } from '../index.js';
 
-type Handler = (event: unknown) => Promise<ScreenCaptureRegionResult>;
+type Handler = (event: unknown, payload?: unknown) => Promise<ScreenCaptureRegionResult>;
 
 function registerAndGetHandler(platform: string): Handler {
   registerScreenCaptureIpc(platform);
@@ -64,6 +64,52 @@ describe('registerScreenCaptureIpc', () => {
     expect(mocks.execFile).not.toHaveBeenCalled();
     // 剪贴板写入是平台无关的共享成功尾部
     expect(mocks.clipboardWriteImage).toHaveBeenCalledTimes(1);
+  });
+
+  // 覆盖层配色: 合法主题色值透传; 非法值(CSS 注入/var 引用)逐字段回退默认 ——
+  // 配色会拼进覆盖层 <style>, sanitize 是防样式注入的唯一闸口(review P1)。
+  it('passes validated palette colors through and falls back on unsafe values', async () => {
+    mocks.overlayCapture.mockResolvedValue({ cancelled: true });
+    const handler = registerAndGetHandler('win32');
+
+    await handler({}, {
+      overlayPalette: {
+        scrim: 'rgba(0, 0, 0, 0.5)',
+        selectionBorder: '#fff',
+        pillBg: 'hsl(60, 2%, 12%)',
+        pillFg: ' #fafafa ',
+      },
+    });
+    expect(mocks.overlayCapture).toHaveBeenLastCalledWith(expect.any(Number), expect.any(String), {
+      scrim: 'rgba(0, 0, 0, 0.5)',
+      selectionBorder: '#fff',
+      pillBg: 'hsl(60, 2%, 12%)',
+      pillFg: '#fafafa',
+    });
+
+    await handler({}, {
+      overlayPalette: {
+        scrim: 'red; } body { background: url(https://evil) }',
+        selectionBorder: 'var(--text-primary)',
+        pillBg: 'url(javascript:1)',
+        pillFg: 42,
+      },
+    });
+    expect(mocks.overlayCapture).toHaveBeenLastCalledWith(expect.any(Number), expect.any(String), {
+      scrim: 'rgba(0, 0, 0, 0.7)',
+      selectionBorder: 'rgba(255, 255, 255, 0.9)',
+      pillBg: '#1f1f1e',
+      pillFg: '#ffffff',
+    });
+
+    // 未传配色 → 全默认
+    await handler({});
+    expect(mocks.overlayCapture).toHaveBeenLastCalledWith(expect.any(Number), expect.any(String), {
+      scrim: 'rgba(0, 0, 0, 0.7)',
+      selectionBorder: 'rgba(255, 255, 255, 0.9)',
+      pillBg: '#1f1f1e',
+      pillFg: '#ffffff',
+    });
   });
 
   it('propagates overlay cancel as cancelled', async () => {

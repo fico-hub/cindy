@@ -1025,6 +1025,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   screenCapture: {
     captureRegion: (payload?: {
       overlayHint?: string;
+      overlayPalette?: {
+        scrim: string;
+        selectionBorder: string;
+        pillBg: string;
+        pillFg: string;
+      };
     }): Promise<{ ok: true; cancelled: boolean; data?: Uint8Array }> =>
       ipcRenderer.invoke('screen-capture:region', payload),
   },

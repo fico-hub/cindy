@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 
 import {
   SCREEN_CAPTURE_REGION_CHANNEL,
+  type ScreenCaptureOverlayPalette,
   type ScreenCaptureRegionResult,
 } from '../../shared/screenCapture.js';
 import { createLogger } from '../logger.js';
@@ -81,11 +82,49 @@ function sanitizeOverlayHint(payload: unknown): string {
   return hint.slice(0, MAX_OVERLAY_HINT_LENGTH);
 }
 
-async function captureRegion(platform: string, overlayHint: string): Promise<ScreenCaptureRegionResult> {
+/** 覆盖层配色兜底(renderer 未传/字段非法时) — 与主题 token 的 dark 默认值一致。 */
+const DEFAULT_OVERLAY_PALETTE: ScreenCaptureOverlayPalette = {
+  scrim: 'rgba(0, 0, 0, 0.7)',
+  selectionBorder: 'rgba(255, 255, 255, 0.9)',
+  pillBg: '#1f1f1e',
+  pillFg: '#ffffff',
+};
+
+/**
+ * 色值只放行 #hex / rgb[a](…) / hsl[a](…) 字面量(函数体内仅数字/逗号/百分号/
+ * 空格/点/斜杠)。配色会拼进覆盖层 <style>, 这里是防样式注入的唯一闸口 ——
+ * var()/url()/expression 等一律拒绝, 逐字段回退默认值。
+ */
+const SAFE_CSS_COLOR = /^(#[0-9a-f]{3,8}|(?:rgb|rgba|hsl|hsla)\(\s*[\d.,%\s/]+\s*\))$/i;
+
+function sanitizeOverlayPalette(payload: unknown): ScreenCaptureOverlayPalette {
+  const raw =
+    payload && typeof payload === 'object'
+      ? (payload as { overlayPalette?: unknown }).overlayPalette
+      : undefined;
+  const source = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+  const pick = (key: keyof ScreenCaptureOverlayPalette): string => {
+    const value = source[key];
+    if (typeof value === 'string' && SAFE_CSS_COLOR.test(value.trim())) return value.trim();
+    return DEFAULT_OVERLAY_PALETTE[key];
+  };
+  return {
+    scrim: pick('scrim'),
+    selectionBorder: pick('selectionBorder'),
+    pillBg: pick('pillBg'),
+    pillFg: pick('pillFg'),
+  };
+}
+
+async function captureRegion(
+  platform: string,
+  overlayHint: string,
+  overlayPalette: ScreenCaptureOverlayPalette,
+): Promise<ScreenCaptureRegionResult> {
   const outcome =
     platform === 'darwin'
       ? await captureRegionDarwin()
-      : await captureRegionViaOverlay(CAPTURE_TIMEOUT_MS, overlayHint);
+      : await captureRegionViaOverlay(CAPTURE_TIMEOUT_MS, overlayHint, overlayPalette);
   if (outcome.cancelled || !outcome.data) {
     return { ok: true, cancelled: true };
   }
@@ -110,7 +149,11 @@ export function registerScreenCaptureIpc(platform: string = process.platform): v
       }
       captureInFlight = true;
       try {
-        return await captureRegion(platform, sanitizeOverlayHint(payload));
+        return await captureRegion(
+          platform,
+          sanitizeOverlayHint(payload),
+          sanitizeOverlayPalette(payload),
+        );
       } catch (err) {
         // 非取消类失败(desktopCapturer 无可用帧、覆盖层加载失败等)统一转
         // 稳定 IPC 错误码, renderer 据此弹本地化提示 —— 快捷键不能"按了
