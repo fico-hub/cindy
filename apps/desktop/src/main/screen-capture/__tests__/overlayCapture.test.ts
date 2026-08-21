@@ -180,7 +180,28 @@ describe('captureRegionViaOverlay', () => {
 
   it('throws when desktopCapturer yields no usable frame', async () => {
     mocks.getSources.mockResolvedValueOnce([]);
-    await expect(captureRegionViaOverlay(5_000, 'drag to select')).rejects.toThrow('no usable screen frame');
+    await expect(captureRegionViaOverlay(5_000, 'drag to select')).rejects.toThrow(
+      'cannot match a capture source',
+    );
+  });
+
+  // 帧源必须可靠对应覆盖层所在显示器: 多源且 display_id 无匹配(部分
+  // Wayland 后端)时不猜 sources[0] —— 覆盖层在 A 屏展示/裁剪 B 屏内容会
+  // 让用户不知情附上另一块屏幕(review P1)。单一源可安全使用。
+  it('rejects unmatched multi-source displays but accepts a sole source without display_id', async () => {
+    mocks.getSources.mockResolvedValueOnce([
+      { display_id: '', thumbnail: mocks.frame },
+      { display_id: '', thumbnail: mocks.frame },
+    ]);
+    await expect(captureRegionViaOverlay(5_000, 'drag to select')).rejects.toThrow(
+      'cannot match a capture source',
+    );
+
+    mocks.getSources.mockResolvedValueOnce([{ display_id: '', thumbnail: mocks.frame }]);
+    const pending = captureRegionViaOverlay(5_000, 'drag to select');
+    await flushLoad();
+    emitOverlayResult(501, { kind: 'cancel' });
+    await expect(pending).resolves.toEqual({ cancelled: true });
   });
 
   it('loads a self-contained data: URL with the dedicated minimal preload', async () => {
