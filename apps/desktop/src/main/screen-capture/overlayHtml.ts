@@ -5,13 +5,16 @@
  * (regionCaptureOverlayPreload)暴露的 ready/init/result 三个方法 —— 不加载
  * 主 renderer bundle, 不承载主窗口 bridge(最小权限, review P1)。样式内嵌
  * raw CSS(sessionDragPreviewHtml 同款形态), 字号 11/13px 落在 DESIGN.md §3
- * 白名单档位内。
+ * 白名单档位内。CSP 采用 sha256 hash 白名单(不引入 'unsafe-inline', 仓库
+ * 安全约束): 内联样式/脚本是固定常量, hint 只进 HTML 转义后的文本节点。
  *
  * 交互契约(与 main 侧 overlayCapture 对齐):
  * - DOMContentLoaded → announceReady → 收到 init 后展示冻结帧;
  * - 左键拖框 → mouseup 上报 select(DIP rect, 任意方向拖拽已规整并夹取边界);
  * - Esc / 右键 / 失焦(300ms 挂载宽限) → cancel; 近零选区由 main 判定为误点。
  */
+
+import { createHash } from 'node:crypto';
 
 function escapeHtml(value: string): string {
   return value
@@ -22,28 +25,20 @@ function escapeHtml(value: string): string {
     .replaceAll("'", '&#39;');
 }
 
-export function buildRegionCaptureOverlayHtml(hintText: string): string {
-  const hint = escapeHtml(hintText);
-  return `<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
-<style>
+/** CSP sha256 source 表达式(哈希内容 = 内联块标签之间的原文, 字节精确)。 */
+function cspHash(source: string): string {
+  return `'sha256-${createHash('sha256').update(source, 'utf8').digest('base64')}'`;
+}
+
+const OVERLAY_STYLE = `
   html, body { margin: 0; width: 100vw; height: 100vh; overflow: hidden; background: #000; cursor: crosshair; user-select: none; }
   #frame { position: absolute; inset: 0; width: 100%; height: 100%; display: none; }
   #mask { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.4); }
   #sel { position: absolute; display: none; border: 1px solid rgba(255, 255, 255, 0.9); box-shadow: 0 0 0 100000px rgba(0, 0, 0, 0.4); }
   #size { position: absolute; top: -24px; left: 0; padding: 2px 6px; border-radius: 4px; background: rgba(0, 0, 0, 0.7); color: #fff; font-family: ui-monospace, monospace; font-size: 11px; white-space: nowrap; }
-  #hint { position: absolute; top: 32px; left: 50%; transform: translateX(-50%); padding: 6px 12px; border-radius: 6px; background: rgba(0, 0, 0, 0.7); color: #fff; font-family: system-ui, sans-serif; font-size: 13px; white-space: nowrap; }
-</style>
-</head>
-<body>
-<img id="frame" alt="" draggable="false">
-<div id="mask"></div>
-<div id="sel"><div id="size"></div></div>
-<div id="hint">${hint}</div>
-<script>
+  #hint { position: absolute; top: 32px; left: 50%; transform: translateX(-50%); padding: 6px 12px; border-radius: 6px; background: rgba(0, 0, 0, 0.7); color: #fff; font-family: system-ui, sans-serif; font-size: 13px; white-space: nowrap; }`;
+
+const OVERLAY_SCRIPT = `
 (function () {
   'use strict';
   var api = window.regionCaptureOverlayAPI;
@@ -80,7 +75,7 @@ export function buildRegionCaptureOverlayHtml(hintText: string): string {
     sel.style.top = rect.y + 'px';
     sel.style.width = rect.width + 'px';
     sel.style.height = rect.height + 'px';
-    size.textContent = Math.round(rect.width) + ' \\u00d7 ' + Math.round(rect.height);
+    size.textContent = Math.round(rect.width) + ' \\\\u00d7 ' + Math.round(rect.height);
     mask.style.display = 'none';
     hint.style.display = 'none';
   }
@@ -122,8 +117,29 @@ export function buildRegionCaptureOverlayHtml(hintText: string): string {
   });
 
   api.announceReady();
-})();
-</script>
+})();`;
+
+export function buildRegionCaptureOverlayHtml(hintText: string): string {
+  const hint = escapeHtml(hintText);
+  const csp = [
+    "default-src 'none'",
+    'img-src data:',
+    `style-src ${cspHash(OVERLAY_STYLE)}`,
+    `script-src ${cspHash(OVERLAY_SCRIPT)}`,
+  ].join('; ');
+  return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="${csp}">
+<style>${OVERLAY_STYLE}</style>
+</head>
+<body>
+<img id="frame" alt="" draggable="false">
+<div id="mask"></div>
+<div id="sel"><div id="size"></div></div>
+<div id="hint">${hint}</div>
+<script>${OVERLAY_SCRIPT}</script>
 </body>
 </html>`;
 }

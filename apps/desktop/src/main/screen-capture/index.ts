@@ -11,6 +11,7 @@ import {
   type ScreenCaptureRegionResult,
 } from '../../shared/screenCapture.js';
 import { createLogger } from '../logger.js';
+import { isIpcError } from '../../shared/ipc-errors.js';
 import { assertTrustedAppRendererEvent } from '../security/trustedAppRenderer.js';
 import { throwIpcError } from '../utils/ipcValidate.js';
 import { captureRegionViaOverlay } from './overlayCapture.js';
@@ -113,8 +114,10 @@ export function registerScreenCaptureIpc(platform: string = process.platform): v
       } catch (err) {
         // 非取消类失败(desktopCapturer 无可用帧、覆盖层加载失败等)统一转
         // 稳定 IPC 错误码, renderer 据此弹本地化提示 —— 快捷键不能"按了
-        // 毫无反应"(review P1)。已是 IpcError(带 code)的原样上抛。
-        if (err && typeof err === 'object' && 'code' in err) throw err;
+        // 毫无反应"。仅透传真正的 IpcError(code 在 IpcErrorCode 联合内):
+        // Electron/系统调用的原生错误也可能带 code(如 ERR_*), 不能绕过
+        // 稳定错误协议裸跨 IPC(review P1/P2)。
+        if (isIpcError(err)) throw err;
         logger.warn('region capture failed', { err: String(err) });
         throwIpcError('INTERNAL', `region capture failed: ${String(err)}`);
       } finally {
