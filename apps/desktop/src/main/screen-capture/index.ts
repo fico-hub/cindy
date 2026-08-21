@@ -118,8 +118,10 @@ export function registerScreenCaptureIpc(platform: string = process.platform): v
         // Electron/系统调用的原生错误也可能带 code(如 ERR_*), 不能绕过
         // 稳定错误协议裸跨 IPC(review P1/P2)。
         if (isIpcError(err)) throw err;
+        // 原始错误只进 main 日志; 跨 IPC 返回固定通用消息 —— 底层错误串可能
+        // 携带内部路径/加载 URL 等细节, 不外泄给 renderer(review P2)。
         logger.warn('region capture failed', { err: String(err) });
-        throwIpcError('INTERNAL', `region capture failed: ${String(err)}`);
+        throwIpcError('INTERNAL', 'region capture failed');
       } finally {
         captureInFlight = false;
       }
