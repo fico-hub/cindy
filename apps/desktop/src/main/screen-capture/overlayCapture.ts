@@ -6,14 +6,19 @@ import {
   SCREEN_CAPTURE_OVERLAY_READY_CHANNEL,
   SCREEN_CAPTURE_OVERLAY_RESULT_CHANNEL,
   type ScreenCaptureOverlayInitPayload,
+  type ScreenCaptureOverlayRect,
   type ScreenCaptureOverlayResult,
 } from '../../shared/screenCapture.js';
 import { createLogger } from '../logger.js';
+import { buildRegionCaptureOverlayHtml } from './overlayHtml.js';
 
 /**
  * win/linux 区域截图: desktopCapturer 冻结光标所在显示器 → 全屏覆盖层窗口
- * (?view=region-capture-overlay, 复用主 renderer bundle 与主 preload)展示
- * 冻结帧 → 用户拖框 → main 按 scaleFactor 裁剪 PNG。
+ * 展示冻结帧 → 用户拖框 → main 按 scaleFactor 裁剪 PNG。
+ *
+ * 覆盖层是 main 自生成 HTML(overlayHtml, data: URL 加载) + 专用最小 preload
+ * (regionCaptureOverlayPreload, 只暴露 ready/init/result), 不加载主 renderer
+ * bundle 也不承载主窗口 bridge —— 一次性选区窗口按最小权限隔离(review P1)。
  *
  * darwin 不走本路径(系统 screencapture -i 体验更好且免自绘)。多显示器:
  * v1 只截光标所在显示器。Wayland 下 desktopCapturer 经 xdg-desktop-portal,
@@ -36,7 +41,31 @@ function lockDownOverlayNavigation(overlay: BrowserWindow): void {
   overlay.webContents.on('will-navigate', (event) => event.preventDefault());
 }
 
-export async function captureRegionViaOverlay(timeoutMs: number): Promise<OverlayCaptureOutcome> {
+/**
+ * overlay → main 的选区结果运行时校验。IPC 不保留 TS 类型约束, 且本监听器
+ * 在 ipcMain.on 里同步执行 —— 未捕获异常会被 lifecycle 视为 fatal 退出应用,
+ * 必须先校验结构与有限数值再做任何算术/裁剪(review P1)。
+ */
+function parseOverlayResult(value: unknown): ScreenCaptureOverlayResult | null {
+  if (!value || typeof value !== 'object') return null;
+  const kind = (value as { kind?: unknown }).kind;
+  if (kind === 'cancel') return { kind: 'cancel' };
+  if (kind !== 'select') return null;
+  const rect = (value as { rect?: unknown }).rect;
+  if (!rect || typeof rect !== 'object') return null;
+  const { x, y, width, height } = rect as Record<string, unknown>;
+  const nums = [x, y, width, height];
+  if (!nums.every((n) => typeof n === 'number' && Number.isFinite(n))) return null;
+  return {
+    kind: 'select',
+    rect: { x, y, width, height } as ScreenCaptureOverlayRect,
+  };
+}
+
+export async function captureRegionViaOverlay(
+  timeoutMs: number,
+  hintText: string,
+): Promise<OverlayCaptureOutcome> {
   const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
   const scaleFactor = display.scaleFactor || 1;
   const pixelSize = {
@@ -71,7 +100,7 @@ export async function captureRegionViaOverlay(timeoutMs: number): Promise<Overla
     enableLargerThanScreen: true,
     backgroundColor: '#000000',
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(__dirname, 'regionCaptureOverlayPreload.js'),
       sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,
@@ -98,21 +127,23 @@ export async function captureRegionViaOverlay(timeoutMs: number): Promise<Overla
         fn();
       };
 
-      const onResult = (event: Electron.IpcMainEvent, result: ScreenCaptureOverlayResult) => {
+      const onResult = (event: Electron.IpcMainEvent, rawResult: unknown) => {
         // 只认覆盖层窗口本体; 其它 renderer 无法伪造选区结果。
         if (overlay.isDestroyed() || event.sender.id !== overlay.webContents.id) return;
-        if (result?.kind !== 'select') {
+        const result = parseOverlayResult(rawResult);
+        if (!result || result.kind !== 'select') {
+          // 取消, 或非法 payload(被注入的覆盖层已不可信)→ 一律安全拒绝。
           settle(() => resolve({ cancelled: true }));
           return;
         }
         const rect = result.rect;
+        const size = frame.getSize();
         const px = {
           x: Math.max(0, Math.round(rect.x * scaleFactor)),
           y: Math.max(0, Math.round(rect.y * scaleFactor)),
           width: Math.round(rect.width * scaleFactor),
           height: Math.round(rect.height * scaleFactor),
         };
-        const size = frame.getSize();
         px.width = Math.min(px.width, size.width - px.x);
         px.height = Math.min(px.height, size.height - px.y);
         if (
@@ -133,8 +164,8 @@ export async function captureRegionViaOverlay(timeoutMs: number): Promise<Overla
         timeoutMs,
       );
 
-      // 冻结帧必须等覆盖层 React 组件挂载并订阅后再发(ready 信号驱动):
-      // did-finish-load 时组件还在异步挂载, 立即 send 必然发到订阅之前。
+      // 冻结帧等覆盖层脚本 announceReady 后再发 —— 避免加载完成与监听注册
+      // 之间的发送竞态(先发必丢)。
       const onReady = (event: Electron.IpcMainEvent) => {
         if (settled || overlay.isDestroyed()) return;
         if (event.sender.id !== overlay.webContents.id) return;
@@ -156,17 +187,9 @@ export async function captureRegionViaOverlay(timeoutMs: number): Promise<Overla
       ipcMain.on(SCREEN_CAPTURE_OVERLAY_READY_CHANNEL, onReady);
       overlay.on('closed', onClosed);
 
-      const load = MAIN_WINDOW_VITE_DEV_SERVER_URL
-        ? (() => {
-            const url = new URL(MAIN_WINDOW_VITE_DEV_SERVER_URL);
-            url.searchParams.set('view', 'region-capture-overlay');
-            return overlay.loadURL(url.toString());
-          })()
-        : overlay.loadFile(
-            path.join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`),
-            { query: { view: 'region-capture-overlay' } },
-          );
-      load
+      const html = buildRegionCaptureOverlayHtml(hintText);
+      overlay
+        .loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
         .then(() => {
           if (settled || overlay.isDestroyed()) return;
           overlay.show();

@@ -19,10 +19,13 @@ export interface ScreenCaptureRegionResult {
   data?: Uint8Array;
 }
 
-// ── win/linux 自绘选区覆盖层(?view=region-capture-overlay 窗口)的通道 ──
+// ── win/linux 自绘选区覆盖层的通道 ──
 // darwin 走系统 screencapture -i, 无覆盖层。流程: main 用 desktopCapturer
-// 冻结光标所在显示器 → 开全屏覆盖层窗口展示冻结帧 → 用户拖框/Esc → 覆盖层
-// 经 result 通道回报 → main 按 scaleFactor 裁剪出 PNG。
+// 冻结光标所在显示器 → 开全屏覆盖层窗口(main 自生成 HTML 经 data: URL 加载,
+// 专用最小 preload regionCaptureOverlayPreload 只暴露 ready/init/result)展示
+// 冻结帧 → 用户拖框/Esc → 覆盖层经 result 通道回报 → main 运行时校验 payload
+// 后按 scaleFactor 裁剪出 PNG。提示条文案由 renderer 随 region invoke 的
+// { overlayHint } 传入(i18n 在 renderer 侧)。
 
 /** overlay → main: 覆盖层 React 组件挂载完成、已订阅 init —— main 收到后再发
  *  冻结帧, 避免 did-finish-load 与组件异步挂载间的发送竞态(先发必丢)。 */

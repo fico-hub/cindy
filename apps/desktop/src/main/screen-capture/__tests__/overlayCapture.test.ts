@@ -89,10 +89,6 @@ vi.mock('../../logger.js', () => ({
   createLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
 }));
 
-// MAIN_WINDOW_VITE_* 是 forge 注入的构建全局; 测试环境手动补。
-(globalThis as Record<string, unknown>).MAIN_WINDOW_VITE_DEV_SERVER_URL = '';
-(globalThis as Record<string, unknown>).MAIN_WINDOW_VITE_NAME = 'main_window';
-
 import { captureRegionViaOverlay } from '../overlayCapture.js';
 
 function emitOverlayResult(senderId: number, result: unknown): void {
@@ -110,7 +106,7 @@ function emitOverlayReady(senderId: number): void {
 type FakeOverlay = InstanceType<typeof FakeBrowserWindow>;
 
 async function flushLoad(): Promise<FakeOverlay> {
-  // loadFile 的 promise 在微任务里 resolve → show; 冻结帧等 ready 信号。
+  // loadURL(data: URL) 的 promise 在微任务里 resolve → show; 冻结帧等 ready 信号。
   await new Promise((resolve) => setTimeout(resolve, 0));
   const overlay = FakeBrowserWindow.instances.at(-1);
   expect(overlay).toBeDefined();
@@ -125,7 +121,7 @@ beforeEach(() => {
 
 describe('captureRegionViaOverlay', () => {
   it('crops the frozen frame by scaleFactor and resolves PNG bytes on select', async () => {
-    const pending = captureRegionViaOverlay(5_000);
+    const pending = captureRegionViaOverlay(5_000, 'drag to select');
     const overlay = await flushLoad();
     expect(overlay.show).toHaveBeenCalled();
     // 冻结帧只在 ready 信号(组件已订阅)之后发送, 且只认覆盖层本体 sender。
@@ -147,12 +143,12 @@ describe('captureRegionViaOverlay', () => {
   });
 
   it('resolves cancelled on cancel result and on near-zero selections', async () => {
-    const first = captureRegionViaOverlay(5_000);
+    const first = captureRegionViaOverlay(5_000, 'drag to select');
     await flushLoad();
     emitOverlayResult(501, { kind: 'cancel' });
     await expect(first).resolves.toEqual({ cancelled: true });
 
-    const second = captureRegionViaOverlay(5_000);
+    const second = captureRegionViaOverlay(5_000, 'drag to select');
     await flushLoad();
     emitOverlayResult(501, { kind: 'select', rect: { x: 1, y: 1, width: 2, height: 2 } });
     await expect(second).resolves.toEqual({ cancelled: true });
@@ -160,7 +156,7 @@ describe('captureRegionViaOverlay', () => {
   });
 
   it('ignores results from foreign senders', async () => {
-    const pending = captureRegionViaOverlay(5_000);
+    const pending = captureRegionViaOverlay(5_000, 'drag to select');
     const overlay = await flushLoad();
     emitOverlayResult(999, { kind: 'select', rect: { x: 0, y: 0, width: 500, height: 500 } });
     expect(mocks.frame.crop).not.toHaveBeenCalled();
@@ -173,7 +169,7 @@ describe('captureRegionViaOverlay', () => {
   it('times out to cancelled when the user never finishes selecting', async () => {
     vi.useFakeTimers();
     try {
-      const pending = captureRegionViaOverlay(1_000);
+      const pending = captureRegionViaOverlay(1_000, 'drag to select');
       await vi.advanceTimersByTimeAsync(0); // flush load
       await vi.advanceTimersByTimeAsync(1_000);
       await expect(pending).resolves.toEqual({ cancelled: true });
@@ -184,6 +180,56 @@ describe('captureRegionViaOverlay', () => {
 
   it('throws when desktopCapturer yields no usable frame', async () => {
     mocks.getSources.mockResolvedValueOnce([]);
-    await expect(captureRegionViaOverlay(5_000)).rejects.toThrow('no usable screen frame');
+    await expect(captureRegionViaOverlay(5_000, 'drag to select')).rejects.toThrow('no usable screen frame');
+  });
+
+  it('loads a self-contained data: URL with the dedicated minimal preload', async () => {
+    const pending = captureRegionViaOverlay(5_000, 'drag to select');
+    const overlay = await flushLoad();
+    const url = String((overlay.loadURL.mock.calls as unknown[][])[0]?.[0]);
+    expect(url.startsWith('data:text/html;charset=utf-8,')).toBe(true);
+    expect(decodeURIComponent(url)).toContain('drag to select');
+    expect(String(overlay.options.webPreferences && (overlay.options.webPreferences as { preload?: string }).preload)).toContain(
+      'regionCaptureOverlayPreload.js',
+    );
+    emitOverlayResult(501, { kind: 'cancel' });
+    await pending;
+  });
+
+  // IPC 不保留 TS 类型约束; 非法 payload 在 ipcMain.on 里抛异常会被 lifecycle
+  // 视为 fatal 退出应用 —— 必须运行时校验并安全拒绝(review P1)。
+  it('safely rejects malformed result payloads instead of throwing', async () => {
+    for (const bad of [
+      null,
+      'select',
+      { kind: 'select' },
+      { kind: 'select', rect: null },
+      { kind: 'select', rect: { x: Number.NaN, y: 0, width: 100, height: 100 } },
+      { kind: 'select', rect: { x: 0, y: 0, width: Infinity, height: 100 } },
+      { kind: 'select', rect: { x: '0', y: 0, width: 100, height: 100 } },
+      { kind: 'unknown' },
+    ]) {
+      const pending = captureRegionViaOverlay(5_000, 'drag to select');
+      await flushLoad();
+      expect(() => emitOverlayResult(501, bad)).not.toThrow();
+      await expect(pending).resolves.toEqual({ cancelled: true });
+      expect(mocks.frame.crop).not.toHaveBeenCalled();
+    }
+  });
+
+  it('clamps out-of-bounds selections and cancels fully out-of-frame ones', async () => {
+    // 起点越过帧右缘 → 裁剪宽度非正 → 取消
+    const outside = captureRegionViaOverlay(5_000, 'drag to select');
+    await flushLoad();
+    emitOverlayResult(501, { kind: 'select', rect: { x: 5000, y: 0, width: 100, height: 100 } });
+    await expect(outside).resolves.toEqual({ cancelled: true });
+    expect(mocks.frame.crop).not.toHaveBeenCalled();
+
+    // 尾部越界 → 夹到帧内
+    const clamped = captureRegionViaOverlay(5_000, 'drag to select');
+    await flushLoad();
+    emitOverlayResult(501, { kind: 'select', rect: { x: 1200, y: 700, width: 200, height: 100 } });
+    await expect(clamped).resolves.toMatchObject({ cancelled: false });
+    expect(mocks.frame.crop).toHaveBeenCalledWith({ x: 2400, y: 1400, width: 160, height: 40 });
   });
 });

@@ -1,4 +1,5 @@
 import { useCallback, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useLocation } from 'react-router-dom';
 
 import { NEW_MAKER_DRAFT_KEY } from '../features/cc-agent/newMakerDraftKeys';
@@ -127,8 +128,13 @@ async function appendRegionCaptureToDraft(
 
 export function useRegionCaptureShortcut(): () => boolean {
   const location = useLocation();
+  const { t } = useTranslation();
   const pathnameRef = useRef(location.pathname);
   pathnameRef.current = location.pathname;
+  // 覆盖层提示条文案随调用传给 main(i18n 在 renderer 侧, 覆盖层是无主 bundle
+  // 的自生成页面); ref 化避免语言切换改变 trigger 身份。
+  const overlayHintRef = useRef('');
+  overlayHintRef.current = t('regionCapture.hint');
 
   const trigger = useCallback((): boolean => {
     // 目标在按键瞬间定格: 系统选区期间切路由不改变归属, 结果仍进当初的草稿。
@@ -161,7 +167,9 @@ export function useRegionCaptureShortcut(): () => boolean {
       isDraftDiscardTokenCurrent(discardToken);
     void (async () => {
       try {
-        const result = await window.electronAPI.screenCapture.captureRegion();
+        const result = await window.electronAPI.screenCapture.captureRegion({
+          overlayHint: overlayHintRef.current,
+        });
         if (result.cancelled || !result.data) return;
         if (!isTargetStillValid()) return;
         await appendRegionCaptureToDraft(target, result.data, isTargetStillValid);

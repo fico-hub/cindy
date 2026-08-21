@@ -68,11 +68,23 @@ async function captureRegionDarwin(): Promise<RegionCaptureOutcome> {
   return { cancelled: false, data };
 }
 
-async function captureRegion(platform: string): Promise<ScreenCaptureRegionResult> {
+/** 覆盖层提示条文案的兜底(renderer 未传或非法时)。 */
+const DEFAULT_OVERLAY_HINT = 'Drag to select the region to capture, press Esc to cancel';
+const MAX_OVERLAY_HINT_LENGTH = 200;
+
+/** 提示条文案由 renderer 随调用传入(i18n 在 renderer 侧), main 只做防御性截断。 */
+function sanitizeOverlayHint(payload: unknown): string {
+  if (!payload || typeof payload !== 'object') return DEFAULT_OVERLAY_HINT;
+  const hint = (payload as { overlayHint?: unknown }).overlayHint;
+  if (typeof hint !== 'string' || hint.trim() === '') return DEFAULT_OVERLAY_HINT;
+  return hint.slice(0, MAX_OVERLAY_HINT_LENGTH);
+}
+
+async function captureRegion(platform: string, overlayHint: string): Promise<ScreenCaptureRegionResult> {
   const outcome =
     platform === 'darwin'
       ? await captureRegionDarwin()
-      : await captureRegionViaOverlay(CAPTURE_TIMEOUT_MS);
+      : await captureRegionViaOverlay(CAPTURE_TIMEOUT_MS, overlayHint);
   if (outcome.cancelled || !outcome.data) {
     return { ok: true, cancelled: true };
   }
@@ -88,16 +100,19 @@ async function captureRegion(platform: string): Promise<ScreenCaptureRegionResul
 }
 
 export function registerScreenCaptureIpc(platform: string = process.platform): void {
-  ipcMain.handle(SCREEN_CAPTURE_REGION_CHANNEL, async (event): Promise<ScreenCaptureRegionResult> => {
-    assertTrustedAppRendererEvent(event);
-    if (captureInFlight) {
-      return { ok: true, cancelled: true };
-    }
-    captureInFlight = true;
-    try {
-      return await captureRegion(platform);
-    } finally {
-      captureInFlight = false;
-    }
-  });
+  ipcMain.handle(
+    SCREEN_CAPTURE_REGION_CHANNEL,
+    async (event, payload: unknown): Promise<ScreenCaptureRegionResult> => {
+      assertTrustedAppRendererEvent(event);
+      if (captureInFlight) {
+        return { ok: true, cancelled: true };
+      }
+      captureInFlight = true;
+      try {
+        return await captureRegion(platform, sanitizeOverlayHint(payload));
+      } finally {
+        captureInFlight = false;
+      }
+    },
+  );
 }
