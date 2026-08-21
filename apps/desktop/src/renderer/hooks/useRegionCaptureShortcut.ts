@@ -12,13 +12,17 @@ import {
 import { resolveAgentIslandVisibleSessionIdFromPath } from '../lib/agentIslandVisibleSessionRoute';
 import {
   captureDraftDiscardToken,
+  draftHasContent,
   getDraft,
   isDraftDiscardTokenCurrent,
   saveDraft,
   subscribeDraft,
 } from '../lib/composerDraftStore';
+import { createLogger } from '../lib/logger';
 import type { AttachedFile } from '../lib/fileTypes';
 import { useAppShortcut } from './useAppShortcut';
+
+const log = createLogger('useRegionCaptureShortcut');
 
 /**
  * capture-region 快捷键的全局消费端 —— 只在 MainLayout 挂载一次。
@@ -160,8 +164,10 @@ export function useRegionCaptureShortcut(): () => boolean {
     const unsubscribe = target.sessionId
       ? null
       : subscribeDraft(target.draftKey, () => {
-          const draft = getDraft(target.draftKey);
-          if (!draft || (!draft.text && draft.attachments.length === 0)) {
+          // 空判定复用 store 自己的 draftHasContent: 只看 text/attachments 会把
+          // "仅有浏览器评论/引用的草稿被保存"误判成发送移交, 迟到截图被静默
+          // 丢弃(review P1); tiptap 空文档的真伪空判定也交给同一谓词。
+          if (!draftHasContent(getDraft(target.draftKey))) {
             draftHandedOff = true;
           }
         });
@@ -180,7 +186,8 @@ export function useRegionCaptureShortcut(): () => boolean {
       } catch (err) {
         // 非取消类失败(main 已转稳定 IPC 错误码): 弹本地化提示, 快捷键不能
         // "按了毫无反应"(review P1)。取消/去重路径走 cancelled 分支, 保持静默。
-        console.warn('[useRegionCaptureShortcut] region capture failed', err);
+        // renderer logger 会把失败转发进 main 日志, 打包版才收集得到(review P1)。
+        log.warn('region capture failed', err);
         toast.error(failedToastRef.current);
       } finally {
         unsubscribe?.();
