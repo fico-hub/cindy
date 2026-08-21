@@ -3,7 +3,13 @@ import { useLocation } from 'react-router-dom';
 
 import { NEW_MAKER_DRAFT_KEY } from '../features/cc-agent/newMakerDraftKeys';
 import { resolveAgentIslandVisibleSessionIdFromPath } from '../lib/agentIslandVisibleSessionRoute';
-import { getDraft, saveDraft } from '../lib/composerDraftStore';
+import {
+  captureDraftDiscardToken,
+  getDraft,
+  isDraftDiscardTokenCurrent,
+  saveDraft,
+  subscribeDraft,
+} from '../lib/composerDraftStore';
 import type { AttachedFile } from '../lib/fileTypes';
 import { useAppShortcut } from './useAppShortcut';
 
@@ -62,10 +68,15 @@ function bytesToBase64(data: Uint8Array): Promise<string> {
   });
 }
 
-/** 截图字节 → AttachedFile → 合并进目标草稿(保留既有正文/附件/评论与一次性 handoff 字段)。 */
+/**
+ * 截图字节 → AttachedFile → 合并进目标草稿(保留既有正文/附件/评论与一次性
+ * handoff 字段)。isTargetStillValid 在 saveDraft 前的最后时刻复查 —— 附件
+ * 缓存写入本身也是异步, 期间草稿可能被发送/丢弃。
+ */
 async function appendRegionCaptureToDraft(
   target: RegionCaptureTarget,
   data: Uint8Array,
+  isTargetStillValid: () => boolean,
 ): Promise<void> {
   const timestamp = Date.now();
   const name = `region-capture-${timestamp}.png`;
@@ -95,6 +106,7 @@ async function appendRegionCaptureToDraft(
   } else {
     attached = { ...base, base64: await bytesToBase64(data) };
   }
+  if (!isTargetStillValid()) return;
   const existing = getDraft(target.draftKey);
   saveDraft(
     target.draftKey,
@@ -118,13 +130,34 @@ export function useRegionCaptureShortcut(): () => boolean {
     // 目标在按键瞬间定格: 系统选区期间切路由不改变归属, 结果仍进当初的草稿。
     const target = resolveRegionCaptureTargetFromPath(pathnameRef.current);
     if (!target) return false;
+    // 迟到结果的写入闸(两个信号任一命中即丢弃, 不回填已易主/已丢弃的草稿):
+    // 1. discard token —— 显式丢弃(discardDraft)会 bump generation;
+    // 2. 新任务草稿的发送 handoff —— 发送走 clearDraftAndNotify(有意不 bump
+    //    generation, 见 store 注释), 但会以"显式空草稿"通知订阅者; 选区期间
+    //    观察到空草稿通知 = 草稿已随发送交给新会话, 迟到截图若仍回填会出现
+    //    在用户下一次打开的新任务草稿里。会话草稿不做此检测: 发送后仍留在
+    //    同一会话, 迟到附件按 store 语义属于下一条消息的输入。
+    const discardToken = captureDraftDiscardToken(target.draftKey);
+    let draftHandedOff = false;
+    const unsubscribe = target.sessionId
+      ? null
+      : subscribeDraft(target.draftKey, () => {
+          const draft = getDraft(target.draftKey);
+          if (!draft || (!draft.text && draft.attachments.length === 0)) {
+            draftHandedOff = true;
+          }
+        });
+    const isTargetStillValid = () => !draftHandedOff && isDraftDiscardTokenCurrent(discardToken);
     void (async () => {
       try {
         const result = await window.electronAPI.screenCapture.captureRegion();
         if (result.cancelled || !result.data) return;
-        await appendRegionCaptureToDraft(target, result.data);
+        if (!isTargetStillValid()) return;
+        await appendRegionCaptureToDraft(target, result.data, isTargetStillValid);
       } catch (err) {
         console.warn('[useRegionCaptureShortcut] region capture failed', err);
+      } finally {
+        unsubscribe?.();
       }
     })();
     return true;
