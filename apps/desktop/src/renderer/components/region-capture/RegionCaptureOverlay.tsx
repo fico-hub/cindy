@@ -116,13 +116,13 @@ export function RegionCaptureOverlay() {
             boxShadow: '0 0 0 100000px rgba(0, 0, 0, 0.4)',
           }}
         >
-          <div className="absolute -top-6 left-0 rounded bg-black/70 px-1.5 py-0.5 font-mono text-[11px] text-white">
+          <div className="absolute -top-6 left-0 rounded bg-black/70 px-1.5 py-0.5 font-mono text-11 text-white">
             {Math.round(selection.width)} × {Math.round(selection.height)}
           </div>
         </div>
       ) : (
         <div className="absolute inset-0 bg-black/40">
-          <div className="absolute left-1/2 top-8 -translate-x-1/2 rounded-md bg-black/70 px-3 py-1.5 text-[13px] text-white">
+          <div className="absolute left-1/2 top-8 -translate-x-1/2 rounded-md bg-black/70 px-3 py-1.5 text-13 text-white">
             {t('regionCapture.hint')}
           </div>
         </div>
