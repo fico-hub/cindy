@@ -962,15 +962,18 @@ describe('resolveGuestShortcutAction', () => {
     });
   });
 
-  // capture-region: guest 内按 ⇧⌘S 转发回 host 的全局区域截图入口(review P2:
-  // 设置页展示的快捷键在 webview 聚焦时不能失效)。非 darwin 平台过滤让生效
-  // 组合为空 → 不命中, guest 按键保持原生行为。
-  it('forwards darwin ⇧⌘S to the capture-region action; other platforms do not match', () => {
+  // capture-region: guest 内按用户绑定的组合转发回 host 的全局区域截图入口
+  // (review P2: 设置页展示的快捷键在 webview 聚焦时不能失效)。本条目无默认
+  // 键, 未绑定时生效组合为空 → 不命中, guest 按键保持原生行为。
+  it('forwards the user-bound capture-region combo; unbound does not match', () => {
+    const bound = { code: 'KeyS', meta: true, ctrl: false, alt: true, shift: true };
+    const effective = getEffectiveAppShortcuts({ 'capture-region': bound }, 'darwin');
+    const getCombos = (id: AppShortcutId) => effective.get(id) ?? [];
     expect(
-      resolveGuestShortcutAction(key('KeyS', { meta: true, shift: true }), combosFor('darwin')),
+      resolveGuestShortcutAction(key('KeyS', { meta: true, alt: true, shift: true }), getCombos),
     ).toEqual({ kind: 'capture-region' });
     expect(
-      resolveGuestShortcutAction(key('KeyS', { control: true, shift: true }), combosFor('win32')),
+      resolveGuestShortcutAction(key('KeyS', { meta: true, shift: true }), combosFor('darwin')),
     ).toBeNull();
   });
 

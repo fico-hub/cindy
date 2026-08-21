@@ -1019,10 +1019,34 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onChanged: fanOutAppShortcutsChanged,
   },
 
-  // 区域截图 (capture-region 快捷键, shared/screenCapture.ts 契约, 仅 darwin)。
+  // 区域截图 (capture-region 快捷键, shared/screenCapture.ts 契约, 三平台)。
   screenCapture: {
     captureRegion: (): Promise<{ ok: true; cancelled: boolean; data?: Uint8Array }> =>
       ipcRenderer.invoke('screen-capture:region'),
+  },
+
+  // win/linux 选区覆盖层窗口(?view=region-capture-overlay)专用: 挂载就绪后
+  // 声明 ready → 接收冻结帧、回报选区结果。主窗口不使用。
+  screenCaptureOverlay: {
+    announceReady: (): void => ipcRenderer.send('screen-capture:overlay-ready'),
+    onInit: (
+      cb: (payload: {
+        imageDataUrl: string;
+        displaySize: { width: number; height: number };
+      }) => void,
+    ): (() => void) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        payload: { imageDataUrl: string; displaySize: { width: number; height: number } },
+      ) => cb(payload);
+      ipcRenderer.on('screen-capture:overlay-init', listener);
+      return () => ipcRenderer.removeListener('screen-capture:overlay-init', listener);
+    },
+    reportResult: (
+      result:
+        | { kind: 'cancel' }
+        | { kind: 'select'; rect: { x: number; y: number; width: number; height: number } },
+    ): void => ipcRenderer.send('screen-capture:overlay-result', result),
   },
 
   // 主界面布局树 (shared/layoutTree.ts)。getStateSync 走 sendSync:布局必须

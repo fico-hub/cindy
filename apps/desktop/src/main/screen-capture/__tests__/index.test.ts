@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   assertTrusted: vi.fn(),
   clipboardWriteImage: vi.fn(),
   createFromBuffer: vi.fn((buffer: Buffer) => ({ buffer })),
+  overlayCapture: vi.fn(),
 }));
 
 vi.mock('electron', () => ({
@@ -21,6 +22,9 @@ vi.mock('node:child_process', () => ({ execFile: mocks.execFile }));
 vi.mock('node:fs/promises', () => ({ readFile: mocks.readFile, rm: mocks.rm }));
 vi.mock('../../security/trustedAppRenderer.js', () => ({
   assertTrustedAppRendererEvent: mocks.assertTrusted,
+}));
+vi.mock('../overlayCapture.js', () => ({
+  captureRegionViaOverlay: mocks.overlayCapture,
 }));
 vi.mock('../../logger.js', () => ({
   createLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
@@ -51,9 +55,22 @@ beforeEach(() => {
 });
 
 describe('registerScreenCaptureIpc', () => {
-  it('rejects on non-darwin platforms', async () => {
+  it('dispatches non-darwin platforms to the overlay capture path', async () => {
+    const bytes = Buffer.from([1, 2, 3]);
+    mocks.overlayCapture.mockResolvedValue({ cancelled: false, data: bytes });
     const handler = registerAndGetHandler('win32');
-    await expect(handler({})).rejects.toMatchObject({ code: 'UNSUPPORTED_CAPABILITY' });
+    await expect(handler({})).resolves.toEqual({ ok: true, cancelled: false, data: bytes });
+    expect(mocks.overlayCapture).toHaveBeenCalledTimes(1);
+    expect(mocks.execFile).not.toHaveBeenCalled();
+    // 剪贴板写入是平台无关的共享成功尾部
+    expect(mocks.clipboardWriteImage).toHaveBeenCalledTimes(1);
+  });
+
+  it('propagates overlay cancel as cancelled', async () => {
+    mocks.overlayCapture.mockResolvedValue({ cancelled: true });
+    const handler = registerAndGetHandler('linux');
+    await expect(handler({})).resolves.toEqual({ ok: true, cancelled: true });
+    expect(mocks.clipboardWriteImage).not.toHaveBeenCalled();
   });
 
   it('returns PNG bytes on successful capture and cleans up the temp file', async () => {

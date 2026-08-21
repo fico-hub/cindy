@@ -1198,9 +1198,20 @@ interface ElectronAPI {
     ) => () => void;
   };
 
-  /** 区域截图 (capture-region 快捷键) —— 契约见 shared/screenCapture.ts, 仅 darwin。 */
+  /** 区域截图 (capture-region 快捷键) —— 契约见 shared/screenCapture.ts, 三平台。 */
   screenCapture: {
     captureRegion: () => Promise<import('../shared/screenCapture').ScreenCaptureRegionResult>;
+  };
+
+  /** win/linux 选区覆盖层窗口(?view=region-capture-overlay)专用; 主窗口不使用。 */
+  screenCaptureOverlay: {
+    announceReady: () => void;
+    onInit: (
+      cb: (payload: import('../shared/screenCapture').ScreenCaptureOverlayInitPayload) => void,
+    ) => () => void;
+    reportResult: (
+      result: import('../shared/screenCapture').ScreenCaptureOverlayResult,
+    ) => void;
   };
 
   /** 主界面布局树 —— 数据模型与校验见 shared/layoutTree.ts,main 端见 main/layout/。 */

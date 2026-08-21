@@ -398,31 +398,24 @@ describe('switch-session slots (mod+1..9)', () => {
   });
 });
 
-describe('capture-region (区域截图, ⇧⌘S, darwin-only)', () => {
-  const captureCombo = combo('KeyS', { meta: true, shift: true });
+describe('capture-region (区域截图, 无默认键, 全平台)', () => {
+  const boundCombo = combo('KeyS', { meta: true, shift: true, alt: true });
 
-  it('darwin default is ⇧⌘S; unavailable platforms are absent from the effective map', () => {
-    expect(getEffectiveAppShortcuts({}, 'darwin').get('capture-region')).toEqual([captureCombo]);
-    expect(getEffectiveAppShortcuts({}, 'win32').get('capture-region')).toBeUndefined();
-    expect(getEffectiveAppShortcuts({}, 'linux').get('capture-region')).toBeUndefined();
+  // 无默认键是产品决定: 跨平台找不到真正安全的默认组合, 用户在设置页自行
+  // 绑定。条目在三个平台的生效表里都存在(空列表 = 未绑定, 消费端不挂监听)。
+  it('has no default combos but is available on every platform', () => {
+    for (const platform of ['darwin', 'win32', 'linux']) {
+      expect(getEffectiveAppShortcuts({}, platform).get('capture-region')).toEqual([]);
+      expect(isAppShortcutAvailableOnPlatform('capture-region', platform)).toBe(true);
+    }
   });
 
-  // 升级路径:capture-region 是后加入的默认键,存量用户可能早已把 ⇧⌘S 改绑
-  // 给其它 app 域动作(写入当时合法,冲突校验不追溯)。默认让位避免一次按键
-  // 双动作;条目在设置页可见,用户可自行改绑找回(Codex review P2)。
-  it('default yields to a stale user binding on ⇧⌘S (upgrade path)', () => {
-    const effective = getEffectiveAppShortcuts({ 'toggle-sidebar': captureCombo }, 'darwin');
-    expect(effective.get('toggle-sidebar')).toEqual([captureCombo]);
-    expect(effective.get('capture-region')).toEqual([]);
-  });
-
-  it('binding another action onto the un-overridden default is not a conflict', () => {
-    expect(findAppShortcutConflict('toggle-sidebar', captureCombo, {}, 'darwin')).toBeNull();
-  });
-
-  it('user override on capture-region itself conflicts normally afterwards', () => {
-    const overrides = { 'capture-region': captureCombo } as const;
-    expect(findAppShortcutConflict('toggle-sidebar', captureCombo, overrides, 'darwin')).toBe(
+  it('user-bound combo takes effect and participates in conflict detection', () => {
+    const overrides = { 'capture-region': boundCombo } as const;
+    expect(getEffectiveAppShortcuts(overrides, 'darwin').get('capture-region')).toEqual([
+      boundCombo,
+    ]);
+    expect(findAppShortcutConflict('toggle-sidebar', boundCombo, overrides, 'darwin')).toBe(
       'capture-region',
     );
   });

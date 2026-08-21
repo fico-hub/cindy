@@ -81,6 +81,7 @@ const isVoiceInputDictionaryToast = view === 'voice-input-dictionary-toast';
 const isComputerPermissionGuide = view === 'computer-permission-guide';
 const isComputerPermissionBackdrop = view === 'computer-permission-backdrop';
 const isComputerPermissionView = isComputerPermissionGuide || isComputerPermissionBackdrop;
+const isRegionCaptureOverlay = view === 'region-capture-overlay';
 const isAppearanceUtilityView =
   isVoiceInputOverlay || isVoiceInputDictionaryToast || isComputerPermissionView;
 document.documentElement.dataset.platform = window.electronAPI.platform;
@@ -96,7 +97,11 @@ if (isComputerPermissionView) {
 // target. Skip on voice-input overlay windows — those are click-through
 // popups (focusable:false, acceptFirstMouse:true by design).
 const disposeSwallowActivationClick =
-  !isVoiceInputOverlay && !isVoiceInputDictionaryToast && !isComputerPermissionView
+  !isVoiceInputOverlay &&
+  !isVoiceInputDictionaryToast &&
+  !isComputerPermissionView &&
+  // 选区覆盖层要直接吃首次点击(激活窗口的那一下就是拖框起点), 不吞。
+  !isRegionCaptureOverlay
     ? installSwallowActivationClick({
         window,
         platform: window.electronAPI?.platform ?? '',
@@ -145,6 +150,20 @@ if (!rootElement) {
 const root = createRoot(rootElement);
 
 void (async () => {
+  if (isRegionCaptureOverlay) {
+    const { RegionCaptureOverlay } = await import(
+      './components/region-capture/RegionCaptureOverlay'
+    );
+    root.render(
+      <ThemeProvider>
+        <LocaleProvider>
+          <RegionCaptureOverlay />
+        </LocaleProvider>
+      </ThemeProvider>,
+    );
+    return;
+  }
+
   if (isComputerPermissionBackdrop) {
     const { ComputerPermissionBackdrop } = await import(
       './components/settings/ComputerPermissionGuideWindow'
