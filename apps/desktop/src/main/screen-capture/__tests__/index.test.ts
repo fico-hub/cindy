@@ -157,11 +157,32 @@ describe('registerScreenCaptureIpc', () => {
     expect(mocks.clipboardWriteImage).not.toHaveBeenCalled();
   });
 
-  it('treats a missing output file as cancel', async () => {
+  // 只静默"可确认的用户取消"(干净非零退出): 超时强杀、spawn 失败、带 stderr
+  // 的真实失败(权限被拒等)都要走稳定 IPC 错误 → renderer 失败提示(review P2)。
+  it('surfaces killed/spawn/stderr screencapture failures as INTERNAL instead of cancel', async () => {
+    const handler = registerAndGetHandler('darwin');
+    for (const err of [
+      Object.assign(new Error('timeout'), { killed: true, signal: 'SIGTERM' }),
+      Object.assign(new Error('spawn failed'), { code: 'ENOENT' }),
+      Object.assign(new Error('exit 1'), {
+        code: 1,
+        stderr: 'screencapture: could not create image from rect',
+      }),
+    ]) {
+      execFileResolving(() => err);
+      await expect(handler({})).rejects.toMatchObject({ code: 'INTERNAL' });
+    }
+    expect(mocks.clipboardWriteImage).not.toHaveBeenCalled();
+  });
+
+  it('treats a missing output file as cancel but surfaces other read errors', async () => {
     execFileResolving(() => null);
     mocks.readFile.mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
     const handler = registerAndGetHandler('darwin');
     await expect(handler({})).resolves.toEqual({ ok: true, cancelled: true });
+
+    mocks.readFile.mockRejectedValue(Object.assign(new Error('EACCES'), { code: 'EACCES' }));
+    await expect(handler({})).rejects.toMatchObject({ code: 'INTERNAL' });
   });
 
   it('reports an empty output file as INTERNAL', async () => {

@@ -173,6 +173,18 @@ export async function captureRegionViaOverlay(
       };
 
       const onClosed = () => settle(() => resolve({ cancelled: true }));
+      // 一次性覆盖层 renderer 崩溃/无响应必须立即收口(review P2): 显示前崩溃
+      // 会让 captureInFlight 静默挡掉后续截图直到总超时, 显示后崩溃则全屏
+      // 置顶冻结画面一直遮住桌面。按真实失败 reject → 外层转稳定 IPC 错误
+      // (固定消息) → renderer 失败提示; finally 统一销毁窗口。
+      const onRendererGone = (_event: unknown, details: { reason?: string }) => {
+        logger.warn('overlay renderer gone', { reason: details?.reason });
+        settle(() => reject(new Error('overlay renderer gone')));
+      };
+      const onUnresponsive = () => {
+        logger.warn('overlay renderer unresponsive');
+        settle(() => reject(new Error('overlay renderer unresponsive')));
+      };
       const timer = setTimeout(
         () => settle(() => resolve({ cancelled: true })),
         timeoutMs,
@@ -207,12 +219,16 @@ export async function captureRegionViaOverlay(
         ipcMain.removeListener(SCREEN_CAPTURE_OVERLAY_READY_CHANNEL, onReady);
         ipcMain.removeListener(SCREEN_CAPTURE_OVERLAY_CONTENT_READY_CHANNEL, onContentReady);
         overlay.removeListener('closed', onClosed);
+        overlay.webContents.removeListener('render-process-gone', onRendererGone);
+        overlay.webContents.removeListener('unresponsive', onUnresponsive);
       };
 
       ipcMain.on(SCREEN_CAPTURE_OVERLAY_RESULT_CHANNEL, onResult);
       ipcMain.on(SCREEN_CAPTURE_OVERLAY_READY_CHANNEL, onReady);
       ipcMain.on(SCREEN_CAPTURE_OVERLAY_CONTENT_READY_CHANNEL, onContentReady);
       overlay.on('closed', onClosed);
+      overlay.webContents.on('render-process-gone', onRendererGone);
+      overlay.webContents.on('unresponsive', onUnresponsive);
 
       const html = buildRegionCaptureOverlayHtml(hintText, palette);
       overlay

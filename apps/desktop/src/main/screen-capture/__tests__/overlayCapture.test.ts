@@ -35,6 +35,7 @@ const mocks = vi.hoisted(() => {
       send: vi.fn(),
       setWindowOpenHandler: vi.fn(),
       on: vi.fn(),
+      removeListener: vi.fn(),
     };
     loadURL = vi.fn(async () => undefined);
     loadFile = vi.fn(async () => undefined);
@@ -225,6 +226,20 @@ describe('captureRegionViaOverlay', () => {
     await flushLoad();
     emitOverlayResult(501, { kind: 'cancel' });
     await expect(pending).resolves.toEqual({ cancelled: true });
+  });
+
+  // 一次性覆盖层 renderer 崩溃必须立即收口: 不能让 captureInFlight 挡后续
+  // 截图到总超时, 也不能让全屏冻结画面一直遮桌面(review P2)。
+  it('rejects immediately when the overlay renderer crashes', async () => {
+    const pending = captureRegionViaOverlay(5_000, 'drag to select', TEST_PALETTE);
+    const overlay = await flushLoad();
+    const goneListener = (overlay.webContents.on.mock.calls as unknown[][]).find(
+      (c) => c[0] === 'render-process-gone',
+    )?.[1] as ((event: unknown, details: { reason: string }) => void) | undefined;
+    expect(goneListener).toBeDefined();
+    goneListener?.({}, { reason: 'crashed' });
+    await expect(pending).rejects.toThrow('overlay renderer gone');
+    expect(overlay.destroyed).toBe(true);
   });
 
   // 唯一源兜底仅限"物理显示器也唯一": 多屏 Wayland/合并桌面后端可能只回

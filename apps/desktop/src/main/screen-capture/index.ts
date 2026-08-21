@@ -51,17 +51,42 @@ async function captureRegionDarwin(): Promise<RegionCaptureOutcome> {
       timeout: CAPTURE_TIMEOUT_MS,
     });
   } catch (err) {
-    logger.debug('screencapture exited non-zero (usually user cancel)', { err: String(err) });
     // 正常取消不产生文件; 只有 timeout 强杀可能留下已写入的文件, 兜底清掉。
     void rm(tmpPath, { force: true }).catch(() => {});
+    // 只把"可确认的用户取消"(干净的非零退出: 未被强杀、非 spawn 失败、无
+    // stderr 输出)静默处理; 超时强杀(killed/signal)、spawn 失败(code 为
+    // ENOENT 等字符串 errno)、权限被拒等带 stderr 的真实失败要走稳定 IPC
+    // 错误 → renderer 失败提示, 不能表现成"按了毫无反应"(review P2)。
+    const e = err as {
+      killed?: boolean;
+      signal?: NodeJS.Signals | null;
+      code?: number | string | null;
+      stderr?: unknown;
+    };
+    const stderrText = typeof e.stderr === 'string' ? e.stderr.trim() : '';
+    if (e.killed === true || e.signal != null || typeof e.code === 'string' || stderrText !== '') {
+      logger.warn('screencapture failed', {
+        code: e.code,
+        signal: e.signal,
+        killed: e.killed,
+        stderr: stderrText.slice(0, 200),
+      });
+      throwIpcError('INTERNAL', 'screencapture failed');
+    }
+    logger.debug('screencapture exited non-zero (user cancel)', { code: e.code });
     return { cancelled: true };
   }
   let data: Buffer;
   try {
     data = await readFile(tmpPath);
-  } catch {
-    // 退出码 0 但没有文件 —— 某些取消路径也会这样, 按取消处理。
-    return { cancelled: true };
+  } catch (readErr) {
+    // 退出码 0 但没有文件 —— 某些取消路径也会这样, 按取消处理; 文件存在但
+    // 读不了(权限/IO)是真实失败, 不能吞成取消(review P2)。
+    if ((readErr as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { cancelled: true };
+    }
+    logger.warn('failed to read screencapture output', { err: String(readErr) });
+    throwIpcError('INTERNAL', 'failed to read screencapture output');
   } finally {
     void rm(tmpPath, { force: true }).catch(() => {});
   }
