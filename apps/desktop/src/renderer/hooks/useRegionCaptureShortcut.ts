@@ -2,6 +2,10 @@ import { useCallback, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
 
 import { NEW_MAKER_DRAFT_KEY } from '../features/cc-agent/newMakerDraftKeys';
+import {
+  getDataOwnerGeneration,
+  isDataOwnerGenerationCurrent,
+} from '../contexts/dataOwnerGeneration';
 import { resolveAgentIslandVisibleSessionIdFromPath } from '../lib/agentIslandVisibleSessionRoute';
 import {
   captureDraftDiscardToken,
@@ -130,13 +134,17 @@ export function useRegionCaptureShortcut(): () => boolean {
     // 目标在按键瞬间定格: 系统选区期间切路由不改变归属, 结果仍进当初的草稿。
     const target = resolveRegionCaptureTargetFromPath(pathnameRef.current);
     if (!target) return false;
-    // 迟到结果的写入闸(两个信号任一命中即丢弃, 不回填已易主/已丢弃的草稿):
-    // 1. discard token —— 显式丢弃(discardDraft)会 bump generation;
-    // 2. 新任务草稿的发送 handoff —— 发送走 clearDraftAndNotify(有意不 bump
+    // 迟到结果的写入闸(三个信号任一命中即丢弃, 不回填已易主/已丢弃的草稿):
+    // 1. data owner generation —— draftKey 按当前登录身份命名空间解析
+    //    (owner:<id>:<key>), 选区/缓存写入期间登出或切换账号后, 旧身份发起的
+    //    截图绝不能落进新身份的草稿(与 useAttachments 同款校验);
+    // 2. discard token —— 显式丢弃(discardDraft)会 bump generation;
+    // 3. 新任务草稿的发送 handoff —— 发送走 clearDraftAndNotify(有意不 bump
     //    generation, 见 store 注释), 但会以"显式空草稿"通知订阅者; 选区期间
     //    观察到空草稿通知 = 草稿已随发送交给新会话, 迟到截图若仍回填会出现
     //    在用户下一次打开的新任务草稿里。会话草稿不做此检测: 发送后仍留在
     //    同一会话, 迟到附件按 store 语义属于下一条消息的输入。
+    const dataOwner = getDataOwnerGeneration();
     const discardToken = captureDraftDiscardToken(target.draftKey);
     let draftHandedOff = false;
     const unsubscribe = target.sessionId
@@ -147,7 +155,10 @@ export function useRegionCaptureShortcut(): () => boolean {
             draftHandedOff = true;
           }
         });
-    const isTargetStillValid = () => !draftHandedOff && isDraftDiscardTokenCurrent(discardToken);
+    const isTargetStillValid = () =>
+      isDataOwnerGenerationCurrent(dataOwner) &&
+      !draftHandedOff &&
+      isDraftDiscardTokenCurrent(discardToken);
     void (async () => {
       try {
         const result = await window.electronAPI.screenCapture.captureRegion();
