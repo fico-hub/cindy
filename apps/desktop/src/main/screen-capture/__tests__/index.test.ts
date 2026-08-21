@@ -8,9 +8,15 @@ const mocks = vi.hoisted(() => ({
   readFile: vi.fn(),
   rm: vi.fn(async () => undefined),
   assertTrusted: vi.fn(),
+  clipboardWriteImage: vi.fn(),
+  createFromBuffer: vi.fn((buffer: Buffer) => ({ buffer })),
 }));
 
-vi.mock('electron', () => ({ ipcMain: { handle: mocks.handle } }));
+vi.mock('electron', () => ({
+  ipcMain: { handle: mocks.handle },
+  clipboard: { writeImage: mocks.clipboardWriteImage },
+  nativeImage: { createFromBuffer: mocks.createFromBuffer },
+}));
 vi.mock('node:child_process', () => ({ execFile: mocks.execFile }));
 vi.mock('node:fs/promises', () => ({ readFile: mocks.readFile, rm: mocks.rm }));
 vi.mock('../../security/trustedAppRenderer.js', () => ({
@@ -62,6 +68,9 @@ describe('registerScreenCaptureIpc', () => {
     expect(bin).toBe('/usr/sbin/screencapture');
     expect(args).toContain('-i');
     expect(mocks.rm).toHaveBeenCalledTimes(1);
+    // 成功路径同步写系统剪贴板(其它 composer 直接 ⌘V)。
+    expect(mocks.createFromBuffer).toHaveBeenCalledWith(bytes);
+    expect(mocks.clipboardWriteImage).toHaveBeenCalledTimes(1);
   });
 
   it('treats non-zero screencapture exit as user cancel', async () => {
@@ -69,6 +78,7 @@ describe('registerScreenCaptureIpc', () => {
     const handler = registerAndGetHandler('darwin');
     await expect(handler({})).resolves.toEqual({ ok: true, cancelled: true });
     expect(mocks.readFile).not.toHaveBeenCalled();
+    expect(mocks.clipboardWriteImage).not.toHaveBeenCalled();
   });
 
   it('treats a missing output file as cancel', async () => {

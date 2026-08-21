@@ -3887,7 +3887,7 @@
         },
         "capture-region": {
           "label": "區域截圖",
-          "description": "拉框擷取螢幕區域並加入對話輸入框（僅 macOS）"
+          "description": "拉框擷取螢幕區域，複製到剪貼簿並加入對話輸入框（僅 macOS）"
         },
         "switch-session-1": {
           "label": "切換到第 1 個任務",

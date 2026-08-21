@@ -3887,7 +3887,7 @@
         },
         "capture-region": {
           "label": "영역 스크린샷",
-          "description": "화면 영역을 선택해 채팅 입력창에 첨부합니다(macOS 전용)"
+          "description": "화면 영역을 선택해 클립보드에 복사하고 채팅 입력창에 첨부합니다(macOS 전용)"
         },
         "switch-session-1": {
           "label": "1번째 세션으로 이동",

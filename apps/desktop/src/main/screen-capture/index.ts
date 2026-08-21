@@ -1,4 +1,4 @@
-import { ipcMain } from 'electron';
+import { clipboard, ipcMain, nativeImage } from 'electron';
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readFile, rm } from 'node:fs/promises';
@@ -58,6 +58,14 @@ async function captureRegionToPng(): Promise<ScreenCaptureRegionResult> {
   }
   if (data.length === 0) {
     throwIpcError('INTERNAL', 'screencapture produced an empty file');
+  }
+  // 同步写系统剪贴板(best-effort): 自动贴入只覆盖主区当前对话/新任务草稿,
+  // 协同 Worker 输入框、分离侧栏窗口等其它 composer 用户直接 ⌘V 粘贴即可,
+  // 各自走既有粘贴管线, 不必为每个挂载面单独接线。
+  try {
+    clipboard.writeImage(nativeImage.createFromBuffer(data));
+  } catch (err) {
+    logger.warn('failed to write captured image to clipboard (ignored)', { err: String(err) });
   }
   return { ok: true, cancelled: false, data };
 }

@@ -3887,7 +3887,7 @@
         },
         "capture-region": {
           "label": "範囲スクリーンショット",
-          "description": "画面の範囲を選択してチャット入力欄に添付します（macOS のみ）"
+          "description": "画面の範囲を選択し、クリップボードにコピーしてチャット入力欄に添付します（macOS のみ）"
         },
         "switch-session-1": {
           "label": "1番目のセッションに移動",

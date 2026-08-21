@@ -3,8 +3,8 @@
  *
  * renderer → main "调起系统区域截图, 把 PNG 字节返回给我"。捕获必须发生在
  * main: 选区 UI 由 macOS 系统的 /usr/sbin/screencapture -i 提供(spawn 子进程
- * 是 main 的能力), renderer 拿到字节后走 addClipboardImage 复用剪贴板图片
- * 粘贴管线进 composer 附件。
+ * 是 main 的能力)。成功时 main 同时把图片写入系统剪贴板(其它 composer 可
+ * 直接 ⌘V), renderer 拿到字节后合并进当前目标草稿。
  */
 export const SCREEN_CAPTURE_REGION_CHANNEL = 'screen-capture:region';
 

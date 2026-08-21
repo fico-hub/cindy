@@ -3888,7 +3888,7 @@
         },
         "capture-region": {
           "label": "Region screenshot",
-          "description": "Select a screen region and attach it to the chat input (macOS only)"
+          "description": "Select a screen region, copy it to the clipboard, and attach it to the chat input (macOS only)"
         },
         "switch-session-1": {
           "label": "Go to session 1",
