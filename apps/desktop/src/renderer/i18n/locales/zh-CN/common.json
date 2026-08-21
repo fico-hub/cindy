@@ -17,7 +17,8 @@
     "REMOTE_WORKDIR_UNAVAILABLE": "远程项目目录不可访问，请恢复网络盘连接后重试。"
   },
   "regionCapture": {
-    "hint": "拖动框选要截取的区域，按 Esc 取消"
+    "hint": "拖动框选要截取的区域，按 Esc 取消",
+    "failedToast": "截图失败，请重试"
   },
   "providerError": {
     "AUTH_INVALID": "API 密钥无效或已过期（401），请检查密钥后重试",

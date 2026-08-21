@@ -2,6 +2,8 @@ import { useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation } from 'react-router-dom';
 
+import { toast } from '@/lib/toast';
+
 import { NEW_MAKER_DRAFT_KEY } from '../features/cc-agent/newMakerDraftKeys';
 import {
   getDataOwnerGeneration,
@@ -132,9 +134,11 @@ export function useRegionCaptureShortcut(): () => boolean {
   const pathnameRef = useRef(location.pathname);
   pathnameRef.current = location.pathname;
   // 覆盖层提示条文案随调用传给 main(i18n 在 renderer 侧, 覆盖层是无主 bundle
-  // 的自生成页面); ref 化避免语言切换改变 trigger 身份。
+  // 的自生成页面); 文案 ref 化避免语言切换改变 trigger 身份。
   const overlayHintRef = useRef('');
   overlayHintRef.current = t('regionCapture.hint');
+  const failedToastRef = useRef('');
+  failedToastRef.current = t('regionCapture.failedToast');
 
   const trigger = useCallback((): boolean => {
     // 目标在按键瞬间定格: 系统选区期间切路由不改变归属, 结果仍进当初的草稿。
@@ -174,7 +178,10 @@ export function useRegionCaptureShortcut(): () => boolean {
         if (!isTargetStillValid()) return;
         await appendRegionCaptureToDraft(target, result.data, isTargetStillValid);
       } catch (err) {
+        // 非取消类失败(main 已转稳定 IPC 错误码): 弹本地化提示, 快捷键不能
+        // "按了毫无反应"(review P1)。取消/去重路径走 cancelled 分支, 保持静默。
         console.warn('[useRegionCaptureShortcut] region capture failed', err);
+        toast.error(failedToastRef.current);
       } finally {
         unsubscribe?.();
       }

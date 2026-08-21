@@ -110,6 +110,13 @@ export function registerScreenCaptureIpc(platform: string = process.platform): v
       captureInFlight = true;
       try {
         return await captureRegion(platform, sanitizeOverlayHint(payload));
+      } catch (err) {
+        // 非取消类失败(desktopCapturer 无可用帧、覆盖层加载失败等)统一转
+        // 稳定 IPC 错误码, renderer 据此弹本地化提示 —— 快捷键不能"按了
+        // 毫无反应"(review P1)。已是 IpcError(带 code)的原样上抛。
+        if (err && typeof err === 'object' && 'code' in err) throw err;
+        logger.warn('region capture failed', { err: String(err) });
+        throwIpcError('INTERNAL', `region capture failed: ${String(err)}`);
       } finally {
         captureInFlight = false;
       }

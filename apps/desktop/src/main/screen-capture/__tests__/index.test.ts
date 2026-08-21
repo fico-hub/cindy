@@ -73,6 +73,18 @@ describe('registerScreenCaptureIpc', () => {
     expect(mocks.clipboardWriteImage).not.toHaveBeenCalled();
   });
 
+  // 非取消类失败(无可用帧/覆盖层加载失败)统一转稳定 IPC 错误码, renderer
+  // 据此弹本地化提示; 已带 code 的 IpcError 原样透传(review P1)。
+  it('normalizes raw capture failures to a coded IPC error', async () => {
+    mocks.overlayCapture.mockRejectedValue(new Error('desktopCapturer returned no usable screen frame'));
+    const handler = registerAndGetHandler('win32');
+    await expect(handler({})).rejects.toMatchObject({ code: 'INTERNAL' });
+
+    const coded = Object.assign(new Error('already coded'), { code: 'PERMISSION_DENIED' });
+    mocks.overlayCapture.mockRejectedValue(coded);
+    await expect(handler({})).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+  });
+
   it('returns PNG bytes on successful capture and cleans up the temp file', async () => {
     execFileResolving(() => null);
     const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);

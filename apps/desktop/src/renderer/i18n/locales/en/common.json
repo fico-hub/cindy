@@ -17,7 +17,8 @@
     "INTERNAL": "Operation failed. Please try again later."
   },
   "regionCapture": {
-    "hint": "Drag to select the region to capture, press Esc to cancel"
+    "hint": "Drag to select the region to capture, press Esc to cancel",
+    "failedToast": "Screenshot failed, please try again"
   },
   "providerError": {
     "AUTH_INVALID": "Invalid or expired API key (401). Check the key and try again",

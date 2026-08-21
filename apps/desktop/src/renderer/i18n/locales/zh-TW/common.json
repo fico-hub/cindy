@@ -17,7 +17,8 @@
     "REMOTE_WORKDIR_UNAVAILABLE": "遠端專案目錄不可訪問，請恢復網路盤連線後重試。"
   },
   "regionCapture": {
-    "hint": "拖曳框選要擷取的區域，按 Esc 取消"
+    "hint": "拖曳框選要擷取的區域，按 Esc 取消",
+    "failedToast": "截圖失敗，請重試"
   },
   "providerError": {
     "AUTH_INVALID": "API 金鑰無效或已過期（401），請檢查金鑰後重試",
