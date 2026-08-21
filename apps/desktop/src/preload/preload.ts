@@ -1033,6 +1033,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
       };
     }): Promise<{ ok: true; cancelled: boolean; data?: Uint8Array }> =>
       ipcRenderer.invoke('screen-capture:region', payload),
+    // 当前路由是否存在截图目标 composer(webview guest 快捷键转发的拦截依据)。
+    setTargetAvailable: (available: boolean): void =>
+      ipcRenderer.send('screen-capture:target-available', available),
   },
 
   // 主界面布局树 (shared/layoutTree.ts)。getStateSync 走 sendSync:布局必须

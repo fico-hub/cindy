@@ -10,7 +10,8 @@
  * 计算, 配色值经 main 严格格式校验、hint 只进 HTML 转义后的文本节点。
  *
  * 交互契约(与 main 侧 overlayCapture 对齐):
- * - DOMContentLoaded → announceReady → 收到 init 后展示冻结帧;
+ * - DOMContentLoaded → announceReady → 收到 init 设置冻结帧 → img 解码完成
+ *   announceContentReady → main 才 show() 窗口(解码失败报 cancel);
  * - 左键拖框 → mouseup 上报 select(DIP rect, 任意方向拖拽已规整并夹取边界);
  * - Esc / 右键 / 失焦(300ms 挂载宽限) → cancel; 近零选区由 main 判定为误点。
  */
@@ -93,6 +94,15 @@ const OVERLAY_SCRIPT = `
 
   api.onInit(function (payload) {
     if (payload && typeof payload.imageDataUrl === 'string') {
+      // 冻结帧解码完成后才让 main show() 窗口 —— 大分辨率帧解码期间不能先闪
+      // 出全屏纯黑覆盖层。解码失败按取消收场, 不给用户一个黑屏选区。
+      frame.onload = function () {
+        mountedAt = Date.now();
+        api.announceContentReady();
+      };
+      frame.onerror = function () {
+        report({ kind: 'cancel' });
+      };
       frame.src = payload.imageDataUrl;
       frame.style.display = 'block';
     }
@@ -120,7 +130,8 @@ const OVERLAY_SCRIPT = `
     e.preventDefault();
     report({ kind: 'cancel' });
   });
-  // 失焦取消(切走窗口/Alt-Tab)。挂载初期部分 WM 会派发瞬时 blur, 给宽限。
+  // 失焦取消(切走窗口/Alt-Tab)。窗口刚显示时部分 WM 会派发瞬时 blur, 给宽限;
+  // 起点在帧解码完成(即将 show)时重置, 覆盖解码耗时超过宽限窗口的情况。
   var mountedAt = Date.now();
   window.addEventListener('blur', function () {
     if (Date.now() - mountedAt < 300) return;

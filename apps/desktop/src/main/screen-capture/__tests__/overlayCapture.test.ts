@@ -110,10 +110,17 @@ function emitOverlayReady(senderId: number): void {
   listener?.({ sender: { id: senderId } });
 }
 
+function emitOverlayContentReady(senderId: number): void {
+  const listener = mocks.ipcListeners.get('screen-capture:overlay-content-ready');
+  expect(listener).toBeDefined();
+  listener?.({ sender: { id: senderId } });
+}
+
 type FakeOverlay = InstanceType<typeof FakeBrowserWindow>;
 
 async function flushLoad(): Promise<FakeOverlay> {
-  // loadURL(data: URL) 的 promise 在微任务里 resolve → show; 冻结帧等 ready 信号。
+  // loadURL(data: URL) 的 promise 在微任务里 resolve; 冻结帧等 ready 信号,
+  // show() 等冻结帧解码完成的 content-ready 信号。
   await new Promise((resolve) => setTimeout(resolve, 0));
   const overlay = FakeBrowserWindow.instances.at(-1);
   expect(overlay).toBeDefined();
@@ -130,7 +137,6 @@ describe('captureRegionViaOverlay', () => {
   it('crops the frozen frame by scaleFactor and resolves PNG bytes on select', async () => {
     const pending = captureRegionViaOverlay(5_000, 'drag to select', TEST_PALETTE);
     const overlay = await flushLoad();
-    expect(overlay.show).toHaveBeenCalled();
     // 冻结帧只在 ready 信号(组件已订阅)之后发送, 且只认覆盖层本体 sender。
     expect(overlay.webContents.send).not.toHaveBeenCalled();
     emitOverlayReady(999);
@@ -140,6 +146,14 @@ describe('captureRegionViaOverlay', () => {
       'screen-capture:overlay-init',
       expect.objectContaining({ imageDataUrl: 'data:image/png;base64,ZnJhbWU=' }),
     );
+    // show() 等冻结帧 <img> 解码完成的 content-ready 信号(纯黑窗口不提前
+    // 露出, review P2), 同样只认覆盖层本体 sender。
+    expect(overlay.show).not.toHaveBeenCalled();
+    emitOverlayContentReady(999);
+    expect(overlay.show).not.toHaveBeenCalled();
+    emitOverlayContentReady(501);
+    expect(overlay.show).toHaveBeenCalled();
+    expect(overlay.focus).toHaveBeenCalled();
 
     emitOverlayResult(501, { kind: 'select', rect: { x: 10, y: 20, width: 100, height: 50 } });
     const outcome = await pending;

@@ -4,6 +4,7 @@ import type { ScreenCaptureRegionResult } from '../../../shared/screenCapture.js
 
 const mocks = vi.hoisted(() => ({
   handle: vi.fn(),
+  ipcOn: vi.fn(),
   execFile: vi.fn(),
   readFile: vi.fn(),
   rm: vi.fn(async () => undefined),
@@ -14,7 +15,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('electron', () => ({
-  ipcMain: { handle: mocks.handle },
+  ipcMain: { handle: mocks.handle, on: mocks.ipcOn },
   clipboard: { writeImage: mocks.clipboardWriteImage },
   nativeImage: { createFromBuffer: mocks.createFromBuffer },
 }));
@@ -30,7 +31,7 @@ vi.mock('../../logger.js', () => ({
   createLogger: () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
 }));
 
-import { registerScreenCaptureIpc } from '../index.js';
+import { hasRegionCaptureTarget, registerScreenCaptureIpc } from '../index.js';
 
 type Handler = (event: unknown, payload?: unknown) => Promise<ScreenCaptureRegionResult>;
 
@@ -187,6 +188,41 @@ describe('registerScreenCaptureIpc', () => {
 
     release();
     await expect(first).resolves.toMatchObject({ ok: true, cancelled: false });
+  });
+
+  // 截图目标可用性: renderer 随路由上报, webview guest 快捷键转发据此决定
+  // 是否拦截(无目标不拦, 不吞网页原生处理, review P2)。
+  it('tracks per-renderer capture target availability from trusted senders only', () => {
+    registerScreenCaptureIpc('win32');
+    const call = mocks.ipcOn.mock.calls.at(-1);
+    expect(call?.[0]).toBe('screen-capture:target-available');
+    const listener = call?.[1] as (event: unknown, available?: unknown) => void;
+
+    const sender = { id: 71, once: vi.fn() };
+    expect(hasRegionCaptureTarget(71)).toBe(false); // 缺省: 无目标(不拦截)
+    listener({ sender }, true);
+    expect(hasRegionCaptureTarget(71)).toBe(true);
+    listener({ sender }, false);
+    expect(hasRegionCaptureTarget(71)).toBe(false);
+    listener({ sender }, 'yes'); // 非布尔按无目标处理
+    expect(hasRegionCaptureTarget(71)).toBe(false);
+
+    // renderer 销毁 → 状态清理
+    listener({ sender }, true);
+    expect(hasRegionCaptureTarget(71)).toBe(true);
+    const destroyedCb = (sender.once.mock.calls as unknown[][]).find(
+      (c) => c[0] === 'destroyed',
+    )?.[1] as (() => void) | undefined;
+    expect(destroyedCb).toBeDefined();
+    destroyedCb?.();
+    expect(hasRegionCaptureTarget(71)).toBe(false);
+
+    // 不信任来源被忽略(且不抛: ipcMain.on 同步监听器抛异常是 fatal)
+    mocks.assertTrusted.mockImplementationOnce(() => {
+      throw Object.assign(new Error('untrusted'), { code: 'PERMISSION_DENIED' });
+    });
+    expect(() => listener({ sender: { id: 72, once: vi.fn() } }, true)).not.toThrow();
+    expect(hasRegionCaptureTarget(72)).toBe(false);
   });
 
   it('gates every call on the trusted-renderer check', async () => {

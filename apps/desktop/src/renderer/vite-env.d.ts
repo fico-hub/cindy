@@ -1207,6 +1207,9 @@ interface ElectronAPI {
       overlayHint?: string;
       overlayPalette?: import('../shared/screenCapture').ScreenCaptureOverlayPalette;
     }) => Promise<import('../shared/screenCapture').ScreenCaptureRegionResult>;
+    /** 当前路由是否存在截图目标 composer —— webview guest 快捷键转发的拦截
+     *  依据(无目标时不拦, 保留网页对该组合键的原生处理)。 */
+    setTargetAvailable: (available: boolean) => void;
   };
 
   /** 主界面布局树 —— 数据模型与校验见 shared/layoutTree.ts,main 端见 main/layout/。 */

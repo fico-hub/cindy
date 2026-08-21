@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 
 import {
   SCREEN_CAPTURE_REGION_CHANNEL,
+  SCREEN_CAPTURE_TARGET_AVAILABLE_CHANNEL,
   type ScreenCaptureOverlayPalette,
   type ScreenCaptureRegionResult,
 } from '../../shared/screenCapture.js';
@@ -139,7 +140,33 @@ async function captureRegion(
   return { ok: true, cancelled: false, data: outcome.data };
 }
 
+/**
+ * 各 host renderer 当前路由是否存在截图目标 composer(webContents.id → boolean)。
+ * webview guest 的快捷键转发据此决定要不要拦截按键: 无目标时不 preventDefault,
+ * 网页对该组合键的原生处理得以保留(review P2)。缺省视为无目标(不拦截),
+ * MainLayout 挂载即上报, 不会出现"有目标但状态未上报"的窗口期盖过真实转发。
+ */
+const captureTargetAvailability = new Map<number, boolean>();
+
+export function hasRegionCaptureTarget(hostContentsId: number): boolean {
+  return captureTargetAvailability.get(hostContentsId) === true;
+}
+
 export function registerScreenCaptureIpc(platform: string = process.platform): void {
+  ipcMain.on(SCREEN_CAPTURE_TARGET_AVAILABLE_CHANNEL, (event, available: unknown) => {
+    // ipcMain.on 同步监听器里不可抛异常(lifecycle 视为 fatal): 不信任来源直接忽略。
+    try {
+      assertTrustedAppRendererEvent(event);
+    } catch {
+      return;
+    }
+    const id = event.sender.id;
+    if (!captureTargetAvailability.has(id)) {
+      event.sender.once('destroyed', () => captureTargetAvailability.delete(id));
+    }
+    captureTargetAvailability.set(id, available === true);
+  });
+
   ipcMain.handle(
     SCREEN_CAPTURE_REGION_CHANNEL,
     async (event, payload: unknown): Promise<ScreenCaptureRegionResult> => {

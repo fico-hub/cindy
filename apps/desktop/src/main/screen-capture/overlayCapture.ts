@@ -2,6 +2,7 @@ import { BrowserWindow, desktopCapturer, ipcMain, screen } from 'electron';
 import path from 'node:path';
 
 import {
+  SCREEN_CAPTURE_OVERLAY_CONTENT_READY_CHANNEL,
   SCREEN_CAPTURE_OVERLAY_INIT_CHANNEL,
   SCREEN_CAPTURE_OVERLAY_READY_CHANNEL,
   SCREEN_CAPTURE_OVERLAY_RESULT_CHANNEL,
@@ -185,25 +186,33 @@ export async function captureRegionViaOverlay(
         overlay.webContents.send(SCREEN_CAPTURE_OVERLAY_INIT_CHANNEL, payload);
       };
 
+      // show() 等冻结帧 <img> 解码完成(loadURL resolve 只代表 HTML 加载完,
+      // init 经 IPC 送达 + 大分辨率帧解码都在其后) —— 否则全屏置顶窗口先以
+      // 纯黑出现, 用户可能在看不到屏幕内容时就开始选区(review P2)。解码
+      // 失败由覆盖层报 cancel, 一直不就绪则由总超时兜底取消。
+      const onContentReady = (event: Electron.IpcMainEvent) => {
+        if (settled || overlay.isDestroyed()) return;
+        if (event.sender.id !== overlay.webContents.id) return;
+        overlay.show();
+        overlay.focus();
+      };
+
       const cleanup = () => {
         clearTimeout(timer);
         ipcMain.removeListener(SCREEN_CAPTURE_OVERLAY_RESULT_CHANNEL, onResult);
         ipcMain.removeListener(SCREEN_CAPTURE_OVERLAY_READY_CHANNEL, onReady);
+        ipcMain.removeListener(SCREEN_CAPTURE_OVERLAY_CONTENT_READY_CHANNEL, onContentReady);
         overlay.removeListener('closed', onClosed);
       };
 
       ipcMain.on(SCREEN_CAPTURE_OVERLAY_RESULT_CHANNEL, onResult);
       ipcMain.on(SCREEN_CAPTURE_OVERLAY_READY_CHANNEL, onReady);
+      ipcMain.on(SCREEN_CAPTURE_OVERLAY_CONTENT_READY_CHANNEL, onContentReady);
       overlay.on('closed', onClosed);
 
       const html = buildRegionCaptureOverlayHtml(hintText, palette);
       overlay
         .loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
-        .then(() => {
-          if (settled || overlay.isDestroyed()) return;
-          overlay.show();
-          overlay.focus();
-        })
         .catch((err) => {
           logger.warn('overlay load failed', { err: String(err) });
           settle(() => reject(err instanceof Error ? err : new Error(String(err))));

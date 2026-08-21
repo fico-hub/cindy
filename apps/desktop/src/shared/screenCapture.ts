@@ -9,6 +9,14 @@
 export const SCREEN_CAPTURE_REGION_CHANNEL = 'screen-capture:region';
 
 /**
+ * renderer → main(send): 主区当前路由是否存在截图目标 composer。webview guest
+ * 的快捷键转发(main/webview-security)以此决定要不要拦截按键 —— 无目标路由上
+ * 拦了也无事发生, 反而吞掉网页对该组合键的原生处理(review P2)。MainLayout 的
+ * 全局消费端在挂载与路由变化时上报。
+ */
+export const SCREEN_CAPTURE_TARGET_AVAILABLE_CHANNEL = 'screen-capture:target-available';
+
+/**
  * 覆盖层配色(win/linux): renderer 在触发瞬间解析当前主题语义 token 的计算值
  * 随 invoke 传入 —— 覆盖层是 main 自生成页面, 不加载 renderer 的主题 CSS 变量,
  * 传"解析后的值"让 Light/Dark 与自定义主题 override 都自然生效(DESIGN.md
@@ -49,6 +57,9 @@ export interface ScreenCaptureRegionResult {
 export const SCREEN_CAPTURE_OVERLAY_READY_CHANNEL = 'screen-capture:overlay-ready';
 /** main → overlay: 冻结帧与选区坐标系初始化。 */
 export const SCREEN_CAPTURE_OVERLAY_INIT_CHANNEL = 'screen-capture:overlay-init';
+/** overlay → main: 冻结帧 <img> 已解码完成(load 事件) —— main 此后才 show()
+ *  覆盖层窗口, 避免大分辨率帧解码期间先闪出全屏纯黑窗口(review P2)。 */
+export const SCREEN_CAPTURE_OVERLAY_CONTENT_READY_CHANNEL = 'screen-capture:overlay-content-ready';
 /** overlay → main: 选区结果(main 侧校验 sender 必须是覆盖层窗口本体)。 */
 export const SCREEN_CAPTURE_OVERLAY_RESULT_CHANNEL = 'screen-capture:overlay-result';
 

@@ -1,4 +1,4 @@
-import { useCallback, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation } from 'react-router-dom';
 
@@ -164,6 +164,15 @@ export function useRegionCaptureShortcut(): () => boolean {
   overlayHintRef.current = t('regionCapture.hint');
   const failedToastRef = useRef('');
   failedToastRef.current = t('regionCapture.failedToast');
+
+  // 向 main 上报"当前路由是否存在截图目标"—— webview guest 聚焦时的快捷键
+  // 转发以此决定要不要拦截按键: 无目标路由上拦截只会白吞网页对该组合键的
+  // 原生处理(review P2)。main 侧缺省视为无目标, 上报晚到只会少拦不会误拦。
+  useEffect(() => {
+    window.electronAPI.screenCapture.setTargetAvailable(
+      resolveRegionCaptureTargetFromPath(location.pathname) !== null,
+    );
+  }, [location.pathname]);
 
   const trigger = useCallback((): boolean => {
     // 目标在按键瞬间定格: 系统选区期间切路由不改变归属, 结果仍进当初的草稿。
