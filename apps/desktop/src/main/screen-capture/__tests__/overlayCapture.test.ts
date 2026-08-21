@@ -63,6 +63,7 @@ const mocks = vi.hoisted(() => {
       size: { width: 1280, height: 720 },
       scaleFactor: 2,
     })),
+    getAllDisplays: vi.fn((): unknown[] => [{ id: 7 }]),
     ipcListeners: new Map<string, (...args: unknown[]) => void>(),
   };
 });
@@ -75,6 +76,7 @@ vi.mock('electron', () => ({
   screen: {
     getCursorScreenPoint: mocks.getCursorScreenPoint,
     getDisplayNearestPoint: mocks.getDisplayNearestPoint,
+    getAllDisplays: mocks.getAllDisplays,
   },
   ipcMain: {
     on: vi.fn((channel: string, listener: (...args: unknown[]) => void) => {
@@ -223,6 +225,17 @@ describe('captureRegionViaOverlay', () => {
     await flushLoad();
     emitOverlayResult(501, { kind: 'cancel' });
     await expect(pending).resolves.toEqual({ cancelled: true });
+  });
+
+  // 唯一源兜底仅限"物理显示器也唯一": 多屏 Wayland/合并桌面后端可能只回
+  // 一个空 display_id 的源(另一块屏或整张虚拟桌面), 不能当作光标所在屏
+  // (review P1)。
+  it('rejects a sole unmatched source when multiple physical displays exist', async () => {
+    mocks.getSources.mockResolvedValueOnce([{ display_id: '', thumbnail: mocks.frame }]);
+    mocks.getAllDisplays.mockReturnValueOnce([{ id: 7 }, { id: 8 }]);
+    await expect(captureRegionViaOverlay(5_000, 'drag to select', TEST_PALETTE)).rejects.toThrow(
+      'cannot match a capture source',
+    );
   });
 
   it('loads a self-contained data: URL with the dedicated minimal preload', async () => {

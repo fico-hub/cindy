@@ -79,12 +79,16 @@ export async function captureRegionViaOverlay(
     types: ['screen'],
     thumbnailSize: pixelSize,
   });
-  // 帧源必须能可靠对应到覆盖层所在显示器: display_id 匹配, 或全局唯一源
-  // (单显示器/后端合并输出)。多源且无匹配(部分 Linux/Wayland 后端不回
-  // display_id)时不猜 —— 覆盖层在 A 屏展示 B 屏内容会让用户在不知情中
-  // 附上另一块屏幕的画面, 宁可失败走 renderer 的失败提示(review P1)。
+  // 帧源必须能可靠对应到覆盖层所在显示器: display_id 匹配, 或"唯一源且物理
+  // 显示器也唯一"(此时源只可能是这块屏)。仅凭 sources.length === 1 不够:
+  // 多屏 Wayland/合并桌面后端可能只回一个空 display_id 的源, 它可以是 portal
+  // 选中的另一块屏或整张虚拟桌面 —— 覆盖层在 A 屏展示 B 屏(或拉伸的合并)
+  // 内容会让用户在不知情中附上非预期画面。无法可靠映射时不猜, 宁可失败走
+  // renderer 的失败提示(review P1 两轮)。
   const matched = sources.find((s) => s.display_id === String(display.id)) ?? null;
-  const source = matched ?? (sources.length === 1 ? sources[0] : null);
+  const source =
+    matched ??
+    (sources.length === 1 && screen.getAllDisplays().length === 1 ? sources[0] : null);
   if (!source) {
     throw new Error('cannot match a capture source to the active display');
   }
