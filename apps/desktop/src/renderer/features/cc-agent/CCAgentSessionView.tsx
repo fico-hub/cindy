@@ -110,7 +110,6 @@ import { ChatDisplaySnapshotProvider } from '@/components/chat/ChatDisplaySnapsh
 import { useCCAgentChat } from '@/hooks/useCCAgentChat';
 import { ackErrorAlertHandled } from '@/lib/errorAlertAck';
 import { useAttachments } from '@/hooks/useAttachments';
-import { useRegionCaptureShortcut } from '@/hooks/useRegionCaptureShortcut';
 import { useCCSessions } from '@/hooks/useCCSessions';
 import { SessionContentHeaderRegistration } from './SessionContentHeader';
 import { useSessionBinding } from '@/hooks/useSessionBinding';
@@ -1194,8 +1193,6 @@ export function CCAgentSessionView({
   // image-local-cache: pass sessionId so addFiles/addClipboardImage can cache
   // images into userData/cc-agent/images/{sessionId}/ via IPC.
   const attachmentState = useAttachments(sessionId);
-  // capture-region 快捷键: 系统区域截图 → 当前会话 composer 附件。
-  useRegionCaptureShortcut(attachmentState.addClipboardImage);
   const [isDragOver, setIsDragOver] = useState(false);
   const dragCounterRef = useRef(0);
   const resetFullAreaDragState = useCallback(() => {

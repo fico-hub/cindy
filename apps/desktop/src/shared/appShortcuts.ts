@@ -97,10 +97,12 @@ export interface AppShortcutDefinition {
    * true = 本条目的默认组合对用户既有绑定让位: 与其它 id 的 override 或
    * registry 之外体系的用户键位 (yieldToCombos) 撞键时, 默认组合被压制
    * (该槽位等效无绑定), 写入侧 findAppShortcutConflict 也不把它算作占用。
-   * 只用于「批量占键的次要便捷槽位」(switch-session-*): 它们隐藏在设置页
-   * 之外, 用户看不到也解不开, 不让位就会一次按键双动作。save-file / ⌘, 等
-   * 惯例键虽也 hiddenInSettings 但**不得**设本字段 —— 否则用户把别的键改绑
-   * 到 ⌘S 会被放行并静默丢失保存快捷键。
+   * 只用于两类条目: 「批量占键的次要便捷槽位」(switch-session-*, 隐藏在设置
+   * 页之外, 用户看不到也解不开) 与「后续版本新增默认键的次要功能」
+   * (capture-region, 存量 override 写入时它还不存在, 冲突校验不追溯) ——
+   * 两类不让位都会一次按键双动作。save-file / ⌘, 等惯例键虽也
+   * hiddenInSettings 但**不得**设本字段 —— 否则用户把别的键改绑到 ⌘S 会被
+   * 放行并静默丢失保存快捷键。
    */
   yieldsToUserBindings?: boolean;
   /**
@@ -168,12 +170,16 @@ export const APP_SHORTCUT_DEFINITIONS: ReadonlyArray<AppShortcutDefinition> = [
   },
   // 区域截图: 调起 macOS 原生 screencapture -i 拉框选区, 结果走剪贴板图片
   // 粘贴同一管线进入当前会话输入框。仅 darwin (依赖系统 screencapture CLI)。
+  // yieldsToUserBindings: 本条目是后加入的默认键 —— 升级用户可能早已把
+  // ⇧⌘S 改绑给其它动作(写入时本条目还不存在, 冲突校验不追溯存量), 不让位
+  // 会一次按键双动作。让位后本条目在设置页显示为未绑定, 用户可自行改绑。
   {
     id: 'capture-region',
     scope: 'app',
     labelKey: 'settings.shortcuts.items.capture-region.label',
     descriptionKey: 'settings.shortcuts.items.capture-region.description',
     rebindable: true,
+    yieldsToUserBindings: true,
     platforms: ['darwin'],
     getDefaultCombos: () => [combo('KeyS', { meta: true, shift: true })],
   },

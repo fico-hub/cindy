@@ -962,6 +962,18 @@ describe('resolveGuestShortcutAction', () => {
     });
   });
 
+  // capture-region: guest 内按 ⇧⌘S 转发回 host 的全局区域截图入口(review P2:
+  // 设置页展示的快捷键在 webview 聚焦时不能失效)。非 darwin 平台过滤让生效
+  // 组合为空 → 不命中, guest 按键保持原生行为。
+  it('forwards darwin ⇧⌘S to the capture-region action; other platforms do not match', () => {
+    expect(
+      resolveGuestShortcutAction(key('KeyS', { meta: true, shift: true }), combosFor('darwin')),
+    ).toEqual({ kind: 'capture-region' });
+    expect(
+      resolveGuestShortcutAction(key('KeyS', { control: true, shift: true }), combosFor('win32')),
+    ).toBeNull();
+  });
+
   it('matches darwin bracket tab cycling in webview input even when code is unreliable', () => {
     const getCombos = combosFor('darwin');
     expect(

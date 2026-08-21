@@ -303,9 +303,12 @@ export type RsbBrowserCommand =
   | 'right-tab-prev'
   | 'right-tab-next';
 
-/** guest before-input-event 命中后的动作。 */
+/** guest before-input-event 命中后的动作。'capture-region' 不属于浏览器命令,
+ *  经 'app-menu:command' channel 送 MainLayout 的全局区域截图入口(与 darwin
+ *  菜单命令同通道, 见 shared/applicationMenuCommands.ts)。 */
 export type RsbGuestShortcutAction =
   | { kind: 'focus-url-bar' }
+  | { kind: 'capture-region' }
   | { kind: 'command'; command: RsbBrowserCommand };
 
 interface GuestKeyInput {
@@ -341,6 +344,8 @@ const GUEST_SHORTCUT_ACTIONS: ReadonlyArray<{
   { id: 'browser-back', action: { kind: 'command', command: 'go-back' } },
   { id: 'browser-forward', action: { kind: 'command', command: 'go-forward' } },
   { id: 'browser-reload', action: { kind: 'command', command: 'reload' } },
+  // 区域截图: 与上面各默认键无撞键, 排尾即可。非 darwin 生效组合为空, 天然不命中。
+  { id: 'capture-region', action: { kind: 'capture-region' } },
 ];
 
 /**
@@ -768,6 +773,10 @@ export function installBrowserGuestHandlers(
     if (target.isDestroyed()) return;
     if (action.kind === 'focus-url-bar') {
       target.send(RSB_BROWSER_FOCUS_URL_BAR_CHANNEL, null);
+    } else if (action.kind === 'capture-region') {
+      // 与 darwin 菜单命令同通道(preload 有 isApplicationMenuCommand 白名单),
+      // MainLayout 的全局入口按当前路由解析目标 composer。
+      target.send('app-menu:command', 'capture-region');
     } else {
       target.send(RSB_BROWSER_COMMAND_CHANNEL, { command: action.command });
     }

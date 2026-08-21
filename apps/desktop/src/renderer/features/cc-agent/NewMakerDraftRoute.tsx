@@ -76,7 +76,6 @@ import { useProportionalWidth } from '@/hooks/useProportionalWidth';
 import { useCCSessions } from '@/hooks/useCCSessions';
 import { useVendorAuthGate } from '@/hooks/useVendorAuthGate';
 import { useAttachments } from '@/hooks/useAttachments';
-import { useRegionCaptureShortcut } from '@/hooks/useRegionCaptureShortcut';
 import {
   useNewMakerDraft,
   switchVendor,
@@ -813,8 +812,6 @@ export function NewMakerDraftRoute() {
   // fallback——草稿态没真实会话目录可写),但 draftKey 用 NEW_MAKER_DRAFT_KEY
   // 让附件能在"切走再切回"时存活。
   const attachmentState = useAttachments(undefined, NEW_MAKER_DRAFT_KEY);
-  // capture-region 快捷键: 系统区域截图 → 新任务草稿 composer 附件。
-  useRegionCaptureShortcut(attachmentState.addClipboardImage);
   /**
    * 剥掉 @file / @dir / @agent mention chip —— 触发条件是**项目变了**,不只是设备变了。
    *
