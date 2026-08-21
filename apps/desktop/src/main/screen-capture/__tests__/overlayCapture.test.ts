@@ -202,6 +202,25 @@ describe('captureRegionViaOverlay', () => {
     }
   });
 
+  // Electron 不保证缩略图等于请求的 thumbnailSize: 裁剪按"实际帧/显示器 DIP"
+  // 比例换算; 宽高比对不上说明帧不是这块屏, 拒绝(review P1)。
+  it('maps selection by the actual frame-to-display ratio when thumbnail size differs', async () => {
+    mocks.frame.getSize.mockReturnValueOnce({ width: 1920, height: 1080 });
+    const pending = captureRegionViaOverlay(5_000, 'drag to select', TEST_PALETTE);
+    await flushLoad();
+    emitOverlayResult(501, { kind: 'select', rect: { x: 100, y: 40, width: 200, height: 100 } });
+    await expect(pending).resolves.toMatchObject({ cancelled: false });
+    // 1920/1280 = 1080/720 = 1.5
+    expect(mocks.frame.crop).toHaveBeenCalledWith({ x: 150, y: 60, width: 300, height: 150 });
+  });
+
+  it('rejects frames whose aspect ratio cannot map to the display', async () => {
+    mocks.frame.getSize.mockReturnValueOnce({ width: 2560, height: 1600 });
+    await expect(captureRegionViaOverlay(5_000, 'drag to select', TEST_PALETTE)).rejects.toThrow(
+      'aspect ratio',
+    );
+  });
+
   it('throws when desktopCapturer yields no usable frame', async () => {
     mocks.getSources.mockResolvedValueOnce([]);
     await expect(captureRegionViaOverlay(5_000, 'drag to select', TEST_PALETTE)).rejects.toThrow(

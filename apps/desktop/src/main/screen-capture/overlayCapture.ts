@@ -96,6 +96,21 @@ export async function captureRegionViaOverlay(
   if (!frame || frame.isEmpty()) {
     throw new Error('desktopCapturer returned no usable screen frame');
   }
+  // Electron 不保证缩略图采用请求的 thumbnailSize —— 裁剪换算一律按"实际帧
+  // 尺寸 / 显示器 DIP 尺寸"的横纵比例(下方 onResult), 不能固定用 scaleFactor。
+  // 宽高比对不上说明帧根本不是这块屏(portal 回了别的屏/合并桌面), 拒绝,
+  // 否则选区与附件内容会错位(review P1)。
+  const frameSize = frame.getSize();
+  const displayAspect = display.size.width / display.size.height;
+  if (
+    frameSize.width <= 0 ||
+    frameSize.height <= 0 ||
+    Math.abs(frameSize.width / frameSize.height - displayAspect) / displayAspect > 0.02
+  ) {
+    throw new Error('captured frame aspect ratio does not match the active display');
+  }
+  const scaleX = frameSize.width / display.size.width;
+  const scaleY = frameSize.height / display.size.height;
 
   const overlay = new BrowserWindow({
     ...display.bounds,
@@ -151,15 +166,16 @@ export async function captureRegionViaOverlay(
           return;
         }
         const rect = result.rect;
-        const size = frame.getSize();
+        // DIP rect → 像素: 按实际帧与显示器的横纵比例分别换算(见上方 scaleX/Y
+        // 注释), 再夹取到帧内。
         const px = {
-          x: Math.max(0, Math.round(rect.x * scaleFactor)),
-          y: Math.max(0, Math.round(rect.y * scaleFactor)),
-          width: Math.round(rect.width * scaleFactor),
-          height: Math.round(rect.height * scaleFactor),
+          x: Math.max(0, Math.round(rect.x * scaleX)),
+          y: Math.max(0, Math.round(rect.y * scaleY)),
+          width: Math.round(rect.width * scaleX),
+          height: Math.round(rect.height * scaleY),
         };
-        px.width = Math.min(px.width, size.width - px.x);
-        px.height = Math.min(px.height, size.height - px.y);
+        px.width = Math.min(px.width, frameSize.width - px.x);
+        px.height = Math.min(px.height, frameSize.height - px.y);
         if (
           rect.width < MIN_SELECTION_DIP ||
           rect.height < MIN_SELECTION_DIP ||
