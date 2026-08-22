@@ -618,6 +618,72 @@ describe('readReviewWorkspaceSnapshot', () => {
     }
   });
 
+  it('fails closed instead of probing local fs for a remote workspace submodule (#2463 review)', async () => {
+    // SSH 远程 review 的 repoRoot 是远端路径:本机 fs 探测会把 ENOENT 误判成
+    // uninitialized 放行过期结论,同路径本机目录还会绑错字节。命中 dirty
+    // submodule 的远程快照必须显式拒绝,且不得触碰 submodule reader。
+    const repoRoot = await tempDir();
+    const submodulePath = 'vendor/lib';
+    const data = cappedReviewData(repoRoot, 'src/big.ts');
+    const remoteScope = { ...data.scope, source: 'remote' as const };
+    readReviewDataMock.mockResolvedValue({
+      ...data,
+      scope: remoteScope,
+      status: data.status
+        ? {
+            ...data.status,
+            scope: remoteScope,
+            files: [
+              ...data.status.files,
+              {
+                path: submodulePath,
+                oldPath: null,
+                indexStatus: null,
+                worktreeStatus: 'modified' as const,
+                isUntracked: false,
+                isUnmerged: false,
+                isSubmodule: true,
+                sources: ['unstaged' as const],
+                rawXY: ' M',
+              },
+            ],
+          }
+        : data.status,
+    });
+    const readSubmoduleIdentity = vi.fn(
+      async (_repoRoot: string, _paths: readonly string[]) => ({
+        identities: [],
+        hashedContent: false,
+      }),
+    );
+
+    await expect(
+      readReviewWorkspaceSnapshot('source', {
+        fingerprintCappedWorkspaceFiles: vi.fn(async () => 'digest'),
+        readSubmoduleIdentity,
+      }),
+    ).rejects.toThrow(/SSH remote/);
+    expect(readSubmoduleIdentity).not.toHaveBeenCalled();
+  });
+
+  it('keeps a remote workspace snapshot working when no submodule is involved (#2463 review)', async () => {
+    const repoRoot = await tempDir();
+    const data = cappedReviewData(repoRoot, 'src/big.ts');
+    const remoteScope = { ...data.scope, source: 'remote' as const };
+    readReviewDataMock.mockResolvedValue({
+      ...data,
+      scope: remoteScope,
+      status: data.status ? { ...data.status, scope: remoteScope } : data.status,
+    });
+
+    await expect(
+      readReviewWorkspaceSnapshot('source', {
+        fingerprintCappedWorkspaceFiles: vi.fn(async () => 'digest'),
+        readSubmoduleIdentity: vi.fn(async () => ({ identities: [], hashedContent: false })),
+      }),
+    ).resolves.toBeTruthy();
+  });
+
   it('routes submodule evidence to the identity reader and binds the manifest (#2463)', async () => {
     const repoRoot = await tempDir();
     const submodulePath = 'vendor/lib';
