@@ -710,6 +710,7 @@ describe('readReviewWorkspaceSnapshot', () => {
           headRecord: `160000 commit ${'c'.repeat(40)}`,
           subHead,
           stagedIdentity: [],
+          statusRecords: [],
           dirtyContentFingerprint: null,
           nested: [],
         },

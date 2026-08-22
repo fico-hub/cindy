@@ -555,6 +555,32 @@ describe('readReviewSubmoduleIdentity index 已删的嵌套 gitlink (#2463 revie
   });
 });
 
+describe('readReviewSubmoduleIdentity intent-to-add 状态绑定 (#2463 review)', () => {
+  it('distinguishes an intent-to-add file from the same bytes after git reset', async () => {
+    // 子仓内 `git add -N new.txt` 与其 `git reset` 后:文件字节相同、内容指纹
+    // 相同、staged 身份两态都为空(ita 条目 porcelain 记 ` A`,不进 staged
+    // 桶),只有原始状态码(` A` vs `??`)能区分。manifest 不绑状态码时两态
+    // 完全同一,旧结论可穿过新鲜度门。
+    const { parent, innermost } = await setupNestedChain(1);
+    parentPath = parent;
+    const newFile = path.join(innermost, 'new.txt');
+    await fs.writeFile(newFile, 'same-bytes\n');
+
+    await runGit(['add', '-N', 'new.txt'], { cwd: innermost });
+    const withIntentToAdd = await readReviewSubmoduleIdentity(parentPath, ['vendor/lib']);
+    await runGit(['reset', '--', 'new.txt'], { cwd: innermost });
+    const afterReset = await readReviewSubmoduleIdentity(parentPath, ['vendor/lib']);
+
+    // 字节未动:内容指纹一致,差异必须由状态记录承担。
+    expect(afterReset.identities[0].dirtyContentFingerprint).toBe(
+      withIntentToAdd.identities[0].dirtyContentFingerprint,
+    );
+    expect(afterReset.identities).not.toEqual(withIntentToAdd.identities);
+    expect(withIntentToAdd.identities[0].statusRecords).toContain(' A new.txt');
+    expect(afterReset.identities[0].statusRecords).toContain('?? new.txt');
+  });
+});
+
 describe('顶层 readStatus 的 --ignore-submodules=none (#2463 维护者 review)', () => {
   it('keeps an ignore=all submodule with untracked-only content visible in top-level status', async () => {
     // 父仓配置 submodule.<name>.ignore=all 时,不带 --ignore-submodules=none

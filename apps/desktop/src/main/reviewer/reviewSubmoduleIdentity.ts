@@ -82,6 +82,13 @@ export interface ReviewSubmoduleIdentity {
   subHead: string;
   /** 子仓 dirty staged 侧的 index 身份记录(#2460 同格式);clean 为空数组。 */
   stagedIdentity: string[];
+  /**
+   * 子仓 porcelain status 原始记录(`XY path`,稳定排序)。intent-to-add
+   * (` A`)与 reset 后的 untracked(`??`)字节相同、内容指纹相同,staged 侧
+   * 也都为空 —— 只有状态码能区分这两种(以及其它同字节的)内层形态,不绑
+   * 会让不同状态映射到同一 manifest(Codex review #2515)。
+   */
+  statusRecords: string[];
   /** 子仓 dirty 工作树普通文件的有界内容指纹;无 dirty 工作树文件为 null。 */
   dirtyContentFingerprint: string | null;
   /** dirty 的嵌套 submodule,按相同规则递归。 */
@@ -149,6 +156,8 @@ interface SubStatusEntry {
   staged: boolean;
   worktree: boolean;
   untracked: boolean;
+  /** porcelain v1 原始 XY 两字符状态码。 */
+  xy: string;
   path: string;
 }
 
@@ -169,13 +178,14 @@ async function readSubStatus(subRoot: string): Promise<SubStatusEntry[]> {
     const entryPath = record.slice(3);
     if (!entryPath) continue;
     if (x === '?' && y === '?') {
-      entries.push({ staged: false, worktree: true, untracked: true, path: entryPath });
+      entries.push({ staged: false, worktree: true, untracked: true, xy: '??', path: entryPath });
       continue;
     }
     entries.push({
       staged: x !== ' ' && x !== '?',
       worktree: y !== ' ',
       untracked: false,
+      xy: `${x}${y}`,
       path: entryPath,
     });
   }
@@ -267,6 +277,7 @@ async function readOneSubmoduleIdentity(
       headRecord,
       subHead: 'uninitialized',
       stagedIdentity: [],
+      statusRecords: [],
       dirtyContentFingerprint: null,
       nested: [],
     },
@@ -306,6 +317,7 @@ async function readOneSubmoduleIdentity(
         headRecord,
         subHead: 'typechange',
         stagedIdentity: [],
+        statusRecords: [],
         dirtyContentFingerprint: typechangeFingerprint,
         nested: [],
       },
@@ -401,6 +413,10 @@ async function readOneSubmoduleIdentity(
       headRecord,
       subHead,
       stagedIdentity,
+      // 原始状态码逐条并入 manifest:同字节的状态迁移(如 intent-to-add
+      // `git reset` 后变 untracked)不改变 stagedIdentity 与内容指纹,只有
+      // 这里能把它们区分开。
+      statusRecords: entries.map((entry) => `${entry.xy} ${entry.path}`).sort(),
       dirtyContentFingerprint,
       nested,
     },
