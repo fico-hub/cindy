@@ -323,6 +323,17 @@ async function buildReviewWorkspaceSnapshot(
     workspace,
     sanitizeReviewStatusFiles(reviewData.status?.files ?? []),
   );
+  // SSH 远程工作区:submodule 身份读取含本机 fs 探测(lstat/realpath/readdir)。
+  // repoRoot 在远端时,本机 ENOENT 会被误判成 'uninitialized' 放行过期结论;
+  // 本机碰巧存在同路径目录时,还会把本机字节和远端 git 状态绑在一起。git 命令
+  // 经 GitExecutionBackend 走远程,fs 探测不走——在读到任何本机状态之前显式
+  // fail closed(拒绝发布而非放行),与其它 Git 证据读取失败同一收口。完整远程
+  // 支持需经 remote-file-service 通道,见 PR 描述的远程适配结论。
+  if (submodulePaths.length > 0 && reviewData.scope.source === 'remote') {
+    throw new Error(
+      'Review submodule identity is not supported over SSH remote workspaces; refusing to bind local filesystem state (fail closed).',
+    );
+  }
   const submoduleIdentity =
     submodulePaths.length > 0 && reviewData.scope.repoRoot
       ? await deps.readSubmoduleIdentity(reviewData.scope.repoRoot, submodulePaths)
