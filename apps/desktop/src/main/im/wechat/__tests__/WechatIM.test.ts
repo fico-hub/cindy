@@ -114,12 +114,12 @@ describe('WechatIM host boundary', () => {
 
   it('distinguishes agent-unsupported from permission-mode-unsupported pre-dispatch failures', () => {
     // Agent 未声明 turnPermissionPolicy(如 Pi):换权限模式无效,文案引导换 Agent。
-    expect(__testing.wechatPreDispatchFailureText('TURN_PERMISSION_POLICY_UNSUPPORTED:agent:ask')).toContain(
-      '换成 Claude Code 或 Codex',
-    );
-    expect(__testing.wechatPreDispatchFailureText('TURN_PERMISSION_POLICY_UNSUPPORTED:agent:auto')).not.toContain(
-      '权限模式',
-    );
+    expect(
+      __testing.wechatPreDispatchFailureText('TURN_PERMISSION_POLICY_UNSUPPORTED:agent:ask'),
+    ).toContain('换成 Claude Code 或 Codex');
+    expect(
+      __testing.wechatPreDispatchFailureText('TURN_PERMISSION_POLICY_UNSUPPORTED:agent:auto'),
+    ).not.toContain('权限模式');
     // 当前权限模式若是换 Agent 后仍不兼容的档位(bypassPermissions / acceptEdits),
     // 换 Agent 指引应附带 /permission 提示,避免新 Agent 再次命中权限模式错误。
     expect(
@@ -128,20 +128,26 @@ describe('WechatIM host boundary', () => {
       ),
     ).toContain('/permission');
     expect(
-      __testing.wechatPreDispatchFailureText('TURN_PERMISSION_POLICY_UNSUPPORTED:agent:acceptEdits'),
+      __testing.wechatPreDispatchFailureText(
+        'TURN_PERMISSION_POLICY_UNSUPPORTED:agent:acceptEdits',
+      ),
     ).toContain('/permission');
-    expect(__testing.wechatPreDispatchFailureText('TURN_PERMISSION_POLICY_UNSUPPORTED:agent:ask')).not.toContain(
-      '/permission',
-    );
+    expect(
+      __testing.wechatPreDispatchFailureText('TURN_PERMISSION_POLICY_UNSUPPORTED:agent:ask'),
+    ).not.toContain('/permission');
     // 权限模式在 unsupportedPermissionModes 里(如 bypassPermissions):文案引导调权限模式。
     expect(
-      __testing.wechatPreDispatchFailureText('TURN_PERMISSION_POLICY_UNSUPPORTED:mode:bypassPermissions'),
+      __testing.wechatPreDispatchFailureText(
+        'TURN_PERMISSION_POLICY_UNSUPPORTED:mode:bypassPermissions',
+      ),
     ).toContain('权限模式');
     // 旧格式 / 渠道侧 unsupported_turn_permission 兼容分支:同样按权限模式处理。
-    expect(__testing.wechatPreDispatchFailureText('TURN_PERMISSION_POLICY_UNSUPPORTED:ask')).toContain(
+    expect(
+      __testing.wechatPreDispatchFailureText('TURN_PERMISSION_POLICY_UNSUPPORTED:ask'),
+    ).toContain('权限模式');
+    expect(__testing.wechatPreDispatchFailureText('unsupported_turn_permission')).toContain(
       '权限模式',
     );
-    expect(__testing.wechatPreDispatchFailureText('unsupported_turn_permission')).toContain('权限模式');
     expect(__testing.wechatPreDispatchFailureText('missing_auth')).toContain('模型服务');
     expect(__testing.wechatPreDispatchFailureText('boom')).toContain('稍后重试');
   });
@@ -160,10 +166,7 @@ describe('WechatIM host boundary', () => {
   });
 
   it('排队等待 provider 受理时按 task session 回退微信 peer', () => {
-    const activeTasks = new Map<
-      string,
-      { routeSessionId?: string; task: { sessionId: string } }
-    >([
+    const activeTasks = new Map<string, { routeSessionId?: string; task: { sessionId: string } }>([
       ['peer-queued', { task: { sessionId: 'wechat-task-session' } }],
       ['peer-other', { task: { sessionId: 'other-session' } }],
     ]);
@@ -187,14 +190,14 @@ describe('WechatIM host boundary', () => {
       rejectedTaskIds: ['overload'],
     });
     expect([...accepted]).toEqual(['accepted']);
-    expect(
-      [...__testing.acceptedPollTaskIds({
+    expect([
+      ...__testing.acceptedPollTaskIds({
         committed: false,
         reason: 'stale-cursor',
         activeBindingEpoch: 'binding-1',
         currentCursor: 'newer',
-      })],
-    ).toEqual([]);
+      }),
+    ]).toEqual([]);
   });
 
   it('marks permanent local outbox failures terminal while retaining transport retries', () => {
@@ -212,11 +215,11 @@ describe('WechatIM host boundary', () => {
 
   it('stops every active peer before an epoch can finish shutting down', async () => {
     const stopActiveTurn = vi.fn(async () => ({ stopped: true }));
-    await __testing.stopActiveWechatTurns(
-      { stopActiveTurn } as never,
-      'bot-1',
-      ['peer-1', 'peer-1', 'peer-2'],
-    );
+    await __testing.stopActiveWechatTurns({ stopActiveTurn } as never, 'bot-1', [
+      'peer-1',
+      'peer-1',
+      'peer-2',
+    ]);
     expect(stopActiveTurn).toHaveBeenCalledTimes(2);
     expect(stopActiveTurn).toHaveBeenCalledWith({
       botContextId: 'bot-1',
@@ -293,16 +296,20 @@ describe('WechatIM host boundary', () => {
     const pending = im.handleTextInteraction('peer-1', request, { timeoutMs: 60_000 });
     await Promise.resolve();
 
-    expect(im.cancelTextInteraction('peer-1', 'request-stale', {
-      kind: 'permission',
-      behavior: 'deny',
-      reason: 'stale_route',
-    })).toBe(false);
-    expect(im.cancelTextInteraction('peer-1', 'request-current', {
-      kind: 'permission',
-      behavior: 'deny',
-      reason: 'interaction_route_released',
-    })).toBe(true);
+    expect(
+      im.cancelTextInteraction('peer-1', 'request-stale', {
+        kind: 'permission',
+        behavior: 'deny',
+        reason: 'stale_route',
+      }),
+    ).toBe(false);
+    expect(
+      im.cancelTextInteraction('peer-1', 'request-current', {
+        kind: 'permission',
+        behavior: 'deny',
+        reason: 'interaction_route_released',
+      }),
+    ).toBe(true);
     await expect(pending).resolves.toEqual({
       kind: 'permission',
       behavior: 'deny',
@@ -314,12 +321,14 @@ describe('WechatIM host boundary', () => {
     const im = new WechatIM(deps());
     vi.spyOn(im, 'sendText').mockRejectedValue(new Error('socket hang up'));
 
-    await expect(im.handleTextInteraction('peer-1', {
-      kind: 'permission',
-      requestId: 'request-send-failed',
-      toolName: 'bash',
-      input: { command: 'pnpm test' },
-    })).resolves.toEqual({
+    await expect(
+      im.handleTextInteraction('peer-1', {
+        kind: 'permission',
+        requestId: 'request-send-failed',
+        toolName: 'bash',
+        input: { command: 'pnpm test' },
+      }),
+    ).resolves.toEqual({
       kind: 'permission',
       behavior: 'deny',
       reason: 'wechat_interaction_send_failed',
@@ -452,9 +461,7 @@ describe('WechatIM host boundary', () => {
       expectedActiveEpoch: newBindingEpoch,
       initialCursor: previous.cursor,
     });
-    expect(testHost.secrets.remove).toHaveBeenCalledWith(
-      `wechat_credentials_${newBindingEpoch}`,
-    );
+    expect(testHost.secrets.remove).toHaveBeenCalledWith(`wechat_credentials_${newBindingEpoch}`);
     expect(createTransport).toHaveBeenCalledOnce();
     await im.dispose();
   });
@@ -520,6 +527,146 @@ describe('WechatIM host boundary', () => {
     await im.dispose();
   });
 
+  it('does not republish connected when startup queue counting loses the epoch', async () => {
+    let resolveCountStarted!: () => void;
+    let releaseCount!: (value: { count: number }) => void;
+    let activeBindingEpoch = '';
+    const countStarted = new Promise<void>((resolve) => {
+      resolveCountStarted = resolve;
+    });
+    const countResultPromise = new Promise<{ count: number }>((resolve) => {
+      releaseCount = resolve;
+    });
+
+    const previous = {
+      bindingEpoch: 'epoch-0',
+      botId: 'old-bot',
+      userId: 'old-user',
+      baseUrl: 'https://old.example.com',
+    };
+
+    const db = fakeDb({
+      queryOne: vi.fn(async (sql: string) => {
+        if (sql.includes('FROM wechat_sync_state')) {
+          return previous;
+        }
+        if (sql.includes('COUNT(*) AS count')) {
+          resolveCountStarted();
+          return await countResultPromise;
+        }
+        if (sql.includes('context_nonce')) {
+          const encrypted = encryptWechatContextToken(
+            'ctx-startup',
+            Buffer.alloc(32, 4),
+            activeBindingEpoch,
+            'task-startup',
+          );
+          return {
+            taskId: 'task-startup',
+            sessionId: 'wechat-session-startup',
+            contextNonce: encrypted.nonce,
+            contextCiphertext: encrypted.ciphertext,
+            contextTag: encrypted.tag,
+          };
+        }
+        return null;
+      }) as DbClient['queryOne'],
+      tx: vi.fn(async (name: string, args: Record<string, unknown>) => {
+        if (name === 'wechatActivateBindingEpoch') {
+          activeBindingEpoch = String(args.bindingEpoch);
+          return {
+            activated: true,
+            previousActiveEpoch: previous.bindingEpoch,
+            activeBindingEpoch,
+          };
+        }
+        if (name === 'wechatCloseBindingEpoch') {
+          return { closed: true };
+        }
+        if (name === 'wechatUnbindCleanup') {
+          return {};
+        }
+        if (name === 'wechatLeaseNextTask') {
+          return null;
+        }
+        return null;
+      }),
+    });
+
+    const testHost = host({
+      secretRead: (name) =>
+        name === 'wechat_data_key_v1' ? Buffer.alloc(32, 4).toString('base64') : null,
+    });
+
+    const authTransport = authorizationTransportReturning({
+      token: 'new-token',
+      botId: 'startup-bot',
+      userId: 'new-user',
+      baseUrl: 'https://ilinkai.weixin.qq.com',
+    });
+
+    const liveTransport = {
+      notifyStart: vi.fn(async () => {}),
+      notifyStop: vi.fn(async () => {}),
+      poll: vi.fn(
+        (_opts: unknown, signal: AbortSignal) =>
+          new Promise((_resolve, reject) => {
+            if (signal.aborted) {
+              reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
+              return;
+            }
+            signal.addEventListener('abort', () => {
+              reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
+            });
+          }),
+      ),
+      sendMessage: vi.fn(async () => {
+        throw new WechatIlinkError('AUTH_REPLACED', 'authorization replaced', false);
+      }),
+    } as unknown as WechatTransport;
+
+    const createTransport = vi
+      .fn()
+      .mockReturnValueOnce(authTransport)
+      .mockReturnValueOnce(liveTransport);
+
+    const im = new WechatIM(deps({ host: testHost, getDbClient: () => db, createTransport }));
+
+    await im.authorize();
+    await countStarted;
+    await vi.waitFor(() => expect(createTransport).toHaveBeenCalledTimes(2));
+
+    await expect(im.sendText('peer-startup', 'hello')).rejects.toThrow('authorization replaced');
+
+    expect(im.getState()).toMatchObject({ phase: 'needs_reauth', errorCode: 'auth_replaced' });
+
+    const stateBroadcast = vi.mocked(testHost.ipc.broadcast);
+    const calls = stateBroadcast.mock.calls;
+    let lastNeedsReauthIndex = -1;
+    for (let i = calls.length - 1; i >= 0; i--) {
+      const payload = calls[i][1] as { phase?: string };
+      if (payload?.phase === 'needs_reauth') {
+        lastNeedsReauthIndex = i;
+        break;
+      }
+    }
+    expect(lastNeedsReauthIndex).toBeGreaterThanOrEqual(0);
+
+    releaseCount({ count: 0 });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(im.getState()).toMatchObject({ phase: 'needs_reauth', errorCode: 'auth_replaced' });
+
+    const callsAfter = stateBroadcast.mock.calls.slice(lastNeedsReauthIndex + 1);
+    for (const call of callsAfter) {
+      const payload = call[1] as { phase?: string };
+      expect(payload?.phase).not.toBe('connected');
+    }
+
+    await im.dispose();
+  });
   it('keeps needs_reauth when an in-flight poll batch completes after a send rejection aborts the epoch', async () => {
     const previous = { bindingEpoch: 'binding-previous', cursor: 'cursor-previous' };
     let activeBindingEpoch = '';
@@ -561,7 +708,9 @@ describe('WechatIM host boundary', () => {
           case 'wechatCommitPollBatch':
             return {
               committed: true,
-              insertedTaskIds: [String((args.messages as Array<{ id?: unknown }> | undefined)?.[0]?.id ?? 'task-1')],
+              insertedTaskIds: [
+                String((args.messages as Array<{ id?: unknown }> | undefined)?.[0]?.id ?? 'task-1'),
+              ],
               duplicateTaskIds: [],
               rejectedTaskIds: [],
             };
@@ -586,22 +735,23 @@ describe('WechatIM host boundary', () => {
     const liveTransport = {
       notifyStart: vi.fn(async () => undefined),
       notifyStop: vi.fn(async () => undefined),
-      poll: vi.fn(() =>
-        new Promise((resolve) => {
-          releasePoll = () =>
-            resolve({
-              cursor: 'cursor-next',
-              messages: [
-                {
-                  messageId: 'msg-1',
-                  senderId: 'peer-1',
-                  contextToken: 'ctx-1',
-                  text: 'hello',
-                  media: [],
-                },
-              ],
-            });
-        }),
+      poll: vi.fn(
+        () =>
+          new Promise((resolve) => {
+            releasePoll = () =>
+              resolve({
+                cursor: 'cursor-next',
+                messages: [
+                  {
+                    messageId: 'msg-1',
+                    senderId: 'peer-1',
+                    contextToken: 'ctx-1',
+                    text: 'hello',
+                    media: [],
+                  },
+                ],
+              });
+          }),
       ),
       sendMessage: vi.fn(async () => {
         throw new WechatIlinkError('AUTH_REPLACED', 'authorization replaced', false);
@@ -650,6 +800,169 @@ describe('WechatIM host boundary', () => {
       expect(db.tx).toHaveBeenCalledWith('wechatCommitPollBatch', expect.anything()),
     );
     expect(im.getState()).toMatchObject({ phase: 'needs_reauth', errorCode: 'auth_replaced' });
+    await im.dispose();
+  });
+
+  it('settles active work on auth rejection without waiting for the epoch drain', async () => {
+    const dataKey = Buffer.alloc(32, 5);
+    let activeBindingEpoch = '';
+    let leased = false;
+
+    const db = fakeDb({
+      query: vi.fn(async () => []),
+      queryOne: vi.fn(async (sql: string) => {
+        if (sql.includes('FROM wechat_sync_state')) return null;
+        if (sql.includes('COUNT(*) AS count')) return { count: 0 };
+        if (sql.includes('COALESCE')) return { conversationEpoch: 0 };
+        return undefined;
+      }) as DbClient['queryOne'],
+      tx: vi.fn(async (name: string, args: Record<string, unknown>) => {
+        switch (name) {
+          case 'wechatActivateBindingEpoch':
+            activeBindingEpoch = String(args.bindingEpoch);
+            return { activated: true, previousActiveEpoch: null, activeBindingEpoch };
+          case 'wechatLeaseNextTask':
+            if (!leased) {
+              leased = true;
+              return {
+                id: 'task-active',
+                bindingEpoch: activeBindingEpoch,
+                peerId: 'peer-1',
+                sessionId: 'wechat-session-1',
+                conversationEpoch: 0,
+                payloadJson: JSON.stringify({
+                  text: 'hello',
+                  attachments: [],
+                  unsupportedMedia: [],
+                }),
+                context: encryptWechatContextToken(
+                  'ctx-active',
+                  dataKey,
+                  activeBindingEpoch,
+                  'task-active',
+                ),
+                attempts: 0,
+                receivedAt: 100,
+                expiresAt: 100_000,
+              };
+            }
+            return null;
+          case 'wechatMarkAccepted':
+            return true;
+          case 'wechatCommitInterrupted':
+            return true;
+          case 'wechatCloseBindingEpoch':
+            return { closed: true };
+          case 'wechatUnbindCleanup':
+            return { deletedTasks: 0, deletedMediaRefs: 0, filePaths: [] };
+          default:
+            return null;
+        }
+      }),
+    });
+
+    const testHost = host({
+      secretRead: (name: string) =>
+        name === 'wechat_data_key_v1' ? dataKey.toString('base64') : null,
+    });
+
+    const authTransport = authorizationTransportReturning({
+      token: 'new-token',
+      botId: 'active-bot',
+      userId: 'new-user',
+      baseUrl: 'https://ilinkai.weixin.qq.com',
+    });
+
+    let sendMessageCalls = 0;
+    const liveTransport = {
+      notifyStart: vi.fn(async () => true),
+      notifyStop: vi.fn(async () => true),
+      poll: vi.fn(async (_cursor: string, signal: AbortSignal) => {
+        await new Promise<void>((_, reject) => {
+          signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+        });
+      }),
+      getTypingTicket: vi.fn(async () => 'ticket'),
+      setTyping: vi.fn(async () => true),
+      sendMessage: vi.fn(async () => {
+        sendMessageCalls += 1;
+        if (sendMessageCalls === 1) return {};
+        if (sendMessageCalls === 2)
+          throw new WechatIlinkError('AUTH_REPLACED', 'authorization replaced', false);
+        return {};
+      }),
+    } as unknown as WechatTransport;
+
+    const createTransport = vi
+      .fn()
+      .mockReturnValueOnce(authTransport)
+      .mockReturnValueOnce(liveTransport);
+
+    let resolveTerminal!: (value: {
+      kind: 'aborted';
+      text: string;
+      completedAt: number;
+      errorCode: string;
+    }) => void;
+    const terminal = new Promise<{
+      kind: 'aborted';
+      text: string;
+      completedAt: number;
+      errorCode: string;
+    }>((resolve) => {
+      resolveTerminal = resolve;
+    });
+
+    const dispatchAgentTurn = vi.fn(async (args: { beforeProviderStart: () => Promise<void> }) => {
+      await args.beforeProviderStart();
+      return { kind: 'accepted', sessionId: 'wechat-session-1', acceptedAt: 100, terminal };
+    });
+    const stopActiveTurn = vi.fn(async () => ({ stopped: true, droppedQueued: 0 }));
+
+    const im = new WechatIM(deps({ host: testHost, getDbClient: () => db, createTransport }));
+    im.attachTurnRuntime({
+      runner: { dispatchAgentTurn, stopActiveTurn } as never,
+      repo: {
+        prepareNewSession: vi.fn(async () => ({ id: 'wechat-session-1' }) as ImSessionRow),
+        findActiveSession: vi.fn(async () => ({ id: 'wechat-session-1' }) as ImSessionRow),
+        createSession: vi.fn(async () => ({ id: 'wechat-session-1' }) as ImSessionRow),
+      } as never,
+      config: {} as never,
+      resetSessionToDefaults: vi.fn(async () => undefined),
+    });
+
+    await im.authorize();
+    await vi.waitFor(() => expect(im.getState().phase).toBe('connected'));
+    await vi.waitFor(() => expect(dispatchAgentTurn).toHaveBeenCalledTimes(1));
+
+    const pendingInteraction = im.handleTextInteraction(
+      'peer-1',
+      {
+        kind: 'permission' as const,
+        requestId: 'request-active',
+        toolName: 'bash',
+        input: { command: 'pnpm test' },
+      },
+      { timeoutMs: 60_000 },
+    );
+
+    await vi.waitFor(() => expect(liveTransport.sendMessage).toHaveBeenCalledTimes(1));
+
+    await expect(im.sendText('peer-1', 'outbound')).rejects.toThrow('authorization replaced');
+
+    expect(im.getState()).toMatchObject({ phase: 'needs_reauth', errorCode: 'auth_replaced' });
+    expect(stopActiveTurn).toHaveBeenCalledWith({ botContextId: 'active-bot', userId: 'peer-1' });
+
+    await expect(pendingInteraction).resolves.toEqual({
+      kind: 'permission',
+      behavior: 'deny',
+      reason: 'wechat_binding_stopped',
+    });
+
+    resolveTerminal({ kind: 'aborted', text: '', completedAt: 100, errorCode: 'auth_replaced' });
+    await vi.waitFor(() =>
+      expect(db.tx).toHaveBeenCalledWith('wechatCommitInterrupted', expect.anything()),
+    );
     await im.dispose();
   });
 });

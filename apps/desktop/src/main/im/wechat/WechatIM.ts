@@ -100,9 +100,10 @@ interface ActiveTask {
   terminalCommitted: boolean;
 }
 
-function activePeerIdForSession<
-  T extends { routeSessionId?: string; task: { sessionId: string } },
->(activeTasks: ReadonlyMap<string, T>, sessionId: string | undefined): string | null {
+function activePeerIdForSession<T extends { routeSessionId?: string; task: { sessionId: string } }>(
+  activeTasks: ReadonlyMap<string, T>,
+  sessionId: string | undefined,
+): string | null {
   if (!sessionId) return null;
   const peers = [...activeTasks.entries()]
     .filter(([, active]) => (active.routeSessionId ?? active.task.sessionId) === sessionId)
@@ -241,7 +242,8 @@ export class WechatIM extends BaseIM implements RichChannelIM {
   }
 
   async #applyCompatibilityDisabled(disabled: boolean, revision: number): Promise<void> {
-    if (revision !== this.#compatibilityRevision || disabled !== this.#compatibilityDisabled) return;
+    if (revision !== this.#compatibilityRevision || disabled !== this.#compatibilityDisabled)
+      return;
     if (disabled) {
       const stopped = this.#stopEpoch();
       this.#setState({
@@ -521,7 +523,9 @@ export class WechatIM extends BaseIM implements RichChannelIM {
     const previous = this.#pendingInteractions.get(userId);
     if (previous) {
       clearTimeout(previous.timer);
-      previous.resolve(defaultWechatInteractionDecision(previous.request, 'replaced_by_new_request'));
+      previous.resolve(
+        defaultWechatInteractionDecision(previous.request, 'replaced_by_new_request'),
+      );
     }
 
     let resolvePending!: (decision: InteractionDecision) => void;
@@ -554,11 +558,7 @@ export class WechatIM extends BaseIM implements RichChannelIM {
    * route. Request-id matching prevents a late timeout/release from cancelling
    * a newer one-shot confirmation for the same WeChat peer.
    */
-  cancelTextInteraction(
-    userId: string,
-    requestId: string,
-    decision: InteractionDecision,
-  ): boolean {
+  cancelTextInteraction(userId: string, requestId: string, decision: InteractionDecision): boolean {
     const pending = this.#pendingInteractions.get(userId);
     if (!pending || pending.request.requestId !== requestId) return false;
     clearTimeout(pending.timer);
@@ -813,10 +813,17 @@ export class WechatIM extends BaseIM implements RichChannelIM {
       this.#taskPump(binding, abort.signal, generation),
       this.#outboxLoop(binding, transport, abort.signal, generation),
     ]).then(() => undefined);
-    this.#epoch = { binding, credentials, transport, abort, drain, generation };
+    const epoch = { binding, credentials, transport, abort, drain, generation };
+    this.#epoch = epoch;
     const queuedTasks = await this.#requireStore().countQueuedTasks(binding.bindingEpoch);
-    if (!this.#isCompatibilityRevisionAllowed(compatibilityRevision)) {
-      await this.#stopEpoch();
+    if (
+      this.#epoch !== epoch ||
+      abort.signal.aborted ||
+      !this.#isCompatibilityRevisionAllowed(compatibilityRevision)
+    ) {
+      // The exact epoch was already rejected or replaced (for example by a
+      // needs_reauth transition that cleaned it up). Do not stop a newer
+      // epoch and do not overwrite the needs_reauth state.
       return;
     }
     this.#setState({
@@ -832,6 +839,26 @@ export class WechatIM extends BaseIM implements RichChannelIM {
     this.#sendRejectionHealth.reset();
     if (!epoch) return;
     epoch.abort.abort();
+    await this.#cancelEpochInteractionsAndTurns(epoch);
+    await epoch.drain;
+    try {
+      await epoch.transport.notifyStop(new AbortController().signal);
+    } catch (error) {
+      this.log.warn('WeChat stop notification failed', {
+        code: machineErrorCode(error),
+      });
+    }
+    this.#activeTasks.clear();
+  }
+
+  async #cancelEpochInteractionsAndTurns(epoch: {
+    binding: WechatActiveBinding;
+    credentials: StoredWechatCredentials;
+    transport: WechatTransport;
+    abort: AbortController;
+    drain: Promise<void>;
+    generation: number;
+  }): Promise<void> {
     for (const [peerId, pending] of this.#pendingInteractions) {
       clearTimeout(pending.timer);
       pending.resolve(defaultWechatInteractionDecision(pending.request, 'wechat_binding_stopped'));
@@ -842,15 +869,6 @@ export class WechatIM extends BaseIM implements RichChannelIM {
       epoch.credentials.ilinkBotId,
       this.#activeTasks.keys(),
     );
-    await epoch.drain;
-    try {
-      await epoch.transport.notifyStop(new AbortController().signal);
-    } catch (error) {
-      this.log.warn('WeChat stop notification failed', {
-        code: machineErrorCode(error),
-      });
-    }
-    this.#activeTasks.clear();
   }
 
   async #pollLoop(
@@ -909,10 +927,7 @@ export class WechatIM extends BaseIM implements RichChannelIM {
             mediaRefs,
             fileAttachments,
           });
-          await removeUncommittedWechatFiles(
-            allFileAttachments,
-            acceptedPollTaskIds(committed),
-          );
+          await removeUncommittedWechatFiles(allFileAttachments, acceptedPollTaskIds(committed));
           if (committed.committed) {
             for (const message of result.messages) {
               await this.#requireStore().refreshPendingOutboxContext({
@@ -1738,7 +1753,16 @@ export class WechatIM extends BaseIM implements RichChannelIM {
               errorCode: safe.code.toLowerCase(),
             });
           }
-          this.#epoch?.abort.abort();
+          const epoch = this.#epoch;
+          if (epoch) {
+            epoch.abort.abort();
+            // Clean up this exact epoch's interactions and turns without
+            // nulling this.#epoch or draining it; a newer epoch may already
+            // own the slot, and a stale operation must never clean it.
+            if (this.#epoch === epoch) {
+              await this.#cancelEpochInteractionsAndTurns(epoch);
+            }
+          }
         }
       }
       throw error;
