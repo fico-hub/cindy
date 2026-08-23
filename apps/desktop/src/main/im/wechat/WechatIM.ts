@@ -57,6 +57,8 @@ const AUTH_BASE_URL = 'https://ilinkai.weixin.qq.com';
 const EMPTY_POLL_DELAY_MS = 100;
 const IDLE_PUMP_DELAY_MS = 200;
 const RECONNECT_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 30_000] as const;
+const SEND_REJECTION_THRESHOLD = 3;
+const SEND_REJECTION_WINDOW_MS = 5 * 60 * 1000;
 
 export type WechatBotPhase =
   | 'disconnected'
@@ -106,6 +108,33 @@ function activePeerIdForSession<
     .filter(([, active]) => (active.routeSessionId ?? active.task.sessionId) === sessionId)
     .map(([peerId]) => peerId);
   return peers.length === 1 ? peers[0]! : null;
+}
+
+class SendRejectionHealth {
+  #evidence: { bindingEpoch: string; firstAt: number; count: number } | null = null;
+
+  recordFailure(bindingEpoch: string, error: unknown, now: number): boolean {
+    if (asWechatIlinkError(error).code !== 'SEND_REJECTED') return false;
+    const evidence = this.#evidence;
+    if (
+      !evidence ||
+      evidence.bindingEpoch !== bindingEpoch ||
+      now - evidence.firstAt > SEND_REJECTION_WINDOW_MS
+    ) {
+      this.#evidence = { bindingEpoch, firstAt: now, count: 1 };
+      return false;
+    }
+    evidence.count += 1;
+    return evidence.count >= SEND_REJECTION_THRESHOLD;
+  }
+
+  recordSuccess(bindingEpoch: string): void {
+    if (this.#evidence?.bindingEpoch === bindingEpoch) this.#evidence = null;
+  }
+
+  reset(): void {
+    this.#evidence = null;
+  }
 }
 
 interface PendingWechatInteraction {
@@ -170,6 +199,7 @@ export class WechatIM extends BaseIM implements RichChannelIM {
   #compatibilityDisabled = false;
   #compatibilityRevision = 0;
   #lifecycleBarrier: Promise<void> = Promise.resolve();
+  readonly #sendRejectionHealth = new SendRejectionHealth();
 
   constructor(deps: WechatIMDeps) {
     super('wechat', deps.host);
@@ -459,14 +489,16 @@ export class WechatIM extends BaseIM implements RichChannelIM {
       )?.contextToken;
     if (!contextToken) throw new Error('WECHAT_PEER_NOT_KNOWN');
     const clientId = randomUUID();
-    await epoch.transport.sendMessage(
-      {
-        peerId: userId,
-        text,
-        contextToken,
-        clientId,
-      },
-      epoch.abort.signal,
+    await this.#runSendOperation(epoch.binding.bindingEpoch, epoch.abort.signal, () =>
+      epoch.transport.sendMessage(
+        {
+          peerId: userId,
+          text,
+          contextToken,
+          clientId,
+        },
+        epoch.abort.signal,
+      ),
     );
     return { messageId: clientId };
   }
@@ -573,14 +605,16 @@ export class WechatIM extends BaseIM implements RichChannelIM {
         return { ok: false, reason: 'SEND_FAIL' };
       }
       const clientId = randomUUID();
-      await epoch.transport.sendMedia(
-        {
-          peerId: userId,
-          contextToken,
-          clientId,
-          uploaded,
-        },
-        epoch.abort.signal,
+      await this.#runSendOperation(epoch.binding.bindingEpoch, epoch.abort.signal, () =>
+        epoch.transport.sendMedia(
+          {
+            peerId: userId,
+            contextToken,
+            clientId,
+            uploaded,
+          },
+          epoch.abort.signal,
+        ),
       );
       return { ok: true, messageId: clientId };
     } catch (error) {
@@ -754,6 +788,7 @@ export class WechatIM extends BaseIM implements RichChannelIM {
     compatibilityRevision: number,
   ): Promise<void> {
     if (!this.#isCompatibilityRevisionAllowed(compatibilityRevision)) return;
+    this.#sendRejectionHealth.reset();
     const generation = this.#deps.captureAccountGeneration();
     if (generation === null) throw new Error('WECHAT_ACCOUNT_SCOPE_CLOSED');
     const abort = new AbortController();
@@ -794,6 +829,7 @@ export class WechatIM extends BaseIM implements RichChannelIM {
   async #stopEpoch(): Promise<void> {
     const epoch = this.#epoch;
     this.#epoch = null;
+    this.#sendRejectionHealth.reset();
     if (!epoch) return;
     epoch.abort.abort();
     for (const [peerId, pending] of this.#pendingInteractions) {
@@ -918,7 +954,12 @@ export class WechatIM extends BaseIM implements RichChannelIM {
           for (const index of interactionIndexes) {
             const message = result.messages[index];
             if (message) {
-              await this.#handleInteractionReplyMessage(message, transport, signal);
+              await this.#handleInteractionReplyMessage(
+                message,
+                transport,
+                binding.bindingEpoch,
+                signal,
+              );
             }
           }
         } finally {
@@ -1130,6 +1171,7 @@ export class WechatIM extends BaseIM implements RichChannelIM {
   async #handleInteractionReplyMessage(
     message: WechatInboundMessage,
     transport: WechatTransport,
+    bindingEpoch: string,
     signal: AbortSignal,
   ): Promise<void> {
     const pending = this.#pendingInteractions.get(message.senderId);
@@ -1141,16 +1183,18 @@ export class WechatIM extends BaseIM implements RichChannelIM {
       pending.resolve(decision);
     }
     try {
-      await transport.sendMessage(
-        {
-          peerId: message.senderId,
-          text: decision
-            ? '已收到你的选择，继续处理。'
-            : '回复格式不正确。请按上一条消息提示回复；权限确认只支持“允许”或“拒绝”。',
-          contextToken: message.contextToken,
-          clientId: randomUUID(),
-        },
-        signal,
+      await this.#runSendOperation(bindingEpoch, signal, () =>
+        transport.sendMessage(
+          {
+            peerId: message.senderId,
+            text: decision
+              ? '已收到你的选择，继续处理。'
+              : '回复格式不正确。请按上一条消息提示回复；权限确认只支持“允许”或“拒绝”。',
+            contextToken: message.contextToken,
+            clientId: randomUUID(),
+          },
+          signal,
+        ),
       );
     } catch {
       // Interaction acknowledgement is best effort; the decision itself has
@@ -1202,14 +1246,16 @@ export class WechatIM extends BaseIM implements RichChannelIM {
         try {
           await epoch.transport.setTyping(task.peerId, ticket, true, epoch.abort.signal);
           if (this.#now() >= nextHeartbeatAt) {
-            await epoch.transport.sendMessage(
-              {
-                peerId: task.peerId,
-                text: '任务仍在处理中…',
-                contextToken: task.contextToken,
-                clientId: randomUUID(),
-              },
-              epoch.abort.signal,
+            await this.#runSendOperation(task.bindingEpoch, epoch.abort.signal, () =>
+              epoch.transport.sendMessage(
+                {
+                  peerId: task.peerId,
+                  text: '任务仍在处理中…',
+                  contextToken: task.contextToken,
+                  clientId: randomUUID(),
+                },
+                epoch.abort.signal,
+              ),
             );
             nextHeartbeatAt = this.#now() + 120_000;
           }
@@ -1443,12 +1489,7 @@ export class WechatIM extends BaseIM implements RichChannelIM {
             terminal: !failure.retryable,
             errorCode: failure.code,
           });
-          if (failure.code === 'AUTH_REPLACED' || failure.code === 'AUTH_EXPIRED') {
-            this.#setState({
-              ...this.#state,
-              phase: 'needs_reauth',
-              errorCode: failure.code.toLowerCase(),
-            });
+          if (signal.aborted || this.#state.phase === 'needs_reauth') {
             return;
           }
           if (!retryNow) break;
@@ -1467,14 +1508,16 @@ export class WechatIM extends BaseIM implements RichChannelIM {
     const peerId = await this.#peerIdForTask(bindingEpoch, item.taskId);
     this.#assertSendEpochCurrent(bindingEpoch, signal);
     if (item.text) {
-      await transport.sendMessage(
-        {
-          peerId,
-          text: item.text,
-          contextToken: item.contextToken,
-          clientId: item.clientId,
-        },
-        signal,
+      await this.#runSendOperation(bindingEpoch, signal, () =>
+        transport.sendMessage(
+          {
+            peerId,
+            text: item.text,
+            contextToken: item.contextToken,
+            clientId: item.clientId,
+          },
+          signal,
+        ),
       );
     }
     for (const media of parseOutboxMedia(item.mediaJson)) {
@@ -1491,14 +1534,16 @@ export class WechatIM extends BaseIM implements RichChannelIM {
         signal,
       );
       this.#assertSendEpochCurrent(bindingEpoch, signal);
-      await transport.sendMedia(
-        {
-          peerId,
-          contextToken: item.contextToken,
-          clientId: media.clientId,
-          uploaded,
-        },
-        signal,
+      await this.#runSendOperation(bindingEpoch, signal, () =>
+        transport.sendMedia(
+          {
+            peerId,
+            contextToken: item.contextToken,
+            clientId: media.clientId,
+            uploaded,
+          },
+          signal,
+        ),
       );
     }
   }
@@ -1650,6 +1695,47 @@ export class WechatIM extends BaseIM implements RichChannelIM {
   #assertSendEpochCurrent(bindingEpoch: string, signal: AbortSignal): void {
     if (!this.#isSendEpochCurrent(bindingEpoch, signal)) {
       throw new WechatIlinkError('ABORTED', 'The WeChat send epoch was stopped.', true);
+    }
+  }
+
+  async #runSendOperation<T>(
+    bindingEpoch: string,
+    signal: AbortSignal,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      this.#assertSendEpochCurrent(bindingEpoch, signal);
+      const result = await operation();
+      if (this.#isSendEpochCurrent(bindingEpoch, signal)) {
+        this.#sendRejectionHealth.recordSuccess(bindingEpoch);
+      }
+      return result;
+    } catch (error) {
+      if (this.#isSendEpochCurrent(bindingEpoch, signal)) {
+        const safe = asWechatIlinkError(error);
+        let shouldTransition = false;
+        if (safe.code === 'AUTH_EXPIRED' || safe.code === 'AUTH_REPLACED') {
+          shouldTransition = true;
+        } else if (safe.code === 'SEND_REJECTED') {
+          shouldTransition = this.#sendRejectionHealth.recordFailure(
+            bindingEpoch,
+            error,
+            this.#now(),
+          );
+        }
+        if (shouldTransition) {
+          this.#sendRejectionHealth.reset();
+          if (this.#state.phase !== 'needs_reauth') {
+            this.#setState({
+              ...this.#state,
+              phase: 'needs_reauth',
+              errorCode: safe.code.toLowerCase(),
+            });
+          }
+          this.#epoch?.abort.abort();
+        }
+      }
+      throw error;
     }
   }
 
@@ -2017,6 +2103,7 @@ function machineErrorCode(error: unknown): string {
 
 export const __testing = {
   activePeerIdForSession,
+  SendRejectionHealth,
   acceptedPollTaskIds,
   authorizationCancelPhase,
   classifyOutboxSendError,

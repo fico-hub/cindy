@@ -62,6 +62,54 @@ describe('WechatIM host boundary', () => {
     expect(__testing.normalizeFinalOutputText('hello')).toBe('hello');
   });
 
+  it('escalates send rejections only after repeated SEND_REJECTED failures within the window', () => {
+    const rejected = new WechatIlinkError('SEND_REJECTED', 'send rejected', false);
+    const health = new __testing.SendRejectionHealth();
+
+    expect(health.recordFailure('binding-a', rejected, 0)).toBe(false);
+    expect(health.recordFailure('binding-a', rejected, 1)).toBe(false);
+    expect(health.recordFailure('binding-a', rejected, 2)).toBe(true);
+  });
+
+  it('resets the send rejection counter after a successful send', () => {
+    const rejected = new WechatIlinkError('SEND_REJECTED', 'send rejected', false);
+    const health = new __testing.SendRejectionHealth();
+
+    expect(health.recordFailure('binding-a', rejected, 0)).toBe(false);
+    health.recordSuccess('binding-a');
+    expect(health.recordFailure('binding-a', rejected, 1)).toBe(false);
+  });
+
+  it('ignores send rejections once the failure window has expired', () => {
+    const rejected = new WechatIlinkError('SEND_REJECTED', 'send rejected', false);
+    const health = new __testing.SendRejectionHealth();
+
+    expect(health.recordFailure('binding-a', rejected, 0)).toBe(false);
+    expect(health.recordFailure('binding-a', rejected, 5 * 60 * 1000 + 1)).toBe(false);
+  });
+
+  it('tracks send rejection failures independently per binding', () => {
+    const rejected = new WechatIlinkError('SEND_REJECTED', 'send rejected', false);
+    const health = new __testing.SendRejectionHealth();
+
+    expect(health.recordFailure('binding-a', rejected, 0)).toBe(false);
+    expect(health.recordFailure('binding-a', rejected, 1)).toBe(false);
+    expect(health.recordFailure('binding-b', rejected, 2)).toBe(false);
+    expect(health.recordFailure('binding-b', rejected, 3)).toBe(false);
+    expect(health.recordFailure('binding-b', rejected, 4)).toBe(true);
+  });
+
+  it('does not count non-rejection failures toward send rejection escalation', () => {
+    const rejected = new WechatIlinkError('SEND_REJECTED', 'send rejected', false);
+    const network = new WechatIlinkError('NETWORK_ERROR', 'network down', true);
+    const health = new __testing.SendRejectionHealth();
+
+    expect(health.recordFailure('binding-a', network, 0)).toBe(false);
+    expect(health.recordFailure('binding-a', network, 1)).toBe(false);
+    expect(health.recordFailure('binding-a', network, 2)).toBe(false);
+    expect(health.recordFailure('binding-a', rejected, 3)).toBe(false);
+  });
+
   it('distinguishes agent-unsupported from permission-mode-unsupported pre-dispatch failures', () => {
     // Agent 未声明 turnPermissionPolicy(如 Pi):换权限模式无效,文案引导换 Agent。
     expect(__testing.wechatPreDispatchFailureText('TURN_PERMISSION_POLICY_UNSUPPORTED:agent:ask')).toContain(
