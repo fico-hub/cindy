@@ -876,6 +876,139 @@ describe('WechatIM host boundary', () => {
     }
   });
 
+  it('treats the whole outbox item as the success boundary for send rejection evidence', async () => {
+    const dataKey = Buffer.alloc(32, 7);
+    let activeBindingEpoch = '';
+    const dir = await mkdtemp(join(tmpdir(), 'wechat-outbox-mixed-'));
+    const filePath = join(dir, 'outbox-mixed.bin');
+    try {
+      await writeFile(filePath, 'x');
+      const failures: Array<Record<string, unknown>> = [];
+      let dueOutboxReturned = false;
+      const db = fakeDb({
+        query: vi.fn(async (sql: string) =>
+          sql.includes('FROM wechat_outbox')
+            ? dueOutboxReturned
+              ? []
+              : (() => {
+                  dueOutboxReturned = true;
+                  const encrypted = encryptWechatContextToken(
+                    'ctx-mixed',
+                    dataKey,
+                    activeBindingEpoch,
+                    'task-mixed',
+                  );
+                  return [
+                    {
+                      id: 'outbox-mixed',
+                      bindingEpoch: activeBindingEpoch,
+                      taskId: 'task-mixed',
+                      clientId: 'outbox-client',
+                      kind: 'final',
+                      chunkIndex: 0,
+                      text: 'hello with media',
+                      mediaJson: JSON.stringify([
+                        { absPath: filePath, clientId: 'media-client' },
+                      ]),
+                      attempts: 0,
+                      contextNonce: encrypted.nonce,
+                      contextCiphertext: encrypted.ciphertext,
+                      contextTag: encrypted.tag,
+                    },
+                  ];
+                })()
+            : [],
+        ) as DbClient['query'],
+        queryOne: vi.fn(async (sql: string) => {
+          if (sql.includes('FROM wechat_sync_state')) return null;
+          if (sql.includes('COUNT(*) AS count')) return { count: 0 };
+          if (sql.includes('FROM wechat_inbox')) return { peerId: 'peer-mixed' };
+          return null;
+        }) as DbClient['queryOne'],
+        exec: vi.fn(async () => ({ changes: 1, lastInsertRowid: 0 })),
+        tx: vi.fn(async (name: string, args: Record<string, unknown>) => {
+          if (name === 'wechatActivateBindingEpoch') {
+            activeBindingEpoch = String(args.bindingEpoch);
+            return { activated: true, previousActiveEpoch: null, activeBindingEpoch };
+          }
+          if (name === 'wechatLeaseNextTask') return null;
+          if (name === 'wechatRecordOutboxFailure') {
+            failures.push(args);
+            return { recorded: true };
+          }
+          if (name === 'wechatCloseBindingEpoch') return { closed: true };
+          if (name === 'wechatUnbindCleanup')
+            return { deletedTasks: 0, deletedMediaRefs: 0, filePaths: [] };
+          return null;
+        }),
+      });
+
+      const testHost = host({
+        secretRead: (name: string) =>
+          name === 'wechat_data_key_v1' ? dataKey.toString('base64') : null,
+      });
+      const authTransport = authorizationTransportReturning({
+        token: 'new-token',
+        botId: 'mixed-bot',
+        userId: 'new-user',
+        baseUrl: 'https://ilinkai.weixin.qq.com',
+      });
+      const liveTransport = {
+        notifyStart: vi.fn(async () => undefined),
+        notifyStop: vi.fn(async () => undefined),
+        poll: vi.fn(
+          (_cursor: string, signal: AbortSignal) =>
+            new Promise((_resolve, reject) => {
+              if (signal.aborted) {
+                reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+                return;
+              }
+              signal.addEventListener(
+                'abort',
+                () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })),
+                { once: true },
+              );
+            }),
+        ),
+        sendMessage: vi.fn(async () => ({ ok: true })),
+        uploadMedia: vi.fn(async () => ({ mediaId: 'media-ok' })),
+        sendMedia: vi.fn(async () => {
+          throw new WechatIlinkError('SEND_REJECTED', 'send rejected', true);
+        }),
+      } as unknown as WechatTransport;
+      const createTransport = vi
+        .fn()
+        .mockReturnValueOnce(authTransport)
+        .mockReturnValueOnce(liveTransport);
+
+      const im = new WechatIM(deps({ host: testHost, getDbClient: () => db, createTransport }));
+      await im.authorize();
+      await vi.waitFor(() => expect(im.getState().phase).toBe('connected'));
+      await vi.waitFor(() => expect(failures).toHaveLength(3), { timeout: 2_000 });
+      await vi.waitFor(() =>
+        expect(im.getState()).toMatchObject({
+          phase: 'needs_reauth',
+          errorCode: 'send_rejected',
+        }),
+      );
+
+      expect(liveTransport.sendMessage).toHaveBeenCalledTimes(3);
+      expect(liveTransport.uploadMedia).toHaveBeenCalledTimes(3);
+      expect(liveTransport.sendMedia).toHaveBeenCalledTimes(3);
+      for (const failure of failures) {
+        expect(failure).toMatchObject({
+          outboxId: 'outbox-mixed',
+          terminal: false,
+          errorCode: 'SEND_REJECTED',
+        });
+      }
+
+      await im.dispose();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('does not republish connected when startup queue counting loses the epoch', async () => {
     let resolveCountStarted!: () => void;
     let releaseCount!: (value: { count: number }) => void;

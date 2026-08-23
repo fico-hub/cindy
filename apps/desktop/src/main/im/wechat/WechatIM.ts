@@ -1545,6 +1545,7 @@ export class WechatIM extends BaseIM implements RichChannelIM {
           },
           signal,
         ),
+        { recordSuccess: false },
       );
     }
     for (const media of parseOutboxMedia(item.mediaJson)) {
@@ -1574,7 +1575,13 @@ export class WechatIM extends BaseIM implements RichChannelIM {
           },
           signal,
         ),
+        { recordSuccess: false },
       );
+    }
+    // The whole outbox item is the success boundary: only after every
+    // constituent send succeeded do we clear prior SEND_REJECTED evidence.
+    if (this.#isSendEpochCurrent(bindingEpoch, signal)) {
+      this.#sendRejectionHealth.recordSuccess(bindingEpoch);
     }
   }
 
