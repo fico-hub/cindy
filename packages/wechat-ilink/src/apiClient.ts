@@ -439,6 +439,13 @@ export class IlinkApiClient {
       },
       signal,
     );
+    if (response.errcode === -14) {
+      throw new WechatIlinkError(
+        "AUTH_REPLACED",
+        "The iLink credential is no longer active.",
+        false,
+      );
+    }
     if (typeof response.ret === "number" && response.ret !== 0) {
       throw new WechatIlinkError(
         "PROTOCOL_ERROR",
