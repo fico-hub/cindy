@@ -604,6 +604,7 @@ export class WechatIM extends BaseIM implements RichChannelIM {
             },
             epoch.abort.signal,
           ),
+        { recordSuccess: false },
       );
       uploadedSuccessfully = true;
       if (this.#compatibilityDisabled || epoch.abort.signal.aborted) {
@@ -1560,6 +1561,7 @@ export class WechatIM extends BaseIM implements RichChannelIM {
           },
           signal,
         ),
+        { recordSuccess: false },
       );
       this.#assertSendEpochCurrent(bindingEpoch, signal);
       await this.#runSendOperation(bindingEpoch, signal, () =>
@@ -1730,11 +1732,15 @@ export class WechatIM extends BaseIM implements RichChannelIM {
     bindingEpoch: string,
     signal: AbortSignal,
     operation: () => Promise<T>,
+    options?: { recordSuccess?: boolean },
   ): Promise<T> {
     try {
       this.#assertSendEpochCurrent(bindingEpoch, signal);
       const result = await operation();
-      if (this.#isSendEpochCurrent(bindingEpoch, signal)) {
+      if (
+        options?.recordSuccess !== false &&
+        this.#isSendEpochCurrent(bindingEpoch, signal)
+      ) {
         this.#sendRejectionHealth.recordSuccess(bindingEpoch);
       }
       return result;
