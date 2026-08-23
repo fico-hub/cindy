@@ -403,7 +403,7 @@ export class WechatIM extends BaseIM implements RichChannelIM {
     if (this.#state.phase === 'authorizing' || this.#state.phase === 'waiting_confirmation') {
       this.#setState({
         ...this.#state,
-        phase: authorizationCancelPhase(Boolean(this.#epoch), this.#hasBinding),
+        phase: authorizationCancelPhase(Boolean(this.#epoch && !this.#epoch.abort.signal.aborted), this.#hasBinding),
       });
     }
   }

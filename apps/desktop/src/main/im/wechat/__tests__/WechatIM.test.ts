@@ -757,10 +757,31 @@ describe('WechatIM host boundary', () => {
         throw new WechatIlinkError('AUTH_REPLACED', 'authorization replaced', false);
       }),
     } as unknown as WechatTransport;
+    const reauthTransport = {
+      beginAuthorization: vi.fn(async () => ({
+        id: 'reauth-challenge',
+        qrCodeUrl: 'https://ilinkai.weixin.qq.com/qr/reauth',
+        createdAt: 2,
+      })),
+      waitAuthorization: vi.fn((_challenge: unknown, signal: AbortSignal) =>
+        new Promise<never>((_resolve, reject) => {
+          if (signal.aborted) {
+            reject(new WechatIlinkError('ABORTED', 'authorization aborted', true));
+            return;
+          }
+          signal.addEventListener(
+            'abort',
+            () => reject(new WechatIlinkError('ABORTED', 'authorization aborted', true)),
+            { once: true },
+          );
+        }),
+      ),
+    } as unknown as WechatTransport;
     const createTransport = vi
       .fn()
       .mockReturnValueOnce(authTransport)
-      .mockReturnValueOnce(liveTransport);
+      .mockReturnValueOnce(liveTransport)
+      .mockReturnValueOnce(reauthTransport);
     const sessionRow = { id: 'wechat-session-1' } as ImSessionRow;
     const im = new WechatIM(
       deps({
@@ -795,11 +816,16 @@ describe('WechatIM host boundary', () => {
     await expect(im.sendText('peer-1', 'outbound')).rejects.toThrow('authorization replaced');
     expect(im.getState()).toMatchObject({ phase: 'needs_reauth', errorCode: 'auth_replaced' });
 
+    await im.authorize();
+    await vi.waitFor(() => expect(im.getState().phase).toBe('waiting_confirmation'));
+    im.cancelAuthorization();
+    expect(im.getState()).toMatchObject({ phase: 'needs_reauth', bound: true });
+
     releasePoll();
     await vi.waitFor(() =>
       expect(db.tx).toHaveBeenCalledWith('wechatCommitPollBatch', expect.anything()),
     );
-    expect(im.getState()).toMatchObject({ phase: 'needs_reauth', errorCode: 'auth_replaced' });
+    expect(im.getState()).toMatchObject({ phase: 'needs_reauth', bound: true });
     await im.dispose();
   });
 
