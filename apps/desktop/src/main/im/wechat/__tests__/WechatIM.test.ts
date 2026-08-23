@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import type { IMHost } from '@cindy/im';
 import { encryptWechatContextToken } from '../contextCrypto';
 import type { ImSessionRow } from '../../../im/shared/sessionRepo';
@@ -525,6 +529,242 @@ describe('WechatIM host boundary', () => {
     await vi.waitFor(() => expect(im.getState().phase).toBe('connected'));
 
     await im.dispose();
+  });
+
+  it('reports upload failure and needs_reauth when uploadMedia hits a replaced authorization', async () => {
+    const dataKey = Buffer.alloc(32, 4);
+    let activeBindingEpoch = '';
+    const dir = await mkdtemp(join(tmpdir(), 'wechat-upload-'));
+    const filePath = join(dir, 'upload.bin');
+    try {
+      await writeFile(filePath, 'x');
+
+      const db = fakeDb({
+        queryOne: vi.fn(async (sql: string) => {
+          if (sql.includes('FROM wechat_sync_state')) return null;
+          if (sql.includes('COUNT(*) AS count')) return { count: 0 };
+          if (sql.includes('context_nonce')) {
+            const encrypted = encryptWechatContextToken(
+              'ctx-upload',
+              dataKey,
+              activeBindingEpoch,
+              'task-upload',
+            );
+            return {
+              taskId: 'task-upload',
+              sessionId: 'wechat-session-upload',
+              contextNonce: encrypted.nonce,
+              contextCiphertext: encrypted.ciphertext,
+              contextTag: encrypted.tag,
+            };
+          }
+          return null;
+        }) as DbClient['queryOne'],
+        tx: vi.fn(async (name: string, args: Record<string, unknown>) => {
+          if (name === 'wechatActivateBindingEpoch') {
+            activeBindingEpoch = String(args.bindingEpoch);
+            return {
+              activated: true,
+              previousActiveEpoch: null,
+              activeBindingEpoch,
+            };
+          }
+          if (name === 'wechatLeaseNextTask') return null;
+          if (name === 'wechatCloseBindingEpoch') return { closed: true };
+          if (name === 'wechatUnbindCleanup')
+            return { deletedTasks: 0, deletedMediaRefs: 0, filePaths: [] };
+          return null;
+        }),
+      });
+
+      const testHost = host({
+        secretRead: (name: string) =>
+          name === 'wechat_data_key_v1' ? dataKey.toString('base64') : null,
+      });
+
+      const authTransport = authorizationTransportReturning({
+        token: 'new-token',
+        botId: 'upload-bot',
+        userId: 'new-user',
+        baseUrl: 'https://ilinkai.weixin.qq.com',
+      });
+
+      const liveTransport = {
+        notifyStart: vi.fn(async () => undefined),
+        notifyStop: vi.fn(async () => undefined),
+        poll: vi.fn(
+          (_cursor: string, signal: AbortSignal) =>
+            new Promise((_resolve, reject) => {
+              if (signal.aborted) {
+                reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+                return;
+              }
+              signal.addEventListener(
+                'abort',
+                () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })),
+                { once: true },
+              );
+            }),
+        ),
+        uploadMedia: vi.fn(async () => {
+          throw new WechatIlinkError('AUTH_REPLACED', 'authorization replaced', false);
+        }),
+        sendMedia: vi.fn(async () => ({ ok: true })),
+      } as unknown as WechatTransport;
+
+      const createTransport = vi
+        .fn()
+        .mockReturnValueOnce(authTransport)
+        .mockReturnValueOnce(liveTransport);
+
+      const im = new WechatIM(deps({ host: testHost, getDbClient: () => db, createTransport }));
+
+      await im.authorize();
+      await vi.waitFor(() => expect(im.getState().phase).toBe('connected'));
+
+      const result = await im.sendFile('peer-upload', filePath);
+
+      expect(result).toEqual({ ok: false, reason: 'UPLOAD_FAIL' });
+      expect(im.getState()).toMatchObject({
+        phase: 'needs_reauth',
+        errorCode: 'auth_replaced',
+      });
+      expect(liveTransport.uploadMedia).toHaveBeenCalledTimes(1);
+      expect(liveTransport.sendMedia).not.toHaveBeenCalled();
+
+      await im.dispose();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('records a terminal outbox failure when uploadMedia hits a replaced authorization', async () => {
+    const dataKey = Buffer.alloc(32, 5);
+    let activeBindingEpoch = '';
+    const dir = await mkdtemp(join(tmpdir(), 'wechat-outbox-media-'));
+    const filePath = join(dir, 'outbox-media.bin');
+    try {
+      await writeFile(filePath, 'x');
+      const failures: Array<Record<string, unknown>> = [];
+      let dueOutboxReturned = false;
+      const db = fakeDb({
+        query: vi.fn(async (sql: string) =>
+          sql.includes('FROM wechat_outbox')
+            ? dueOutboxReturned
+              ? []
+              : (() => {
+                  dueOutboxReturned = true;
+                  const encrypted = encryptWechatContextToken(
+                    'ctx-upload',
+                    dataKey,
+                    activeBindingEpoch,
+                    'task-upload',
+                  );
+                  return [
+                    {
+                      id: 'outbox-upload',
+                      bindingEpoch: activeBindingEpoch,
+                      taskId: 'task-upload',
+                      clientId: 'outbox-client',
+                      kind: 'final',
+                      chunkIndex: 0,
+                      text: '',
+                      mediaJson: JSON.stringify([
+                        { absPath: filePath, clientId: 'media-client' },
+                      ]),
+                      attempts: 0,
+                      contextNonce: encrypted.nonce,
+                      contextCiphertext: encrypted.ciphertext,
+                      contextTag: encrypted.tag,
+                    },
+                  ];
+                })()
+            : [],
+        ) as DbClient['query'],
+        queryOne: vi.fn(async (sql: string) => {
+          if (sql.includes('FROM wechat_sync_state')) return null;
+          if (sql.includes('COUNT(*) AS count')) return { count: 0 };
+          if (sql.includes('FROM wechat_inbox')) return { peerId: 'peer-upload' };
+          return null;
+        }) as DbClient['queryOne'],
+        exec: vi.fn(async () => ({ changes: 1, lastInsertRowid: 0 })),
+        tx: vi.fn(async (name: string, args: Record<string, unknown>) => {
+          if (name === 'wechatActivateBindingEpoch') {
+            activeBindingEpoch = String(args.bindingEpoch);
+            return { activated: true, previousActiveEpoch: null, activeBindingEpoch };
+          }
+          if (name === 'wechatLeaseNextTask') return null;
+          if (name === 'wechatRecordOutboxFailure') {
+            failures.push(args);
+            return { recorded: true };
+          }
+          if (name === 'wechatCloseBindingEpoch') return { closed: true };
+          if (name === 'wechatUnbindCleanup')
+            return { deletedTasks: 0, deletedMediaRefs: 0, filePaths: [] };
+          return null;
+        }),
+      });
+
+      const testHost = host({
+        secretRead: (name: string) =>
+          name === 'wechat_data_key_v1' ? dataKey.toString('base64') : null,
+      });
+      const authTransport = authorizationTransportReturning({
+        token: 'new-token',
+        botId: 'outbox-bot',
+        userId: 'new-user',
+        baseUrl: 'https://ilinkai.weixin.qq.com',
+      });
+      const liveTransport = {
+        notifyStart: vi.fn(async () => undefined),
+        notifyStop: vi.fn(async () => undefined),
+        poll: vi.fn(
+          (_cursor: string, signal: AbortSignal) =>
+            new Promise((_resolve, reject) => {
+              if (signal.aborted) {
+                reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+                return;
+              }
+              signal.addEventListener(
+                'abort',
+                () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })),
+                { once: true },
+              );
+            }),
+        ),
+        uploadMedia: vi.fn(async () => {
+          throw new WechatIlinkError('AUTH_REPLACED', 'authorization replaced', false);
+        }),
+        sendMedia: vi.fn(async () => ({ ok: true })),
+      } as unknown as WechatTransport;
+      const createTransport = vi
+        .fn()
+        .mockReturnValueOnce(authTransport)
+        .mockReturnValueOnce(liveTransport);
+
+      const im = new WechatIM(deps({ host: testHost, getDbClient: () => db, createTransport }));
+      await im.authorize();
+      await vi.waitFor(() => expect(im.getState().phase).toBe('connected'));
+      await vi.waitFor(() => expect(failures).toHaveLength(1), { timeout: 2_000 });
+      await vi.waitFor(() =>
+        expect(im.getState()).toMatchObject({
+          phase: 'needs_reauth',
+          errorCode: 'auth_replaced',
+        }),
+      );
+
+      expect(liveTransport.uploadMedia).toHaveBeenCalledTimes(1);
+      expect(liveTransport.sendMedia).not.toHaveBeenCalled();
+      expect(failures[0]).toMatchObject({
+        outboxId: 'outbox-upload',
+        terminal: true,
+        errorCode: 'AUTH_REPLACED',
+      });
+
+      await im.dispose();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it('does not republish connected when startup queue counting loses the epoch', async () => {

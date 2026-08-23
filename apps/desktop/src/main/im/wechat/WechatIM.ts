@@ -591,14 +591,19 @@ export class WechatIM extends BaseIM implements RichChannelIM {
       if (this.#compatibilityDisabled || epoch.abort.signal.aborted) {
         return { ok: false, reason: 'SEND_FAIL' };
       }
-      const uploaded = await epoch.transport.uploadMedia(
-        {
-          peerId: userId,
-          bytes: local.bytes,
-          fileName: local.fileName,
-          kind: local.kind,
-        },
+      const uploaded = await this.#runSendOperation(
+        epoch.binding.bindingEpoch,
         epoch.abort.signal,
+        () =>
+          epoch.transport.uploadMedia(
+            {
+              peerId: userId,
+              bytes: local.bytes,
+              fileName: local.fileName,
+              kind: local.kind,
+            },
+            epoch.abort.signal,
+          ),
       );
       uploadedSuccessfully = true;
       if (this.#compatibilityDisabled || epoch.abort.signal.aborted) {
@@ -1545,14 +1550,16 @@ export class WechatIM extends BaseIM implements RichChannelIM {
       this.#assertSendEpochCurrent(bindingEpoch, signal);
       const local = await readOutboundWechatFile(media.absPath);
       this.#assertSendEpochCurrent(bindingEpoch, signal);
-      const uploaded = await transport.uploadMedia(
-        {
-          peerId,
-          bytes: local.bytes,
-          fileName: local.fileName,
-          kind: local.kind,
-        },
-        signal,
+      const uploaded = await this.#runSendOperation(bindingEpoch, signal, () =>
+        transport.uploadMedia(
+          {
+            peerId,
+            bytes: local.bytes,
+            fileName: local.fileName,
+            kind: local.kind,
+          },
+          signal,
+        ),
       );
       this.#assertSendEpochCurrent(bindingEpoch, signal);
       await this.#runSendOperation(bindingEpoch, signal, () =>
