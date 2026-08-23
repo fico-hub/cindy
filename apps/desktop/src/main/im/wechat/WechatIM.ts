@@ -859,6 +859,10 @@ export class WechatIM extends BaseIM implements RichChannelIM {
     signal: AbortSignal,
     generation: number,
   ): Promise<void> {
+    // A send rejection can abort this epoch while a poll batch is already in
+    // flight. The continuation below must not then publish a 'connected'
+    // phase and hide the needs_reauth transition that stopped the epoch.
+    const isCurrent = () => this.#isSendEpochCurrent(binding.bindingEpoch, signal);
     let cursor = binding.cursor;
     let failures = 0;
     while (!signal.aborted && this.#isGenerationCurrent(generation)) {
@@ -965,21 +969,23 @@ export class WechatIM extends BaseIM implements RichChannelIM {
         } finally {
           releasePollBarrier();
         }
-        if (!committed.committed) return;
+        if (!committed.committed || !isCurrent()) return;
         cursor = result.cursor;
         failures = 0;
         if (result.messages.length > 0) {
+          const queuedTasks = await this.#requireStore().countQueuedTasks(binding.bindingEpoch);
+          if (!isCurrent()) return;
           this.#setState({
             ...this.#state,
             phase: 'connected',
             lastInboundAt: now,
-            queuedTasks: await this.#requireStore().countQueuedTasks(binding.bindingEpoch),
+            queuedTasks,
           });
         } else {
           await delay(EMPTY_POLL_DELAY_MS, signal);
         }
       } catch (error) {
-        if (signal.aborted) return;
+        if (!isCurrent()) return;
         const safe = asWechatIlinkError(error);
         if (safe.code === 'AUTH_REPLACED' || safe.code === 'AUTH_EXPIRED') {
           this.#setState({

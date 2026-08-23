@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { IMHost } from '@cindy/im';
+import { encryptWechatContextToken } from '../contextCrypto';
+import type { ImSessionRow } from '../../../im/shared/sessionRepo';
 import {
   WechatIlinkError,
   type WechatCredentials,
@@ -515,6 +517,139 @@ describe('WechatIM host boundary', () => {
     );
     await vi.waitFor(() => expect(im.getState().phase).toBe('connected'));
 
+    await im.dispose();
+  });
+
+  it('keeps needs_reauth when an in-flight poll batch completes after a send rejection aborts the epoch', async () => {
+    const previous = { bindingEpoch: 'binding-previous', cursor: 'cursor-previous' };
+    let activeBindingEpoch = '';
+    const db = fakeDb({
+      queryOne: vi.fn(async (sql: string) => {
+        if (sql.includes('FROM wechat_sync_state')) return previous;
+        if (sql.includes('COUNT(*) AS count')) return { count: 0 };
+        if (sql.includes('context_nonce')) {
+          const encrypted = encryptWechatContextToken(
+            'ctx-1',
+            Buffer.alloc(32, 3),
+            activeBindingEpoch,
+            'task-1',
+          );
+          return {
+            taskId: 'task-1',
+            sessionId: 'wechat-session-1',
+            contextNonce: encrypted.nonce,
+            contextCiphertext: encrypted.ciphertext,
+            contextTag: encrypted.tag,
+          };
+        }
+        if (sql.includes('COALESCE')) return { conversationEpoch: 0 };
+        return undefined;
+      }) as DbClient['queryOne'],
+      tx: vi.fn(async (name: string, args: Record<string, unknown>) => {
+        switch (name) {
+          case 'wechatActivateBindingEpoch':
+            activeBindingEpoch = String(args.bindingEpoch);
+            return {
+              activated: true,
+              previousActiveEpoch: previous.bindingEpoch,
+              activeBindingEpoch: String(args.bindingEpoch),
+            };
+          case 'wechatCloseBindingEpoch':
+            return { closed: true };
+          case 'wechatUnbindCleanup':
+            return { deletedTasks: 0, deletedMediaRefs: 0, filePaths: [] };
+          case 'wechatCommitPollBatch':
+            return {
+              committed: true,
+              insertedTaskIds: [String((args.messages as Array<{ id?: unknown }> | undefined)?.[0]?.id ?? 'task-1')],
+              duplicateTaskIds: [],
+              rejectedTaskIds: [],
+            };
+          case 'wechatLeaseNextTask':
+            return null;
+          default:
+            return null;
+        }
+      }),
+    });
+    const testHost = host({
+      secretRead: (name) =>
+        name === 'wechat_data_key_v1' ? Buffer.alloc(32, 3).toString('base64') : null,
+    });
+    const authTransport = authorizationTransportReturning({
+      token: 'new-token',
+      botId: 'new-bot',
+      userId: 'new-user',
+      baseUrl: 'https://ilinkai.weixin.qq.com',
+    });
+    let releasePoll!: () => void;
+    const liveTransport = {
+      notifyStart: vi.fn(async () => undefined),
+      notifyStop: vi.fn(async () => undefined),
+      poll: vi.fn(() =>
+        new Promise((resolve) => {
+          releasePoll = () =>
+            resolve({
+              cursor: 'cursor-next',
+              messages: [
+                {
+                  messageId: 'msg-1',
+                  senderId: 'peer-1',
+                  contextToken: 'ctx-1',
+                  text: 'hello',
+                  media: [],
+                },
+              ],
+            });
+        }),
+      ),
+      sendMessage: vi.fn(async () => {
+        throw new WechatIlinkError('AUTH_REPLACED', 'authorization replaced', false);
+      }),
+    } as unknown as WechatTransport;
+    const createTransport = vi
+      .fn()
+      .mockReturnValueOnce(authTransport)
+      .mockReturnValueOnce(liveTransport);
+    const sessionRow = { id: 'wechat-session-1' } as ImSessionRow;
+    const im = new WechatIM(
+      deps({
+        host: testHost,
+        getDbClient: () => db,
+        createTransport,
+      }),
+    );
+    im.attachTurnRuntime({
+      runner: {
+        dispatchAgentTurn: vi.fn(async () => ({
+          kind: 'accepted',
+          terminal: Promise.resolve({}),
+        })),
+        stopActiveTurn: vi.fn(async () => ({ stopped: true })),
+      } as never,
+      repo: {
+        prepareNewSession: vi.fn(async () => sessionRow),
+        findActiveSession: vi.fn(async () => sessionRow),
+        createSession: vi.fn(async () => sessionRow),
+      } as never,
+      config: {} as never,
+      resetSessionToDefaults: vi.fn(async () => undefined),
+    });
+
+    await im.authorize();
+    await vi.waitFor(() => expect(im.getState().phase).toBe('connected'));
+    await vi.waitFor(() => expect(liveTransport.poll).toHaveBeenCalledOnce());
+
+    // The concurrent direct send hits the replaced authorization and aborts
+    // the epoch with needs_reauth while the poll is still unresolved.
+    await expect(im.sendText('peer-1', 'outbound')).rejects.toThrow('authorization replaced');
+    expect(im.getState()).toMatchObject({ phase: 'needs_reauth', errorCode: 'auth_replaced' });
+
+    releasePoll();
+    await vi.waitFor(() =>
+      expect(db.tx).toHaveBeenCalledWith('wechatCommitPollBatch', expect.anything()),
+    );
+    expect(im.getState()).toMatchObject({ phase: 'needs_reauth', errorCode: 'auth_replaced' });
     await im.dispose();
   });
 });
