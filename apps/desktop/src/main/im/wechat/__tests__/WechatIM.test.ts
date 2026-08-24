@@ -1473,6 +1473,161 @@ describe('WechatIM host boundary', () => {
     );
     await im.dispose();
   });
+
+  it('releases a leased task and dispatches nothing when a send rejection aborts the epoch mid-lease', async () => {
+    const dataKey = Buffer.alloc(32, 7);
+    let activeBindingEpoch = '';
+    let releaseLease!: () => void;
+
+    const db = fakeDb({
+      query: vi.fn(async () => []),
+      queryOne: vi.fn(async (sql: string) => {
+        if (sql.includes('FROM wechat_sync_state')) return null;
+        if (sql.includes('COUNT(*) AS count')) return { count: 0 };
+        if (sql.includes('context_nonce')) {
+          const encrypted = encryptWechatContextToken(
+            'ctx-send',
+            dataKey,
+            activeBindingEpoch,
+            'task-lease',
+          );
+          return {
+            taskId: 'task-lease',
+            sessionId: 'wechat-session-1',
+            contextNonce: encrypted.nonce,
+            contextCiphertext: encrypted.ciphertext,
+            contextTag: encrypted.tag,
+          };
+        }
+        if (sql.includes('COALESCE')) return { conversationEpoch: 0 };
+        return undefined;
+      }) as DbClient['queryOne'],
+      tx: vi.fn(async (name: string, args: Record<string, unknown>) => {
+        switch (name) {
+          case 'wechatActivateBindingEpoch':
+            activeBindingEpoch = String(args.bindingEpoch);
+            return { activated: true, previousActiveEpoch: null, activeBindingEpoch };
+          case 'wechatLeaseNextTask':
+            // Resolve only after the send rejection has aborted the epoch,
+            // interleaving: pump awaits the lease, rejection aborts, lease
+            // resolves with a real task.
+            await new Promise<void>((resolve) => {
+              releaseLease = () => resolve();
+            });
+            return {
+              id: 'task-lease',
+              bindingEpoch: activeBindingEpoch,
+              peerId: 'peer-1',
+              sessionId: 'wechat-session-1',
+              conversationEpoch: 0,
+              payloadJson: JSON.stringify({
+                text: 'hello after abort',
+                attachments: [],
+                unsupportedMedia: [],
+              }),
+              context: encryptWechatContextToken(
+                'ctx-lease',
+                dataKey,
+                activeBindingEpoch,
+                'task-lease',
+              ),
+              attempts: 0,
+              receivedAt: 100,
+              expiresAt: 100_000,
+            };
+          case 'wechatCloseBindingEpoch':
+            return { closed: true };
+          case 'wechatUnbindCleanup':
+            return { deletedTasks: 0, deletedMediaRefs: 0, filePaths: [] };
+          default:
+            return null;
+        }
+      }),
+    });
+
+    const testHost = host({
+      secretRead: (name: string) =>
+        name === 'wechat_data_key_v1' ? dataKey.toString('base64') : null,
+    });
+
+    const authTransport = authorizationTransportReturning({
+      token: 'new-token',
+      botId: 'lease-bot',
+      userId: 'new-user',
+      baseUrl: 'https://ilinkai.weixin.qq.com',
+    });
+
+    const liveTransport = {
+      notifyStart: vi.fn(async () => undefined),
+      notifyStop: vi.fn(async () => undefined),
+      poll: vi.fn(async (_cursor: string, signal: AbortSignal) => {
+        // Long-poll that only ends when the epoch is aborted.
+        await new Promise<void>((_, reject) => {
+          signal.addEventListener(
+            'abort',
+            () => reject(new DOMException('Aborted', 'AbortError')),
+            { once: true },
+          );
+        });
+      }),
+      sendMessage: vi.fn(async () => {
+        throw new WechatIlinkError('AUTH_REPLACED', 'authorization replaced', false);
+      }),
+    } as unknown as WechatTransport;
+
+    const createTransport = vi
+      .fn()
+      .mockReturnValueOnce(authTransport)
+      .mockReturnValueOnce(liveTransport);
+
+    const dispatchAgentTurn = vi.fn(
+      async () =>
+        ({ kind: 'accepted', terminal: Promise.resolve({}) }) as never,
+    );
+
+    const im = new WechatIM(deps({ host: testHost, getDbClient: () => db, createTransport }));
+    im.attachTurnRuntime({
+      runner: {
+        dispatchAgentTurn,
+        stopActiveTurn: vi.fn(async () => ({ stopped: true })),
+      } as never,
+      repo: {
+        prepareNewSession: vi.fn(async () => ({ id: 'wechat-session-1' }) as ImSessionRow),
+        findActiveSession: vi.fn(async () => ({ id: 'wechat-session-1' }) as ImSessionRow),
+        createSession: vi.fn(async () => ({ id: 'wechat-session-1' }) as ImSessionRow),
+      } as never,
+      config: {} as never,
+      resetSessionToDefaults: vi.fn(async () => undefined),
+    });
+
+    await im.authorize();
+    await vi.waitFor(() => expect(im.getState().phase).toBe('connected'));
+    // The pump has called leaseNextTask and is now suspended inside the lease.
+    await vi.waitFor(() =>
+      expect(db.tx).toHaveBeenCalledWith(
+        'wechatLeaseNextTask',
+        expect.objectContaining({ bindingEpoch: activeBindingEpoch }),
+      ),
+    );
+    // The concurrent direct send hits the replaced authorization and aborts
+    // the epoch before the lease resolves.
+    await expect(im.sendText('peer-1', 'outbound')).rejects.toThrow('authorization replaced');
+    expect(im.getState()).toMatchObject({ phase: 'needs_reauth', errorCode: 'auth_replaced' });
+
+    // The lease now resolves with a task for the just-aborted binding.
+    releaseLease();
+
+    // The stale pump must release the leased work instead of dispatching it.
+    await vi.waitFor(() =>
+      expect(db.tx).toHaveBeenCalledWith(
+        'wechatReleaseDispatch',
+        expect.objectContaining({ bindingEpoch: activeBindingEpoch, taskId: 'task-lease' }),
+      ),
+    );
+    expect(dispatchAgentTurn).not.toHaveBeenCalled();
+
+    await im.dispose();
+  });
 });
 
 function deps(overrides: Partial<WechatIMDeps> & { host?: IMHost } = {}): WechatIMDeps {

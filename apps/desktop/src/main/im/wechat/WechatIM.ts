@@ -1047,6 +1047,19 @@ export class WechatIM extends BaseIM implements RichChannelIM {
         bindingEpoch: binding.bindingEpoch,
         now: this.#now(),
       });
+      // Both awaits above (the poll barrier and the lease) can resolve after a
+      // send rejection aborts this exact epoch. The loop condition and the
+      // barrier's own abort guard are re-evaluated only on the *next* iteration,
+      // so without this recheck the stale pump would dispatch an Agent turn for
+      // the dead binding (its work is not yet in #activeTasks, so the epoch
+      // cleanup cannot cancel it). If the epoch is gone, release the leased work
+      // so it is not lost and exit before any dispatch.
+      if (!this.#isSendEpochCurrent(binding.bindingEpoch, signal)) {
+        if (task) {
+          await this.#requireStore().releaseDispatch(task.bindingEpoch, task.id);
+        }
+        return;
+      }
       if (!task) {
         await delay(IDLE_PUMP_DELAY_MS, signal);
         continue;
