@@ -28,8 +28,7 @@ import { incrementDailySpend, getTodaySpend, localDayKey } from './localDb/daily
 import { getGatewayModelPricing } from './usage/modelPricing';
 import type { XaiRateLimitSnapshot } from '../shared/xaiRateLimit';
 import { incrementDailyModelUsage, type DailyModelUsageDelta } from './localDb/dailyModelUsage';
-import { getDbClient } from './localDb/client/current';
-import { getCurrentUserId } from './localDb/index';
+import { getCurrentDbClientUserId, getDbClient } from './localDb/client/current';
 import {
   mergeClaudeSubscriptionUsageSnapshot,
   type ClaudeSubscriptionUsageSnapshot,
@@ -379,7 +378,7 @@ function currentCodexAppServerSnapshot(): RateLimitSnapshot | null {
 
 function currentAccountUsageOwner(): string | null {
   try {
-    return getCurrentUserId();
+    return getCurrentDbClientUserId();
   } catch {
     return null;
   }
@@ -504,6 +503,16 @@ function mergeCodexAccountUsageSnapshot(
   const keepPreviousWindows =
     keepPreviousWebFields
     || (hasCodexUsageWindow(previous) && isCodexWindowlessFallback(incoming));
+  // account/rateLimits/updated is sparse: an app-server notification may refresh
+  // only primary or secondary. A missing sibling means "not included in this
+  // update", not "the window was removed". Preserve each omitted window
+  // independently so a one-window tick cannot make the other quota disappear.
+  // WHAM snapshots are full reads and must still be allowed to clear a window;
+  // an explicit reached marker is authoritative for clearing both windows.
+  const preserveMissingAppServerWindows =
+    previous.source !== 'openai-web'
+    && incoming.source !== 'openai-web'
+    && !hasCodexRateLimitReached(incoming);
 
   const incomingCredits = incoming.credits;
   const previousCredits = previous.credits ?? null;
@@ -523,8 +532,12 @@ function mergeCodexAccountUsageSnapshot(
 
   return {
     ...incoming,
-    primary: keepPreviousWindows ? previous.primary : incoming.primary,
-    secondary: keepPreviousWindows ? previous.secondary : incoming.secondary,
+    primary: keepPreviousWindows || (preserveMissingAppServerWindows && !incoming.primary)
+      ? previous.primary
+      : incoming.primary,
+    secondary: keepPreviousWindows || (preserveMissingAppServerWindows && !incoming.secondary)
+      ? previous.secondary
+      : incoming.secondary,
     planType: keepPreviousWebFields ? previous.planType : incoming.planType ?? previous.planType,
     credits,
     source: keepPreviousWebFields ? previous.source : incoming.source ?? 'codex-app-server',
