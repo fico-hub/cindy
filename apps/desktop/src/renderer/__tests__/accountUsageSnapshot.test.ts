@@ -31,6 +31,24 @@ describe('mergeCodexAccountUsageSnapshot', () => {
     expect(merged.secondary).toEqual(previous.secondary);
   });
 
+  it('clears an explicitly null app-server window but preserves an omitted sibling', () => {
+    const previous = {
+      source: 'codex-app-server',
+      limitId: 'codex',
+      primary: { usedPercent: 24, windowMinutes: 300 },
+      secondary: { usedPercent: 31, windowMinutes: 10_080 },
+    };
+
+    const merged = mergeCodexAccountUsageSnapshot(previous, {
+      source: 'codex-app-server',
+      limitId: 'codex',
+      secondary: null,
+    });
+
+    expect(merged.primary).toEqual(previous.primary);
+    expect(merged.secondary ?? null).toBeNull();
+  });
+
   it('preserves the last known credit balance when a later snapshot omits credits', () => {
     const previous = {
       credits: {

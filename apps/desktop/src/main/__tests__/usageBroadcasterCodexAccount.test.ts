@@ -223,6 +223,20 @@ describe('codex app-server limit buckets', () => {
     expect(payload?.appServerBuckets?.codex?.secondary?.usedPercent).toBe(55);
   });
 
+  it('clears an explicitly null window while preserving an omitted sibling', async () => {
+    const broadcaster = await import('../usageBroadcaster');
+    await broadcaster.recordCodexAccountUsageSnapshot(APP_SERVER_SNAPSHOT);
+    await broadcaster.recordCodexAccountUsageSnapshot({
+      limitId: 'codex',
+      primary: null,
+      source: 'codex-app-server',
+    });
+
+    const payload = await broadcaster.readCodexAccountUsageSnapshot();
+    expect(payload?.appServerBuckets?.codex?.primary ?? null).toBeNull();
+    expect(payload?.appServerBuckets?.codex?.secondary?.usedPercent).toBe(55);
+  });
+
   it('hydrates a pre-bucket persisted row into its matching bucket', async () => {
     const broadcaster = await import('../usageBroadcaster');
     // 分槽版(有 webSnapshot 键、无 appServerBuckets)写下的行 —— 顶层是 Spark 桶

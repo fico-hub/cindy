@@ -500,9 +500,18 @@ function mergeCodexAccountUsageSnapshot(
     previous.source === 'openai-web'
     && incoming.source !== 'openai-web'
     && (isCodexZeroWindowFallback(incoming) || isCodexWindowlessFallback(incoming));
+  const incomingHasPrimary = Object.prototype.hasOwnProperty.call(incoming, 'primary');
+  const incomingHasSecondary = Object.prototype.hasOwnProperty.call(incoming, 'secondary');
   const keepPreviousWindows =
     keepPreviousWebFields
-    || (hasCodexUsageWindow(previous) && isCodexWindowlessFallback(incoming));
+    || (
+      hasCodexUsageWindow(previous)
+      && isCodexWindowlessFallback(incoming)
+      // Preserve the known generic placeholder shapes (no window fields, or
+      // both null). A single explicit null is authoritative for withdrawing
+      // that window while its omitted sibling remains sparse.
+      && (incomingHasPrimary === incomingHasSecondary)
+    );
   // account/rateLimits/updated is sparse: an app-server notification may refresh
   // only primary or secondary. A missing sibling means "not included in this
   // update", not "the window was removed". Preserve each omitted window
@@ -532,10 +541,10 @@ function mergeCodexAccountUsageSnapshot(
 
   return {
     ...incoming,
-    primary: keepPreviousWindows || (preserveMissingAppServerWindows && !incoming.primary)
+    primary: keepPreviousWindows || (preserveMissingAppServerWindows && !incomingHasPrimary)
       ? previous.primary
       : incoming.primary,
-    secondary: keepPreviousWindows || (preserveMissingAppServerWindows && !incoming.secondary)
+    secondary: keepPreviousWindows || (preserveMissingAppServerWindows && !incomingHasSecondary)
       ? previous.secondary
       : incoming.secondary,
     planType: keepPreviousWebFields ? previous.planType : incoming.planType ?? previous.planType,
