@@ -5,6 +5,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
+import { rewriteContextModeDoctorPath } from '../context-mode-doctor-path.js';
 import {
   createPiTranslateContext,
   disposePiTranslateContext,
@@ -70,6 +71,101 @@ describe('pi translator', () => {
         subagentObservation: expect.objectContaining({ kind: 'terminal' }),
       }),
     ]);
+  });
+
+  it('does not project management commands as Subagent runs', () => {
+    const ctx = createPiTranslateContext(noopLogger);
+    const { queue, events } = makeQueue();
+    translatePiEvent(
+      ev({
+        type: 'tool_execution_start',
+        toolCallId: 'sa-list',
+        toolName: 'subagent',
+        args: { action: 'list' },
+      }),
+      queue,
+      ctx,
+    );
+    translatePiEvent(
+      ev({ type: 'tool_execution_end', toolCallId: 'sa-list', result: 'PASS', isError: false }),
+      queue,
+      ctx,
+    );
+    expect(events.filter((event) => event.type === 'agent_task_update')).toEqual([]);
+  });
+
+  it('uses the explicit value-oriented title for a Subagent run', () => {
+    const ctx = createPiTranslateContext(noopLogger);
+    const { queue, events } = makeQueue();
+    translatePiEvent(
+      ev({
+        type: 'tool_execution_start',
+        toolCallId: 'sa-title',
+        toolName: 'subagent',
+        args: { title: 'Grok 连通性验证', agent: 'worker' },
+      }),
+      queue,
+      ctx,
+    );
+    expect(events.find((event) => event.type === 'agent_task_update')?.data).toMatchObject({
+      title: 'Grok 连通性验证',
+    });
+  });
+
+  it('derives a batch title from task value instead of role labels', () => {
+    const ctx = createPiTranslateContext(noopLogger);
+    const { queue, events } = makeQueue();
+    translatePiEvent(
+      ev({
+        type: 'tool_execution_start',
+        toolCallId: 'sa-batch-title',
+        toolName: 'subagent',
+        args: {
+          tasks: [
+            { agent: 'worker', task: 'Verify Grok routing and usage' },
+            { agent: 'worker', task: 'Review retry classification' },
+          ],
+        },
+      }),
+      queue,
+      ctx,
+    );
+    expect(events.find((event) => event.type === 'agent_task_update')?.data).toMatchObject({
+      title: 'Verify Grok routing and usage · Review retry classification',
+    });
+  });
+
+  it('keeps a durable PI launch receipt running after tool_execution_end', () => {
+    const ctx = createPiTranslateContext(noopLogger);
+    const { queue, events } = makeQueue();
+
+    translatePiEvent(
+      ev({ type: 'tool_execution_start', toolCallId: 'sa-bg', toolName: 'subagent', args: { async: true } }),
+      queue,
+      ctx,
+    );
+    translatePiEvent(
+      ev({
+        type: 'tool_execution_end',
+        toolCallId: 'sa-bg',
+        result: {
+          content: [{
+            type: 'text',
+            text: 'Cindy subagent launched. The agent is working in the background.',
+          }],
+        },
+        isError: false,
+      }),
+      queue,
+      ctx,
+    );
+
+    const updates = events.filter((event) => event.type === 'agent_task_update');
+    expect(updates.at(-1)?.data).toMatchObject({
+      taskId: 'sa-bg',
+      status: 'running',
+      taskType: 'pi_subagent',
+    });
   });
 
   it.each([
@@ -570,6 +666,60 @@ describe('pi translator', () => {
     expect(JSON.parse((full!.data as { fullText: string }).fullText).content).toBe(content);
   });
 
+  it('rewrites context-mode doctor tool results to the Cindy-managed package path', () => {
+    const root = '/tmp/cindy/managed-packages/0/node_modules/context-mode';
+    const ctx = createPiTranslateContext(noopLogger);
+    ctx.rewriteToolResultText = (text) => rewriteContextModeDoctorPath(text, root);
+    const { queue, events } = makeQueue();
+    translatePiEvent(
+      ev({
+        type: 'tool_execution_end',
+        toolCallId: 'doctor-1',
+        toolName: 'ctx_doctor',
+        result: {
+          content: [
+            {
+              type: 'text',
+              text: '[OK] Hook support: (~/.pi/extensions/context-mode/), not via JSON-stdio.',
+            },
+          ],
+        },
+      }),
+      queue,
+      ctx,
+    );
+    const full = events.find((event) => event.type === 'tool_result_full');
+    expect(full).toMatchObject({
+      data: {
+        fullText: `[OK] Hook support: (${root}/), not via JSON-stdio.`,
+      },
+    });
+  });
+
+  it('leaves non-doctor tool results containing the stale path unchanged', () => {
+    const root = '/tmp/cindy/managed-packages/0/node_modules/context-mode';
+    const stale = '[OK] Hook support: (~/.pi/extensions/context-mode/), not via JSON-stdio.';
+    const ctx = createPiTranslateContext(noopLogger);
+    ctx.rewriteToolResultText = (text) => rewriteContextModeDoctorPath(text, root);
+    const { queue, events } = makeQueue();
+    translatePiEvent(
+      ev({ type: 'tool_execution_start', toolCallId: 'read-1', toolName: 'read', args: {} }),
+      queue,
+      ctx,
+    );
+    translatePiEvent(
+      ev({
+        type: 'tool_execution_end',
+        toolCallId: 'read-1',
+        result: { content: [{ type: 'text', text: stale }] },
+      }),
+      queue,
+      ctx,
+    );
+    const full = events.find((event) => event.type === 'tool_result_full');
+    expect(full).toMatchObject({ data: { fullText: stale } });
+  });
+
   it('maps compaction_end (threshold) → compact_boundary with token deltas + updates contextTokens', () => {
     const ctx = createPiTranslateContext(noopLogger);
     const { queue, events } = makeQueue();
@@ -585,19 +735,6 @@ describe('pi translator', () => {
     expect(data.preTokens).toBe(150000);
     expect(data.postTokens).toBe(32000);
     expect(ctx.contextTokens).toBe(32000);
-  });
-
-  it('labels host-triggered compact RPC as auto even when Pi reports reason=manual', () => {
-    const ctx = createPiTranslateContext(noopLogger);
-    ctx.hostAutoCompactInFlight = true;
-    const { queue, events } = makeQueue();
-    translatePiEvent(
-      ev({ type: 'compaction_end', reason: 'manual', result: { tokensBefore: 160000, estimatedTokensAfter: 20000 } }),
-      queue,
-      ctx,
-    );
-    const data = events.find((e) => e.type === 'compact_boundary')!.data as { trigger: string };
-    expect(data.trigger).toBe('auto');
   });
 
   it('maps manual compaction trigger through to compact_boundary', () => {
@@ -640,10 +777,9 @@ describe('pi translator', () => {
     expect(endStatus?.turnScope).toBe('background');
   });
 
-  it('marks idle/host auto-compact status as background so it cannot latch a product turn', () => {
+  it('marks idle manual compaction status as background so it cannot latch a product turn', () => {
     const ctx = createPiTranslateContext(noopLogger);
     ctx.isStreaming = false;
-    ctx.hostAutoCompactInFlight = true;
     const { queue, events } = makeQueue();
     translatePiEvent(ev({ type: 'compaction_start' }), queue, ctx);
     const start = events.find((e) => e.type === 'status');
@@ -787,11 +923,20 @@ describe('pi translator', () => {
 
     const done = events.find((e) => e.type === 'done');
     expect(done).toBeDefined();
-    const usage = (done!.data as { usage: Record<string, number> }).usage;
+    const usage = (done!.data as { usage: Record<string, unknown> }).usage;
     expect(usage.inputTokens).toBe(100);
     expect(usage.outputTokens).toBe(20);
     expect(usage.cacheReadTokens).toBe(5);
     expect(usage.cacheCreationTokens).toBe(3);
+    expect(usage.segmentsComplete).toBe(true);
+    expect(usage.segments).toEqual([
+      expect.objectContaining({
+        inputTokens: 100,
+        outputTokens: 20,
+        cacheReadTokens: 5,
+        cacheCreateTokens: 3,
+      }),
+    ]);
     expect(usage.durationMs).toBeGreaterThanOrEqual(1_200);
     expect(usage.turnDurationMs).toBeGreaterThanOrEqual(0);
     // 快照累计 input+output。
@@ -807,6 +952,64 @@ describe('pi translator', () => {
       type: 'status',
       data: expect.objectContaining({ status: 'Done', isRunning: false }),
     }));
+    translatePiEvent(ev({ type: 'agent_settled' }), queue, ctx);
+    expect(events.filter((event) => event.type === 'done')).toHaveLength(1);
+  });
+
+  it('locks the Pi price variant from bridge usage metadata at each provider request boundary', () => {
+    const ctx = createPiTranslateContext(noopLogger);
+    let fast = false;
+    ctx.getPriceVariant = () => (fast ? 'priority' : 'standard');
+    const { queue, events } = makeQueue();
+
+    translatePiEvent(ev({ type: 'agent_start' }), queue, ctx);
+    translatePiEvent(
+      ev({ type: 'message_start', message: { usage: { service_tier: 'default' } } }),
+      queue,
+      ctx,
+    );
+    fast = true;
+    translatePiEvent(
+      ev({
+        type: 'message_end',
+        message: {
+          role: 'assistant',
+          model: 'gpt-5.6-sol',
+          content: [{ type: 'text', text: 'standard request' }],
+          usage: { input: 10, output: 2, service_tier: 'default' },
+        },
+      }),
+      queue,
+      ctx,
+    );
+
+    translatePiEvent(
+      ev({ type: 'message_start', message: { usage: { service_tier: 'priority' } } }),
+      queue,
+      ctx,
+    );
+    translatePiEvent(
+      ev({
+        type: 'message_end',
+        message: {
+          role: 'assistant',
+          model: 'gpt-5.6-sol',
+          content: [{ type: 'text', text: 'priority request' }],
+          usage: { input: 20, output: 3, service_tier: 'priority' },
+        },
+      }),
+      queue,
+      ctx,
+    );
+    translatePiEvent(ev({ type: 'agent_settled' }), queue, ctx);
+
+    const usage = (events.find((event) => event.type === 'done')!.data as {
+      usage: { segments: Array<{ priceVariant?: string }> };
+    }).usage;
+    expect(usage.segments.map((segment) => segment.priceVariant)).toEqual([
+      'standard',
+      'priority',
+    ]);
   });
 
   it('marks generation active on message_start so the UI can tick live TPS', () => {
@@ -1274,6 +1477,88 @@ describe('pi translator', () => {
       expect(ctx.turnOutput).toBe(40);
       expect(ctx.turnTokens).toBe(290);
       expect(ctx.costUsd).toBeCloseTo(0.03, 10);
+    });
+
+    it('deduplicates child request segments across cumulative progress frames', () => {
+      const ctx = createPiTranslateContext(noopLogger);
+      const { queue, events } = makeQueue();
+      translatePiEvent(ev({ type: 'agent_start' }), queue, ctx);
+      const segments = [
+        {
+          id: 'r1',
+          model: 'gpt-5.5',
+          input: 100,
+          output: 10,
+          cacheRead: 5,
+          cacheWrite: 0,
+          cost: 0.01,
+        },
+        {
+          id: 'r2',
+          model: 'gpt-5.5',
+          input: 200,
+          output: 20,
+          cacheRead: 15,
+          cacheWrite: 0,
+          cost: 0.02,
+        },
+      ];
+      translatePiEvent(
+        progressEvent(
+          'sa-1',
+          { input: 300, output: 30, cacheRead: 20, cost: 0.03 },
+          { usageSegments: segments },
+        ),
+        queue,
+        ctx,
+      );
+      translatePiEvent(
+        progressEvent(
+          'sa-1',
+          { input: 300, output: 30, cacheRead: 20, cost: 0.03 },
+          { usageSegments: segments },
+        ),
+        queue,
+        ctx,
+      );
+      translatePiEvent(ev({ type: 'agent_settled' }), queue, ctx);
+
+      expect(ctx.turnInput).toBe(300);
+      expect(ctx.turnOutput).toBe(30);
+      expect(ctx.costUsd).toBeCloseTo(0.03, 10);
+      const usage = (
+        events.find((event) => event.type === 'done')!.data as { usage: Record<string, unknown> }
+      ).usage;
+      expect(usage.segmentsComplete).toBe(true);
+      expect(usage.segments).toHaveLength(2);
+    });
+
+    it('falls back to token-only accounting when child segments do not cover the cumulative total', () => {
+      const ctx = createPiTranslateContext(noopLogger);
+      const { queue, events } = makeQueue();
+      translatePiEvent(ev({ type: 'agent_start' }), queue, ctx);
+      translatePiEvent(
+        progressEvent(
+          'sa-1',
+          { input: 300, output: 30, cacheRead: 20, cost: 0.03 },
+          {
+            usageSegments: [
+              { id: 'r1', model: 'gpt-5.5', input: 100, output: 10, cacheRead: 5, cost: 0.01 },
+            ],
+          },
+        ),
+        queue,
+        ctx,
+      );
+      translatePiEvent(ev({ type: 'agent_settled' }), queue, ctx);
+
+      expect(ctx.turnInput).toBe(300);
+      expect(ctx.turnOutput).toBe(30);
+      const usage = (
+        events.find((event) => event.type === 'done')!.data as { usage: Record<string, unknown> }
+      ).usage;
+      expect(usage.segmentsComplete).toBe(false);
+      expect(usage.segments).toEqual([]);
     });
 
     it('accumulates parallel delegations independently and never goes negative', () => {

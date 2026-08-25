@@ -960,6 +960,16 @@ describe('cindy-bridge extension source', () => {
     expect(CINDY_BRIDGE_EXTENSION_SOURCE).not.toContain('${');
   });
 
+  it('preserves the permission denial source across the private Pi UI envelope', () => {
+    const source = CINDY_BRIDGE_EXTENSION_SOURCE;
+    expect(source).toContain('await ctx.ui.input(');
+    expect(source).toContain("const PERMISSION_USER_DENY = 'user-deny'");
+    expect(source).toContain("const PERMISSION_AUTO_REVIEW_DENY = 'auto-review-deny'");
+    expect(source).toContain('User denied this tool call via Cindy.');
+    expect(source).toContain('Cindy Auto-review denied this tool call.');
+    expect(source).toContain('Cindy could not approve this tool call.');
+  });
+
   it('normalizes bash timeout at the execute boundary without a host-side timer', () => {
     const source = CINDY_BRIDGE_EXTENSION_SOURCE;
     expect(source).toContain(
@@ -1045,8 +1055,23 @@ describe('cindy-bridge extension source', () => {
     expect(CINDY_BRIDGE_EXTENSION_SOURCE).toContain("pi.on('tool_call'");
     expect(CINDY_BRIDGE_EXTENSION_SOURCE).toContain('FILE_WRITE_BUILTINS.has(event.toolName)');
     expect(CINDY_BRIDGE_EXTENSION_SOURCE).toContain("pi.on('tool_result'");
-    expect(CINDY_BRIDGE_EXTENSION_SOURCE).toContain("event.toolName !== 'bash'");
-    expect(CINDY_BRIDGE_EXTENSION_SOURCE).toContain("startsWith('mcp__')");
+    expect(CINDY_BRIDGE_EXTENSION_SOURCE).toContain("captureToolName !== 'bash'");
+    expect(CINDY_BRIDGE_EXTENSION_SOURCE).toContain("String(captureToolName ?? '').startsWith('mcp__')");
+    expect(CINDY_BRIDGE_EXTENSION_SOURCE).toContain('captureToolName = gatewayCall?.qualifiedName');
+    expect(CINDY_BRIDGE_EXTENSION_SOURCE).toContain('captureInput = gatewayCall?.args');
+  });
+
+  it('exposes a constant two-tool MCP gateway while preserving the real MCP identity for approval', () => {
+    expect(CINDY_BRIDGE_EXTENSION_SOURCE).toContain("const CINDY_MCP_LIST_TOOLS = 'cindy_mcp_list_tools'");
+    expect(CINDY_BRIDGE_EXTENSION_SOURCE).toContain("const CINDY_MCP_CALL_TOOL = 'cindy_mcp_call_tool'");
+    expect(CINDY_BRIDGE_EXTENSION_SOURCE).toContain('mcpGateway.register(pi)');
+    expect(CINDY_BRIDGE_EXTENSION_SOURCE).toContain("qualifiedName: 'mcp__' + serverName + '__' + toolName");
+    expect(CINDY_BRIDGE_EXTENSION_SOURCE).toContain('private readonly disclosedSchemas');
+    expect(CINDY_BRIDGE_EXTENSION_SOURCE).toContain('mcpGateway.isSchemaDisclosed(resolvedGatewayCall)');
+    expect(CINDY_BRIDGE_EXTENSION_SOURCE).toContain('Inspect this tool before execution');
+    expect(CINDY_BRIDGE_EXTENSION_SOURCE).toContain('permissionToolName = gatewayCall?.qualifiedName');
+    expect(CINDY_BRIDGE_EXTENSION_SOURCE).toContain('permissionInput = gatewayCall?.args');
+    expect(CINDY_BRIDGE_EXTENSION_SOURCE).not.toContain("name: qualifiedName,\n        label: server.name + ': ' + tool.name");
   });
 
   it('resolves the bash package home across reloads with a tamper-proof stash and keeps the package token out of globalThis', () => {
@@ -1085,7 +1110,7 @@ describe('cindy-bridge extension source', () => {
     helper.env.PI_CODING_AGENT_DIR = '/host/agent-home/run-tmp/abc';
     expect(helper.resolveBashPackageHome()).toBe(injected);
 
-    // stash 属性被替换成 plain 赋值(可写可配置)→ 不被信任 → fail-closed。
+    // stash 属性被替换成 plain 赋值(可写可配置)→ 不被信任 → 走首次加载路径。
     // (defineProperty 定义 non-configurable 属性后无法 redefine,这里用一个
     // fresh context 模拟「攻击者抢跑预置了 plain stash」的形态。)
     const hostile = loadBashPackageHomeHelper();
@@ -1096,11 +1121,11 @@ describe('cindy-bridge extension source', () => {
       configurable: true,
       enumerable: false,
     });
-    // 攻击者形态 stash 不被信任 → 走首次加载路径;env 未注入 → fail-closed。
-    expect(hostile.resolveBashPackageHome()).toBeUndefined();
+    // 攻击者形态 stash 不被信任 → 走首次加载路径;env 未注入 → 从 PI_CODING_AGENT_DIR 派生。
+    // PI_CODING_AGENT_DIR 本就常驻可写,控制它与控制注入 env 同级,不新增威胁面。
+    expect(hostile.resolveBashPackageHome()).toBe('/attacker/agent-home/bash-package-home');
 
-    // 非 Cindy 初始化的进程(env 从未注入、无 stash)保持 fail-closed 语义:
-    // 返回 undefined,下游 isolatedBashEnvironment 照旧 throw。
+    // 非 Cindy 初始化的进程(env 从未注入、无 stash、PI_CODING_AGENT_DIR 未设置)保持 fail-closed。
     const fresh = loadBashPackageHomeHelper();
     expect(fresh.resolveBashPackageHome()).toBeUndefined();
 
@@ -1125,6 +1150,24 @@ describe('cindy-bridge extension source', () => {
       source.indexOf('// 凭证/密钥路径特征由 maker-core 的单一来源生成'),
     );
     expect(helperSlice).not.toContain('CINDY_PI_PACKAGE_MANAGEMENT');
+  });
+
+  it('falls back to PI_CODING_AGENT_DIR derivation when neither env nor stash is available (subagent subprocess, #3132)', () => {
+    // subagent 子进程：父 bridge 已消费并删除 CINDY_PI_BASH_PACKAGE_HOME，子进程无 stash。
+    // PI_CODING_AGENT_DIR 存在且为绝对路径时从中派生；否则 fail-closed。
+    const sub = loadBashPackageHomeHelper();
+    sub.env.PI_CODING_AGENT_DIR = '/host/agent-home/run-tmp/abc';
+    expect(sub.resolveBashPackageHome()).toBe('/host/agent-home/run-tmp/abc/bash-package-home');
+    expect(sub.env.CINDY_PI_BASH_PACKAGE_HOME).toBeUndefined();
+
+    // 相对路径 fail-closed。
+    const rel = loadBashPackageHomeHelper();
+    rel.env.PI_CODING_AGENT_DIR = 'relative/path';
+    expect(rel.resolveBashPackageHome()).toBeUndefined();
+
+    // PI_CODING_AGENT_DIR 缺失 fail-closed。
+    const noDir = loadBashPackageHomeHelper();
+    expect(noDir.resolveBashPackageHome()).toBeUndefined();
   });
 
   it('blocks Pi package mutations before bash while preserving ordinary commands', () => {
