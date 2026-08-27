@@ -102,6 +102,25 @@ describe('capped Review workspace fingerprint', () => {
   );
 
   it.skipIf(process.platform === 'win32')(
+    'symlinkMode link-text distinguishes non-UTF-8 target bytes (#2463 review)',
+    async () => {
+      // readlink 默认按 UTF-8 解码,0xff / 0xfe 等非法字节都坍缩成替换字符:
+      // 原始字节不同的两个链接文本必须产生不同指纹。
+      const repoRoot = await makeTempDir();
+      const link = path.join(repoRoot, 'raw-link');
+      const opts = { symlinkMode: 'link-text' as const };
+
+      await fs.symlink(Buffer.from([0x2e, 0x2e, 0x2f, 0xff]), link);
+      const withFf = await fingerprintReviewCappedWorkspaceFiles(repoRoot, ['raw-link'], opts);
+      await fs.unlink(link);
+      await fs.symlink(Buffer.from([0x2e, 0x2e, 0x2f, 0xfe]), link);
+      const withFe = await fingerprintReviewCappedWorkspaceFiles(repoRoot, ['raw-link'], opts);
+
+      expect(withFe).not.toBe(withFf);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
     'symlinkMode link-text never reads target bytes (#2463 review)',
     async () => {
       // 指向敏感文件的链接:只绑定文本,目标内容变化不得进入指纹 ——

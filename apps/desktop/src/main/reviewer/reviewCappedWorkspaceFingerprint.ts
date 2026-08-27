@@ -221,17 +221,20 @@ export async function fingerprintReviewCappedWorkspaceFiles(
     if (entryBefore.isSymbolicLink() && options.symlinkMode === 'link-text') {
       // 绑定链接文本本身(即 symlink 的 Git 内容),零目标读取。文本读取前后
       // 各取一次,期间变化按既有稳定性语义抛 ChangedError。
-      const targetBefore = await fs.readlink(candidate);
+      // Buffer 读取:readlink 默认按 UTF-8 解码,非 UTF-8 目标字节会坍缩成
+      // 替换字符,不同原始字节映射同一记录 —— 文本必须按原始字节绑定与比较
+      // (Codex review)。
+      const targetBefore = await fs.readlink(candidate, { encoding: 'buffer' });
       const entryAfter = await lstatOrNull(candidate);
       const targetAfter = entryAfter?.isSymbolicLink()
-        ? await fs.readlink(candidate).catch(() => null)
+        ? await fs.readlink(candidate, { encoding: 'buffer' }).catch(() => null)
         : null;
-      if (!entryAfter || targetAfter !== targetBefore) {
+      if (!entryAfter || !targetAfter || !targetAfter.equals(targetBefore)) {
         throw new ReviewCappedWorkspaceChangedError(
           'A capped Review file changed while its content baseline was being prepared',
         );
       }
-      addRecord(hash, 'symlink-text', rawPath, targetBefore, entryBefore.mode);
+      addRecord(hash, 'symlink-text', rawPath, targetBefore.toString('base64'), entryBefore.mode);
       continue;
     }
     totalBytes += await hashRegularFile({
