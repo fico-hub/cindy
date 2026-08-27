@@ -20,6 +20,14 @@ export interface ReviewCappedWorkspaceFingerprintOptions {
    * maxTotalBytes 互斥,同时给时以本字段为准。预算耗尽按超限 fail closed。
    */
   byteBudget?: { remainingBytes: number };
+  /**
+   * symlink 条目的绑定语义。默认 'resolve':解析目标并哈希目标字节,悬空或
+   * 解析出仓库边界一律 fail closed(父仓 capped 路径的既有安全姿态)。
+   * 'link-text':只绑定 Git 真正记录的链接文本(readlink),完全不解析、不打开
+   * 目标 —— dirty 子仓里指向子仓外(如 ../shared)或悬空的合法链接不再中止
+   * 快照,也杜绝经由链接读取边界外字节(Codex review #2515)。
+   */
+  symlinkMode?: 'resolve' | 'link-text';
 }
 
 export class ReviewCappedWorkspaceFingerprintError extends Error {}
@@ -209,6 +217,22 @@ export async function fingerprintReviewCappedWorkspaceFiles(
       throw new ReviewCappedWorkspaceFingerprintError(
         'Review can only content-fingerprint regular capped workspace files',
       );
+    }
+    if (entryBefore.isSymbolicLink() && options.symlinkMode === 'link-text') {
+      // 绑定链接文本本身(即 symlink 的 Git 内容),零目标读取。文本读取前后
+      // 各取一次,期间变化按既有稳定性语义抛 ChangedError。
+      const targetBefore = await fs.readlink(candidate);
+      const entryAfter = await lstatOrNull(candidate);
+      const targetAfter = entryAfter?.isSymbolicLink()
+        ? await fs.readlink(candidate).catch(() => null)
+        : null;
+      if (!entryAfter || targetAfter !== targetBefore) {
+        throw new ReviewCappedWorkspaceChangedError(
+          'A capped Review file changed while its content baseline was being prepared',
+        );
+      }
+      addRecord(hash, 'symlink-text', rawPath, targetBefore, entryBefore.mode);
+      continue;
     }
     totalBytes += await hashRegularFile({
       hash,

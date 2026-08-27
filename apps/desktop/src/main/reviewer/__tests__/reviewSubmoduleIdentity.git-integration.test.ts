@@ -581,6 +581,29 @@ describe('readReviewSubmoduleIdentity intent-to-add 状态绑定 (#2463 review)'
   });
 });
 
+describe('子仓 symlink 按链接文本绑定 (#2463 review)', () => {
+  it.skipIf(process.platform === 'win32')(
+    'binds a dirty submodule symlink pointing outside the sub without aborting',
+    async () => {
+      // 子仓里指向子仓外(../ 解析进父仓)或悬空的 symlink 是常见合法改动:
+      // 按目标解析会让整个快照 fail closed 中止 review;链接文本才是 Git 记录
+      // 的内容,文本变化必须改变身份。
+      const { parent, innermost } = await setupNestedChain(1);
+      parentPath = parent;
+      const link = path.join(innermost, 'escape-link');
+      await fs.symlink('../outside-a', link);
+
+      const withTargetA = await readReviewSubmoduleIdentity(parentPath, ['vendor/lib']);
+      await fs.unlink(link);
+      await fs.symlink('../outside-b', link);
+      const withTargetB = await readReviewSubmoduleIdentity(parentPath, ['vendor/lib']);
+
+      expect(withTargetA.identities).toHaveLength(1);
+      expect(withTargetB.identities).not.toEqual(withTargetA.identities);
+    },
+  );
+});
+
 describe('顶层 readStatus 的 --ignore-submodules=none (#2463 维护者 review)', () => {
   it('keeps an ignore=all submodule with untracked-only content visible in top-level status', async () => {
     // 父仓配置 submodule.<name>.ignore=all 时,不带 --ignore-submodules=none

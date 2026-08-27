@@ -395,6 +395,11 @@ async function readOneSubmoduleIdentity(
     consumePathBudget(budget, worktreePaths.length);
     dirtyContentFingerprint = await fingerprintReviewCappedWorkspaceFiles(subRoot, worktreePaths, {
       byteBudget: budget,
+      // symlink 绑定链接文本(Git 对 symlink 记录的内容就是文本):子仓里指向
+      // 子仓外(如 ../shared 解析进父仓)或悬空的链接是合法 Git 改动,按目标
+      // 解析会把整个快照 fail closed 中止;链接文本变化照样改变 manifest,
+      // 且完全不读取目标字节(Codex review)。
+      symlinkMode: 'link-text',
     });
     hashedContent = true;
   }
