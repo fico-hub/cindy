@@ -28,14 +28,26 @@ const log = createLogger('useRegionCaptureShortcut');
 /**
  * 模块级触发注册表: MainLayout 挂载 useRegionCaptureShortcut 时注册 trigger,
  * composer「+」菜单的「区域截图」入口(维护者要求的可发现入口)经
- * requestRegionCapture 复用同一触发 —— 同一路由目标解析、同一草稿附件管线,
- * 不另起第二套实现。
+ * requestRegionCapture 复用同一触发与草稿附件管线, 不另起第二套实现。
+ *
+ * 目标解析分两种: 快捷键无显式归属, 按当前路由解析(主区 route-owner);
+ * 菜单入口长在具体 composer 上, 由 ChatInput 传入自己的归属(sessionId +
+ * draftKey) —— Orca Worker 面板/分屏内嵌实例的菜单点击写入自己的草稿,
+ * 不会落到路由所有者(review P2)。
  */
-let activeTrigger: (() => boolean) | null = null;
+let activeTrigger: ((explicitTarget?: RegionCaptureTarget) => boolean) | null = null;
 
-/** composer 菜单入口调用; MainLayout 未挂载(理论不可达)时安全返回 false。 */
-export function requestRegionCapture(): boolean {
-  return activeTrigger?.() ?? false;
+/** composer 菜单入口调用; 传入该 composer 自己的归属。未注册面返回 false。 */
+export function requestRegionCapture(explicitTarget?: RegionCaptureTarget): boolean {
+  return activeTrigger?.(explicitTarget) ?? false;
+}
+
+/**
+ * 菜单项可见性门: 分离侧栏等无 MainLayout 的窗口没有注册 trigger, 菜单里
+ * 不显示入口(点了也只会静默失败)。每窗口静态, 不需要响应式订阅。
+ */
+export function isRegionCaptureAvailable(): boolean {
+  return activeTrigger !== null;
 }
 
 /**
@@ -187,10 +199,8 @@ export function useRegionCaptureShortcut(): () => boolean {
     );
   }, [location.pathname]);
 
-  const trigger = useCallback((): boolean => {
-    // 目标在按键瞬间定格: 系统选区期间切路由不改变归属, 结果仍进当初的草稿。
-    const target = resolveRegionCaptureTargetFromPath(pathnameRef.current);
-    if (!target) return false;
+  // 目标已定格后的捕获执行体: 快捷键(路由解析)与菜单入口(显式归属)共用。
+  const runCapture = useCallback((target: RegionCaptureTarget): boolean => {
     // 迟到结果的写入闸(三个信号任一命中即丢弃, 不回填已易主/已丢弃的草稿):
     // 1. data owner generation —— draftKey 按当前登录身份命名空间解析
     //    (owner:<id>:<key>), 选区/缓存写入期间登出或切换账号后, 旧身份发起的
@@ -240,12 +250,23 @@ export function useRegionCaptureShortcut(): () => boolean {
     return true;
   }, []);
 
+  // 快捷键/菜单命令通道的触发面: 目标在触发瞬间按当前路由定格(系统选区期间
+  // 切路由不改变归属, 结果仍进当初的草稿)。注意 useAppShortcut 会把
+  // KeyboardEvent 传进来, 这里刻意不接收参数, 显式目标只走注册表通道。
+  const trigger = useCallback((): boolean => {
+    const target = resolveRegionCaptureTargetFromPath(pathnameRef.current);
+    if (!target) return false;
+    return runCapture(target);
+  }, [runCapture]);
+
   useAppShortcut('capture-region', trigger);
   useEffect(() => {
-    activeTrigger = trigger;
+    const invoke = (explicitTarget?: RegionCaptureTarget): boolean =>
+      explicitTarget ? runCapture(explicitTarget) : trigger();
+    activeTrigger = invoke;
     return () => {
-      if (activeTrigger === trigger) activeTrigger = null;
+      if (activeTrigger === invoke) activeTrigger = null;
     };
-  }, [trigger]);
+  }, [runCapture, trigger]);
   return trigger;
 }

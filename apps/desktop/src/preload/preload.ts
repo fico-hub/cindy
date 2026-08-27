@@ -3802,9 +3802,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // ── Image local cache (image-local-cache M4) ──
   /**
-   * Copy a local image file into the cache directory for the given session.
-   * Used by drag-and-drop attachments. Returns an xdt-image:// URL the
-   * renderer can use directly as an <img src>.
+   * Copy a local image file into the cindy-media blob store (ledger'd,
+   * zero-ref = draft, recycled when unreferenced). Used by drag-and-drop
+   * attachments. Returns a cindy-media:// URL the renderer can use directly
+   * as an <img src>. (Legacy xdt-image:// URLs remain readable but are no
+   * longer produced.)
    */
   cacheImageFromPath: (params: {
     sessionId: string;
@@ -3814,8 +3816,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('image-cache:from-path', params),
 
   /**
-   * Write a clipboard image buffer into the cache directory for the session.
-   * Used by clipboard paste. Returns an xdt-image:// URL.
+   * Write a clipboard image buffer into the cindy-media blob store (same
+   * draft semantics as cacheImageFromPath). Used by clipboard paste and
+   * region capture. Returns a cindy-media:// URL.
    */
   cacheImageFromBuffer: (params: {
     sessionId: string;

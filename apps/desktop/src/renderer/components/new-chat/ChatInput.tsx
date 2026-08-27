@@ -273,7 +273,7 @@ import {
   useComposerSendShortcutPreference,
 } from '@/hooks/useComposerSendShortcutPreference';
 import { usePromptRecommendationPreference } from '@/hooks/usePromptRecommendationPreference';
-import { requestRegionCapture } from '@/hooks/useRegionCaptureShortcut';
+import { isRegionCaptureAvailable, requestRegionCapture } from '@/hooks/useRegionCaptureShortcut';
 import {
   beginPromptRecommendationPrediction,
   dismissPromptRecommendation,
@@ -4297,17 +4297,22 @@ export function ChatInput({
         run: () => suggestionFileInputRef.current?.click(),
       });
     }
-    // 区域截图的可发现入口(维护者 review 要求): 复用 MainLayout 注册的同一
-    // 触发 —— 同一路由目标解析与草稿附件合并管线, 与快捷键行为完全一致。
-    actions.push({
-      id: 'capture-region',
-      label: t('regionCapture.menuItem'),
-      searchText: 'region screenshot capture',
-      disabled: composerMutationLocked,
-      run: () => {
-        requestRegionCapture();
-      },
-    });
+    // 区域截图的可发现入口(维护者 review 要求): 经注册表复用 MainLayout 的
+    // 同一捕获执行体与草稿附件管线, 但目标传本 composer 自己的归属 ——
+    // Orca Worker 面板/分屏内嵌实例的菜单点击写入自己的草稿, 不落到路由
+    // 所有者; 分离侧栏等无注册面的窗口不显示该项(review P2)。
+    if (storageKey && isRegionCaptureAvailable()) {
+      const captureTarget = { sessionId: sessionId ?? null, draftKey: storageKey };
+      actions.push({
+        id: 'capture-region',
+        label: t('regionCapture.menuItem'),
+        searchText: 'region screenshot capture',
+        disabled: composerMutationLocked,
+        run: () => {
+          requestRegionCapture(captureTarget);
+        },
+      });
+    }
     if (inSessionGoalEnabled || onNewGoal) {
       actions.push({
         id: 'new-goal',
@@ -4388,6 +4393,8 @@ export function ChatInput({
     onNewGoal,
     planModeEntry,
     runNewGoalAction,
+    sessionId,
+    storageKey,
     t,
     workingDir,
   ]);

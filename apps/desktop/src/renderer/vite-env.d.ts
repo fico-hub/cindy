@@ -3411,13 +3411,13 @@ interface ElectronAPI {
   // renderer 现在统一走 electronAPI.maker.* (定义见本文件下方 maker: { ... } 块)。
 
   // ── Image local cache (image-local-cache M4) ──
-  /** Copy a local image into the cache for the session; returns xdt-image:// url. */
+  /** Copy a local image into the cindy-media blob store; returns cindy-media:// url. */
   cacheImageFromPath: (params: {
     sessionId: string;
     sourcePath: string;
     originalName: string;
   }) => Promise<{ url: string; filename: string }>;
-  /** Write a clipboard image buffer into the cache; returns xdt-image:// url. */
+  /** Write a clipboard image buffer into the cindy-media blob store; returns cindy-media:// url. */
   cacheImageFromBuffer: (params: {
     sessionId: string;
     buffer: Uint8Array;
