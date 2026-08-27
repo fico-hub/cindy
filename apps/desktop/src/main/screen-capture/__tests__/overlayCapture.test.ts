@@ -10,6 +10,8 @@ const mocks = vi.hoisted(() => {
   };
   class FakeBrowserWindow {
     static instances: FakeBrowserWindow[] = [];
+    // 默认非 null = 应用仍持有焦点(content-ready 时的焦点复查放行)。
+    static getFocusedWindow = vi.fn((): unknown => ({}));
     options: Record<string, unknown>;
     destroyed = false;
     private listeners = new Map<string, Array<() => void>>();
@@ -245,6 +247,18 @@ describe('captureRegionViaOverlay', () => {
     await flushLoad();
     emitOverlayResult(501, { kind: 'cancel' });
     await expect(pending).resolves.toEqual({ cancelled: true });
+  });
+
+  // 触发到帧就绪之间用户 Alt-Tab 切走 → 不抢回焦点、不拿全屏置顶冻结帧盖住
+  // 用户已切到的应用, 按取消收口(review P2)。
+  it('cancels instead of stealing focus when the app lost focus before content-ready', async () => {
+    FakeBrowserWindow.getFocusedWindow.mockReturnValueOnce(null);
+    const pending = captureRegionViaOverlay(5_000, 'drag to select', TEST_PALETTE);
+    const overlay = await flushLoad();
+    emitOverlayContentReady(501);
+    await expect(pending).resolves.toEqual({ cancelled: true });
+    expect(overlay.show).not.toHaveBeenCalled();
+    expect(overlay.destroyed).toBe(true);
   });
 
   // 一次性覆盖层 renderer 崩溃必须立即收口: 不能让 captureInFlight 挡后续

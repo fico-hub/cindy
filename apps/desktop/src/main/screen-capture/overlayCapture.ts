@@ -225,6 +225,15 @@ export async function captureRegionViaOverlay(
       const onContentReady = (event: Electron.IpcMainEvent) => {
         if (settled || overlay.isDestroyed()) return;
         if (event.sender.id !== overlay.webContents.id) return;
+        // 触发时应用必然持有焦点(应用级快捷键); 就绪时应用已无聚焦窗口 =
+        // 用户在帧传输/解码窗口期切去了别的应用 —— 不抢回焦点、不拿全屏
+        // 置顶冻结帧盖住人家, 按取消收口(review P2)。overlay 自身 show 前
+        // 不可能是 focused window, 不会误判。
+        if (BrowserWindow.getFocusedWindow() === null) {
+          logger.debug('app lost focus before overlay became ready, cancelling');
+          settle(() => resolve({ cancelled: true }));
+          return;
+        }
         overlay.show();
         overlay.focus();
       };
