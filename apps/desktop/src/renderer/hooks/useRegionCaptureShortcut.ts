@@ -26,6 +26,19 @@ import { useAppShortcut } from './useAppShortcut';
 const log = createLogger('useRegionCaptureShortcut');
 
 /**
+ * 模块级触发注册表: MainLayout 挂载 useRegionCaptureShortcut 时注册 trigger,
+ * composer「+」菜单的「区域截图」入口(维护者要求的可发现入口)经
+ * requestRegionCapture 复用同一触发 —— 同一路由目标解析、同一草稿附件管线,
+ * 不另起第二套实现。
+ */
+let activeTrigger: (() => boolean) | null = null;
+
+/** composer 菜单入口调用; MainLayout 未挂载(理论不可达)时安全返回 false。 */
+export function requestRegionCapture(): boolean {
+  return activeTrigger?.() ?? false;
+}
+
+/**
  * capture-region 快捷键的全局消费端 —— 只在 MainLayout 挂载一次。
  *
  * 单点注册 + 触发时按当前路由解析目标, 而不是挂在各个 attachmentState owner
@@ -228,5 +241,11 @@ export function useRegionCaptureShortcut(): () => boolean {
   }, []);
 
   useAppShortcut('capture-region', trigger);
+  useEffect(() => {
+    activeTrigger = trigger;
+    return () => {
+      if (activeTrigger === trigger) activeTrigger = null;
+    };
+  }, [trigger]);
   return trigger;
 }

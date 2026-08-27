@@ -1,7 +1,19 @@
 import { describe, expect, it } from 'vitest';
 
 import { NEW_MAKER_DRAFT_KEY } from '../../features/cc-agent/newMakerDraftKeys';
-import { resolveRegionCaptureTargetFromPath } from '../useRegionCaptureShortcut';
+import {
+  requestRegionCapture,
+  resolveRegionCaptureTargetFromPath,
+} from '../useRegionCaptureShortcut';
+
+describe('requestRegionCapture', () => {
+  // composer「+」菜单入口在 MainLayout 未注册 trigger 时(理论不可达)安全
+  // 返回 false, 不抛错。注册后的行为与快捷键共用同一 trigger, 由 MainLayout
+  // 单点注册保证。
+  it('safely returns false when no trigger is registered', () => {
+    expect(requestRegionCapture()).toBe(false);
+  });
+});
 
 describe('resolveRegionCaptureTargetFromPath', () => {
   it('session route → that session (draft key = session id)', () => {

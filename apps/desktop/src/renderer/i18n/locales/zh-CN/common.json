@@ -18,6 +18,7 @@
     "REMOTE_WORKDIR_UNAVAILABLE": "远程项目目录不可访问，请恢复网络盘连接后重试。"
   },
   "regionCapture": {
+    "menuItem": "区域截图",
     "hint": "拖动框选要截取的区域，按 Esc 取消",
     "failedToast": "截图失败，请重试"
   },

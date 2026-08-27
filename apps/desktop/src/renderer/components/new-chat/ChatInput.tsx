@@ -273,6 +273,7 @@ import {
   useComposerSendShortcutPreference,
 } from '@/hooks/useComposerSendShortcutPreference';
 import { usePromptRecommendationPreference } from '@/hooks/usePromptRecommendationPreference';
+import { requestRegionCapture } from '@/hooks/useRegionCaptureShortcut';
 import {
   beginPromptRecommendationPrediction,
   dismissPromptRecommendation,
@@ -4296,6 +4297,17 @@ export function ChatInput({
         run: () => suggestionFileInputRef.current?.click(),
       });
     }
+    // 区域截图的可发现入口(维护者 review 要求): 复用 MainLayout 注册的同一
+    // 触发 —— 同一路由目标解析与草稿附件合并管线, 与快捷键行为完全一致。
+    actions.push({
+      id: 'capture-region',
+      label: t('regionCapture.menuItem'),
+      searchText: 'region screenshot capture',
+      disabled: composerMutationLocked,
+      run: () => {
+        requestRegionCapture();
+      },
+    });
     if (inSessionGoalEnabled || onNewGoal) {
       actions.push({
         id: 'new-goal',

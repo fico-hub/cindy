@@ -18,6 +18,7 @@
     "REMOTE_WORKDIR_UNAVAILABLE": "遠端專案目錄不可訪問，請恢復網路盤連線後重試。"
   },
   "regionCapture": {
+    "menuItem": "區域截圖",
     "hint": "拖曳框選要擷取的區域，按 Esc 取消",
     "failedToast": "截圖失敗，請重試"
   },
