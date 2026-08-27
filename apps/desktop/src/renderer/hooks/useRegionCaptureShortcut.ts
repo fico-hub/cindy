@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useSyncExternalStore } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation } from 'react-router-dom';
 
@@ -36,18 +36,40 @@ const log = createLogger('useRegionCaptureShortcut');
  * 不会落到路由所有者(review P2)。
  */
 let activeTrigger: ((explicitTarget?: RegionCaptureTarget) => boolean) | null = null;
+const availabilityListeners = new Set<() => void>();
+
+function setActiveTrigger(
+  next: ((explicitTarget?: RegionCaptureTarget) => boolean) | null,
+): void {
+  if (activeTrigger === next) return;
+  activeTrigger = next;
+  for (const listener of availabilityListeners) listener();
+}
 
 /** composer 菜单入口调用; 传入该 composer 自己的归属。未注册面返回 false。 */
 export function requestRegionCapture(explicitTarget?: RegionCaptureTarget): boolean {
   return activeTrigger?.(explicitTarget) ?? false;
 }
 
-/**
- * 菜单项可见性门: 分离侧栏等无 MainLayout 的窗口没有注册 trigger, 菜单里
- * 不显示入口(点了也只会静默失败)。每窗口静态, 不需要响应式订阅。
- */
 export function isRegionCaptureAvailable(): boolean {
   return activeTrigger !== null;
+}
+
+export function subscribeRegionCaptureAvailability(listener: () => void): () => void {
+  availabilityListeners.add(listener);
+  return () => {
+    availabilityListeners.delete(listener);
+  };
+}
+
+/**
+ * 菜单项可见性门(响应式): 分离侧栏等无 MainLayout 的窗口没有注册 trigger,
+ * 菜单里不显示入口。必须走订阅而非一次性读取 —— React 挂载顺序里子组件
+ * (ChatInput)的 useMemo 先于父组件(MainLayout)的注册 effect 执行, 非响应
+ * 式读取会让首屏菜单永远缺这一项(review P1)。
+ */
+export function useRegionCaptureAvailable(): boolean {
+  return useSyncExternalStore(subscribeRegionCaptureAvailability, isRegionCaptureAvailable);
 }
 
 /**
@@ -263,9 +285,9 @@ export function useRegionCaptureShortcut(): () => boolean {
   useEffect(() => {
     const invoke = (explicitTarget?: RegionCaptureTarget): boolean =>
       explicitTarget ? runCapture(explicitTarget) : trigger();
-    activeTrigger = invoke;
+    setActiveTrigger(invoke);
     return () => {
-      if (activeTrigger === invoke) activeTrigger = null;
+      if (activeTrigger === invoke) setActiveTrigger(null);
     };
   }, [runCapture, trigger]);
   return trigger;

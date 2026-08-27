@@ -273,7 +273,7 @@ import {
   useComposerSendShortcutPreference,
 } from '@/hooks/useComposerSendShortcutPreference';
 import { usePromptRecommendationPreference } from '@/hooks/usePromptRecommendationPreference';
-import { isRegionCaptureAvailable, requestRegionCapture } from '@/hooks/useRegionCaptureShortcut';
+import { requestRegionCapture, useRegionCaptureAvailable } from '@/hooks/useRegionCaptureShortcut';
 import {
   beginPromptRecommendationPrediction,
   dismissPromptRecommendation,
@@ -4287,6 +4287,7 @@ export function ChatInput({
     onNewGoal?.(draftText);
   }, [inSessionGoalEnabled, onNewGoal]);
 
+  const regionCaptureAvailable = useRegionCaptureAvailable();
   const composerSuggestionActions = useMemo<ComposerSuggestionAction[]>(() => {
     const actions: ComposerSuggestionAction[] = [];
     if (localAttachmentPickerEnabled) {
@@ -4300,8 +4301,9 @@ export function ChatInput({
     // 区域截图的可发现入口(维护者 review 要求): 经注册表复用 MainLayout 的
     // 同一捕获执行体与草稿附件管线, 但目标传本 composer 自己的归属 ——
     // Orca Worker 面板/分屏内嵌实例的菜单点击写入自己的草稿, 不落到路由
-    // 所有者; 分离侧栏等无注册面的窗口不显示该项(review P2)。
-    if (storageKey && isRegionCaptureAvailable()) {
+    // 所有者; 分离侧栏等无注册面的窗口不显示该项(review P2)。可用性走
+    // 响应式订阅, MainLayout 注册 trigger 后本 memo 会重算(review P1)。
+    if (storageKey && regionCaptureAvailable) {
       const captureTarget = { sessionId: sessionId ?? null, draftKey: storageKey };
       actions.push({
         id: 'capture-region',
@@ -4392,6 +4394,7 @@ export function ChatInput({
     onExtraDirsChange,
     onNewGoal,
     planModeEntry,
+    regionCaptureAvailable,
     runNewGoalAction,
     sessionId,
     storageKey,
