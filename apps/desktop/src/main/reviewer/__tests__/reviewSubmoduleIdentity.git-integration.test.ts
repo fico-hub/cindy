@@ -602,6 +602,27 @@ describe('子仓 symlink 按链接文本绑定 (#2463 review)', () => {
       expect(withTargetB.identities).not.toEqual(withTargetA.identities);
     },
   );
+
+  it.skipIf(process.platform === 'win32')(
+    'binds a gitlink replaced by an outside-pointing symlink (typechange) without aborting',
+    async () => {
+      // gitlink 整个被 symlink 替换(typechange):sub 字段仍标 S 路由到子仓
+      // 分支;链接悬空 / 指向仓库外同样是合法 Git 状态,须按链接文本绑定。
+      const { parent } = await setupNestedChain(1);
+      parentPath = parent;
+      const subDir = path.join(parent, 'vendor', 'lib');
+      await fs.rm(subDir, { recursive: true, force: true });
+      await fs.symlink('../outside-a', subDir);
+
+      const withTargetA = await readReviewSubmoduleIdentity(parentPath, ['vendor/lib']);
+      await fs.unlink(subDir);
+      await fs.symlink('../outside-b', subDir);
+      const withTargetB = await readReviewSubmoduleIdentity(parentPath, ['vendor/lib']);
+
+      expect(withTargetA.identities[0].subHead).toBe('typechange');
+      expect(withTargetB.identities).not.toEqual(withTargetA.identities);
+    },
+  );
 });
 
 describe('顶层 readStatus 的 --ignore-submodules=none (#2463 维护者 review)', () => {

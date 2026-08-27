@@ -301,14 +301,16 @@ async function readOneSubmoduleIdentity(
   if (!subEntry.isDirectory()) {
     // gitlink 被普通文件 / 符号链接替换(typechange):porcelain 的 sub 字段仍
     // 标 S,statusReader 把它当 submodule 路由到这里;把 rev-parse 的 cwd 指到
-    // 普通文件只会 ENOTDIR。这类条目的新鲜度真身就是那份文件字节 —— 交给
-    // capped 指纹器绑定内容(同一套路径守卫、敏感过滤与共享预算);符号链接
-    // 指向目录等超出表达能力的形态由指纹器 fail closed。
+    // 普通文件只会 ENOTDIR。普通文件的新鲜度真身是那份文件字节 —— 交给
+    // capped 指纹器绑定内容(同一套路径守卫、敏感过滤与共享预算);symlink
+    // 替换与内层 dirty symlink 同语义按链接文本绑定 —— gitlink 换成悬空或
+    // 指向仓库外的链接是 Git 可表达的合法 typechange,按目标解析会中止整个
+    // 快照(Codex review)。
     consumePathBudget(budget, 1);
     const typechangeFingerprint = await fingerprintReviewCappedWorkspaceFiles(
       repoRoot,
       [subPath],
-      { byteBudget: budget },
+      { byteBudget: budget, symlinkMode: 'link-text' },
     );
     return {
       identity: {
