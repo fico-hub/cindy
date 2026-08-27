@@ -9,7 +9,10 @@ vi.setConfig({ testTimeout: process.platform === 'win32' ? 120_000 : 60_000 });
 import { runGit } from '../../git-review/gitRunner';
 import { readStatus } from '../../git-review/statusReader';
 import type { ReviewScope } from '../../git-review/types';
-import { readReviewSubmoduleIdentity } from '../reviewSubmoduleIdentity';
+import {
+  readReviewSubmoduleIdentity,
+  ReviewSubmoduleIdentityError,
+} from '../reviewSubmoduleIdentity';
 
 let workRoot: string;
 let parentPath: string;
@@ -621,6 +624,30 @@ describe('子仓 symlink 按链接文本绑定 (#2463 review)', () => {
 
       expect(withTargetA.identities[0].subHead).toBe('typechange');
       expect(withTargetB.identities).not.toEqual(withTargetA.identities);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'fails closed when a symlinked ancestor resolves the sub outside the parent repo',
+    async () => {
+      // 祖先目录 vendor 被换成指向父仓外的 symlink:lstat/realpath 跟随中间
+      // 链接,仓外 checkout 的 toplevel 等于其自身,仅比对「toplevel === 自身」
+      // 拦不住 —— 解析结果必须仍在父仓边界内,否则拒绝读取仓外 status 与字节。
+      const { parent } = await setupNestedChain(1);
+      parentPath = parent;
+      const escapeRoot = path.join(workRoot, 'escape-root');
+      const escapeCheckout = path.join(escapeRoot, 'lib');
+      await initRepo(escapeCheckout);
+      await fs.writeFile(path.join(escapeCheckout, 'evil.txt'), 'outside\n');
+      await runGit(['add', 'evil.txt'], { cwd: escapeCheckout });
+      await runGit(['commit', '--no-gpg-sign', '-m', 'outside seed'], { cwd: escapeCheckout });
+
+      await fs.rm(path.join(parent, 'vendor'), { recursive: true, force: true });
+      await fs.symlink(escapeRoot, path.join(parent, 'vendor'));
+
+      await expect(
+        readReviewSubmoduleIdentity(parentPath, ['vendor/lib']),
+      ).rejects.toBeInstanceOf(ReviewSubmoduleIdentityError);
     },
   );
 });

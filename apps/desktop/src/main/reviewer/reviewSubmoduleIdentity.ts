@@ -28,6 +28,7 @@ import path from 'node:path';
 import { promises as fsPromises } from 'node:fs';
 
 import { runGit } from '../git-review/gitRunner.js';
+import { isPathInside } from '../git-review/fsPathGuard.js';
 import {
   readStagedIndexIdentity,
   splitIntoBatches,
@@ -339,6 +340,16 @@ async function readOneSubmoduleIdentity(
     fsRealpath(toplevelOut.replace(process.platform === 'win32' ? /\r?\n$/ : /\n$/, '')),
     fsRealpath(subRoot),
   ]);
+  // 边界校验:祖先目录被替换成指向父仓外的 symlink 时,lstat/realpath 会
+  // 跟随中间链接把 subRoot 解析到仓外 —— 那里的 checkout 有自己的 toplevel,
+  // 仅比对「toplevel === 自身」拦不住。解析结果必须仍在父仓 realpath 边界
+  // 内,否则 fail closed,不读取仓外 status 与字节(Codex review)。
+  const repoRootReal = await fsRealpath(repoRoot);
+  if (!isPathInside(repoRootReal, subRootReal)) {
+    throw new ReviewSubmoduleIdentityError(
+      `Review cannot bind submodule ${subPath}: worktree resolves outside its parent repository`,
+    );
+  }
   if (toplevelReal !== subRootReal) {
     // toplevel 归属不是子仓自身 = 没有独立 git 身份。只有**空目录**是合法的
     // deinit 形态可以稳定归入 'uninitialized';非空普通目录(.git 被移除、
