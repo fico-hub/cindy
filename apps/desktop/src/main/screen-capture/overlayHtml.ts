@@ -132,10 +132,20 @@ const OVERLAY_SCRIPT = `
   });
   // 失焦取消(切走窗口/Alt-Tab)。窗口刚显示时部分 WM 会派发瞬时 blur, 给宽限;
   // 起点在帧解码完成(即将 show)时重置, 覆盖解码耗时超过宽限窗口的情况。
+  // 宽限期内的 blur 不能永久丢弃(它可能是用户立即切走的唯一一次事件):
+  // 宽限期结束后复查焦点, 仍未持有说明是真实失焦, 补发取消 —— 否则全屏
+  // 置顶冻结帧会一直遮到总超时(review P2)。
+  var GRACE_MS = 300;
   var mountedAt = Date.now();
   window.addEventListener('blur', function () {
-    if (Date.now() - mountedAt < 300) return;
-    report({ kind: 'cancel' });
+    var elapsed = Date.now() - mountedAt;
+    if (elapsed >= GRACE_MS) {
+      report({ kind: 'cancel' });
+      return;
+    }
+    setTimeout(function () {
+      if (!document.hasFocus()) report({ kind: 'cancel' });
+    }, GRACE_MS - elapsed + 50);
   });
 
   api.announceReady();
