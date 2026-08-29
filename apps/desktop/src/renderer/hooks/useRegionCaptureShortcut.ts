@@ -36,6 +36,33 @@ const log = createLogger('useRegionCaptureShortcut');
  * 不会落到路由所有者(review P2)。
  */
 let activeTrigger: ((explicitTarget?: RegionCaptureTarget) => boolean) | null = null;
+
+/**
+ * composer 突变锁注册表(review P1): ChatInput 在 composerMutationLocked
+ * (disabled / sendDispatchInFlight / 语音占用)期间按 draftKey 登记。快捷键
+ * 触发与迟到合并都要过这道门 —— 菜单项靠 disabled 挡住了, 快捷键不能绕过:
+ * 发送 dispatch 期间改写草稿会与发送清理竞态(已发文本可能被当作"更新的
+ * 输入"二次发送), 禁用态(review/worktree 准备中)composer 也不该被塞入
+ * 无法移除的附件。同一 draftKey 可能多实例挂载(分屏同会话), 用 token 集合。
+ */
+const composerCaptureLocks = new Map<string, Set<symbol>>();
+
+export function registerComposerCaptureLock(draftKey: string): () => void {
+  const token = Symbol('composer-capture-lock');
+  const set = composerCaptureLocks.get(draftKey) ?? new Set<symbol>();
+  set.add(token);
+  composerCaptureLocks.set(draftKey, set);
+  return () => {
+    const current = composerCaptureLocks.get(draftKey);
+    if (!current) return;
+    current.delete(token);
+    if (current.size === 0) composerCaptureLocks.delete(draftKey);
+  };
+}
+
+export function isComposerCaptureLocked(draftKey: string): boolean {
+  return (composerCaptureLocks.get(draftKey)?.size ?? 0) > 0;
+}
 const availabilityListeners = new Set<() => void>();
 
 function setActiveTrigger(
@@ -223,6 +250,9 @@ export function useRegionCaptureShortcut(): () => boolean {
 
   // 目标已定格后的捕获执行体: 快捷键(路由解析)与菜单入口(显式归属)共用。
   const runCapture = useCallback((target: RegionCaptureTarget): boolean => {
+    // 目标 composer 处于突变锁(发送中/禁用/语音占用)时不启动捕获 —— 与
+    // 菜单项 disabled 同语义, 快捷键不消费按键(review P1)。
+    if (isComposerCaptureLocked(target.draftKey)) return false;
     // 迟到结果的写入闸(三个信号任一命中即丢弃, 不回填已易主/已丢弃的草稿):
     // 1. data owner generation —— draftKey 按当前登录身份命名空间解析
     //    (owner:<id>:<key>), 选区/缓存写入期间登出或切换账号后, 旧身份发起的
@@ -249,7 +279,10 @@ export function useRegionCaptureShortcut(): () => boolean {
     const isTargetStillValid = () =>
       isDataOwnerGenerationCurrent(dataOwner) &&
       !draftHandedOff &&
-      isDraftDiscardTokenCurrent(discardToken);
+      isDraftDiscardTokenCurrent(discardToken) &&
+      // 选区期间目标 composer 进入发送 dispatch/禁用态 → 不在此瞬间改写其
+      // 草稿(与发送清理竞态, review P1)。图片已进系统剪贴板, 用户可粘贴。
+      !isComposerCaptureLocked(target.draftKey);
     void (async () => {
       try {
         const result = await window.electronAPI.screenCapture.captureRegion({

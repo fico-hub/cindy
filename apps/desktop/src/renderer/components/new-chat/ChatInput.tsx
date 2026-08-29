@@ -275,7 +275,11 @@ import {
   useComposerSendShortcutPreference,
 } from '@/hooks/useComposerSendShortcutPreference';
 import { usePromptRecommendationPreference } from '@/hooks/usePromptRecommendationPreference';
-import { requestRegionCapture, useRegionCaptureAvailable } from '@/hooks/useRegionCaptureShortcut';
+import {
+  registerComposerCaptureLock,
+  requestRegionCapture,
+  useRegionCaptureAvailable,
+} from '@/hooks/useRegionCaptureShortcut';
 import {
   beginPromptRecommendationPrediction,
   dismissPromptRecommendation,
@@ -3051,6 +3055,13 @@ export function ChatInput({
     currentStorageKey: storageKeyForDraftRef.current,
   });
   const composerMutationLocked = composerEditorLocked || voiceBusyOnCurrentComposer;
+  // 把本 composer 的突变锁按 draftKey 发布给区域截图注册表: 快捷键与迟到
+  // 合并据此避开发送中/禁用态的草稿(菜单项另有 disabled, 这里管的是绕过
+  // 菜单的路径, review P1)。
+  useEffect(() => {
+    if (!storageKey || !composerMutationLocked) return;
+    return registerComposerCaptureLock(storageKey);
+  }, [storageKey, composerMutationLocked]);
   const composerTypingLocked =
     disabled || (sendDispatchInFlight && !allowTypeDuringSend) || voiceBusyOnCurrentComposer;
   composerMutationLockedRef.current = composerTypingLocked;

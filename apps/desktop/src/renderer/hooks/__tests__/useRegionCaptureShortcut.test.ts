@@ -2,9 +2,30 @@ import { describe, expect, it } from 'vitest';
 
 import { NEW_MAKER_DRAFT_KEY } from '../../features/cc-agent/newMakerDraftKeys';
 import {
+  isComposerCaptureLocked,
+  registerComposerCaptureLock,
   requestRegionCapture,
   resolveRegionCaptureTargetFromPath,
 } from '../useRegionCaptureShortcut';
+
+describe('composer capture lock registry', () => {
+  // 同一 draftKey 多实例挂载(分屏同会话): 任一实例仍锁定即视为锁定;
+  // 解锁按 token 对称, 不误清其它实例的锁。
+  it('tracks per-draftKey locks with multi-mount tokens', () => {
+    expect(isComposerCaptureLocked('s1')).toBe(false);
+    const releaseA = registerComposerCaptureLock('s1');
+    const releaseB = registerComposerCaptureLock('s1');
+    expect(isComposerCaptureLocked('s1')).toBe(true);
+    releaseA();
+    expect(isComposerCaptureLocked('s1')).toBe(true);
+    releaseB();
+    expect(isComposerCaptureLocked('s1')).toBe(false);
+    // release 幂等
+    releaseB();
+    expect(isComposerCaptureLocked('s1')).toBe(false);
+    expect(isComposerCaptureLocked('s2')).toBe(false);
+  });
+});
 
 describe('requestRegionCapture', () => {
   // composer「+」菜单入口在 MainLayout 未注册 trigger 时(理论不可达)安全
