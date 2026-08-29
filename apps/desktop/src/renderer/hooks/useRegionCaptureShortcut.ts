@@ -46,17 +46,39 @@ let activeTrigger: ((explicitTarget?: RegionCaptureTarget) => boolean) | null = 
  * 无法移除的附件。同一 draftKey 可能多实例挂载(分屏同会话), 用 token 集合。
  */
 const composerCaptureLocks = new Map<string, Set<symbol>>();
+// 锁变更通知: guest 快捷键转发的可用性上报要随锁变化刷新(见下方
+// setTargetAvailable effect), 否则锁定期间 main 仍会拦下 webview 按键、
+// 吞掉网页原生处理(review P2)。version 供 useSyncExternalStore 做快照。
+const captureLockListeners = new Set<() => void>();
+let captureLockVersion = 0;
+
+function notifyCaptureLockChange(): void {
+  captureLockVersion += 1;
+  for (const listener of captureLockListeners) listener();
+}
+
+export function subscribeComposerCaptureLocks(listener: () => void): () => void {
+  captureLockListeners.add(listener);
+  return () => {
+    captureLockListeners.delete(listener);
+  };
+}
+
+export function getComposerCaptureLockVersion(): number {
+  return captureLockVersion;
+}
 
 export function registerComposerCaptureLock(draftKey: string): () => void {
   const token = Symbol('composer-capture-lock');
   const set = composerCaptureLocks.get(draftKey) ?? new Set<symbol>();
   set.add(token);
   composerCaptureLocks.set(draftKey, set);
+  notifyCaptureLockChange();
   return () => {
     const current = composerCaptureLocks.get(draftKey);
-    if (!current) return;
-    current.delete(token);
+    if (!current || !current.delete(token)) return;
     if (current.size === 0) composerCaptureLocks.delete(draftKey);
+    notifyCaptureLockChange();
   };
 }
 
@@ -239,14 +261,23 @@ export function useRegionCaptureShortcut(): () => boolean {
   const failedToastRef = useRef('');
   failedToastRef.current = t('regionCapture.failedToast');
 
-  // 向 main 上报"当前路由是否存在截图目标"—— webview guest 聚焦时的快捷键
-  // 转发以此决定要不要拦截按键: 无目标路由上拦截只会白吞网页对该组合键的
-  // 原生处理(review P2)。main 侧缺省视为无目标, 上报晚到只会少拦不会误拦。
+  // 向 main 上报"当前路由目标是否可消费"—— webview guest 聚焦时的快捷键
+  // 转发以此决定要不要拦截按键: 无目标路由、或目标 composer 处于突变锁
+  // (发送中/禁用/语音占用)时拦截只会白吞网页对该组合键的原生处理(renderer
+  // 侧 trigger 也会拒绝, 结果传不回 guest, review P2 两轮)。锁态经订阅纳入,
+  // 变化即重报; main 侧缺省视为无目标, 上报晚到只会少拦不会误拦。
+  const lockVersion = useSyncExternalStore(
+    subscribeComposerCaptureLocks,
+    getComposerCaptureLockVersion,
+  );
   useEffect(() => {
+    const target = resolveRegionCaptureTargetFromPath(location.pathname);
     window.electronAPI.screenCapture.setTargetAvailable(
-      resolveRegionCaptureTargetFromPath(location.pathname) !== null,
+      target !== null && !isComposerCaptureLocked(target.draftKey),
     );
-  }, [location.pathname]);
+    // lockVersion 只作重报信号, 不进计算。
+    void lockVersion;
+  }, [location.pathname, lockVersion]);
 
   // 目标已定格后的捕获执行体: 快捷键(路由解析)与菜单入口(显式归属)共用。
   const runCapture = useCallback((target: RegionCaptureTarget): boolean => {

@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 
 import { NEW_MAKER_DRAFT_KEY } from '../../features/cc-agent/newMakerDraftKeys';
 import {
+  getComposerCaptureLockVersion,
   isComposerCaptureLocked,
   registerComposerCaptureLock,
+  subscribeComposerCaptureLocks,
   requestRegionCapture,
   resolveRegionCaptureTargetFromPath,
 } from '../useRegionCaptureShortcut';
@@ -24,6 +26,26 @@ describe('composer capture lock registry', () => {
     releaseB();
     expect(isComposerCaptureLocked('s1')).toBe(false);
     expect(isComposerCaptureLocked('s2')).toBe(false);
+  });
+
+  // 锁变更要可订阅: guest 转发的可用性上报随锁变化重报, 否则锁定期间
+  // main 仍拦 webview 按键(review P2)。幂等 release 不产生通知。
+  it('notifies subscribers on lock changes and bumps the version', () => {
+    let notified = 0;
+    const unsubscribe = subscribeComposerCaptureLocks(() => {
+      notified += 1;
+    });
+    const before = getComposerCaptureLockVersion();
+    const release = registerComposerCaptureLock('s3');
+    expect(notified).toBe(1);
+    release();
+    expect(notified).toBe(2);
+    release();
+    expect(notified).toBe(2);
+    expect(getComposerCaptureLockVersion()).toBe(before + 2);
+    unsubscribe();
+    registerComposerCaptureLock('s3');
+    expect(notified).toBe(2);
   });
 });
 

@@ -801,9 +801,10 @@ export function installBrowserGuestHandlers(
     }
     target = target && !target.isDestroyed() ? target : hostContents;
     if (target.isDestroyed()) return;
-    // 截图转发只在宿主当前路由存在目标 composer 时拦截: 无目标时 MainLayout
-    // 的 trigger 会返回 false 且结果无法传回 guest —— 拦了等于白吞网页对该
-    // 组合键的原生处理(review P2)。可用性由 renderer 随路由变化上报。
+    // 截图转发只在宿主当前路由存在"可消费"目标 composer 时拦截: 无目标或
+    // 目标处于突变锁(发送中/禁用/语音占用)时 MainLayout 的 trigger 会返回
+    // false 且结果无法传回 guest —— 拦了等于白吞网页对该组合键的原生处理
+    // (review P2 两轮)。可用性由 renderer 随路由与 composer 锁变化上报。
     if (action.kind === 'capture-region' && !hasRegionCaptureTarget(target.id)) return;
     event.preventDefault();
     if (action.kind === 'focus-url-bar') {
