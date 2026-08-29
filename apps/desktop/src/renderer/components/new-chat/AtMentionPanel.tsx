@@ -71,7 +71,8 @@ function isPluginEntry(entry: ComposerSuggestionEntry): boolean {
 }
 
 function isAddDirEntry(entry: ComposerSuggestionEntry): boolean {
-  return entry.kind === 'action' && entry.action.id === 'add-extra-dir';
+  return entry.kind === 'action'
+    && (entry.action.id === 'add-extra-dir' || entry.action.id === 'add-writable-dir');
 }
 
 export type AtPanelState =
@@ -98,6 +99,8 @@ interface AtMentionPanelProps {
   onRetry: () => void;
   /** Reference-directories management rows (empty query only; `+`-menu parity). */
   referenceDirs?: ReferenceDirsSection | null;
+  /** Explicit read-write directory grants (empty query only). */
+  writableDirs?: ReferenceDirsSection | null;
   /** `+` 的 MorphPopover 内嵌形态；容器、阴影与 outside-click 由 MorphPopover 负责。 */
   embedded?: boolean;
   /** Panel max-height in px. Defaults to 400 (chat view); NewMaker passes a smaller value so the popover doesn't cover the logo. */
@@ -111,6 +114,7 @@ const ACTION_ICONS: Record<ComposerSuggestionAction['id'], typeof Paperclip> = {
   'plan-mode': ClipboardList,
   collaboration: UsersRound,
   'add-extra-dir': FolderPlus,
+  'add-writable-dir': FolderPlus,
 };
 
 export function AtMentionPanel({
@@ -123,6 +127,7 @@ export function AtMentionPanel({
   onClose,
   onRetry,
   referenceDirs = null,
+  writableDirs = null,
   embedded = false,
   maxHeight = 400,
 }: AtMentionPanelProps) {
@@ -146,10 +151,16 @@ export function AtMentionPanel({
     ? indexed.filter(({ entry }) => !isPluginEntry(entry) && !isAddDirEntry(entry))
     : [];
   const pluginEntries = isEmptyRootQuery ? indexed.filter(({ entry }) => isPluginEntry(entry)) : [];
-  const addDirEntry = isEmptyRootQuery ? indexed.find(({ entry }) => isAddDirEntry(entry)) : undefined;
+  const addDirEntry = isEmptyRootQuery
+    ? indexed.find(({ entry }) => entry.kind === 'action' && entry.action.id === 'add-extra-dir')
+    : undefined;
+  const addWritableDirEntry = isEmptyRootQuery
+    ? indexed.find(({ entry }) => entry.kind === 'action' && entry.action.id === 'add-writable-dir')
+    : undefined;
   const addSectionVisible = isEmptyRootQuery && addEntries.length > 0;
   const pluginSectionVisible = isEmptyRootQuery && pluginEntries.length > 0;
   const referenceDirsVisible = isEmptyRootQuery && (!!referenceDirs || !!addDirEntry);
+  const writableDirsVisible = isEmptyRootQuery && (!!writableDirs || !!addWritableDirEntry);
 
   useEffect(() => {
     if (entries.length === 0) return;
@@ -577,6 +588,55 @@ export function AtMentionPanel({
                       </div>
                     )}
                     {addDirEntry && renderEntryRow(addDirEntry)}
+                  </>
+                )}
+                {writableDirsVisible && (
+                  <>
+                    {renderSectionHeader(t('extraDirs.writableSectionTitle'))}
+                    {writableDirs && writableDirs.dirs.length > 0 && (
+                      <div role="list" aria-label={t('extraDirs.writableSectionTitle')}>
+                        {writableDirs.dirs.map((p) => (
+                          <div
+                            key={p}
+                            className={cn(
+                              'group flex h-[44px] items-center gap-2 rounded-[6px] px-[10px]',
+                              'hover:bg-[var(--cmd-palette-item-hover)]',
+                            )}
+                          >
+                            <FolderPlus
+                              size={16}
+                              className="shrink-0 text-[var(--cmd-palette-item-icon)] opacity-60"
+                            />
+                            <Tip text={p} mono side="top">
+                              <span className="min-w-0 flex-1 truncate text-left text-14 text-[var(--cmd-palette-item-text)]">
+                                {extraDirBasename(p)}
+                              </span>
+                            </Tip>
+                            <button
+                              type="button"
+                              onMouseDown={(e) => e.preventDefault()}
+                              onClick={() => writableDirs.onRemove(p)}
+                              className={cn(
+                                'rounded-full p-1 opacity-0 transition-opacity',
+                                'hover:bg-[var(--cmd-palette-item-hover)]',
+                                'group-hover:opacity-70 hover:!opacity-100',
+                                'focus-visible:opacity-100 focus-visible:outline-none',
+                                'focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]',
+                              )}
+                              aria-label={t('extraDirs.remove', { name: extraDirBasename(p) })}
+                            >
+                              <X size={12} className="text-[var(--cmd-palette-item-text)]" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {writableDirs && writableDirs.dirs.length === 0 && (
+                      <div className="px-[10px] py-[8px] text-12 text-[var(--cmd-palette-item-meta)]">
+                        {t('extraDirs.writableEmpty')}
+                      </div>
+                    )}
+                    {addWritableDirEntry && renderEntryRow(addWritableDirEntry)}
                   </>
                 )}
               </>

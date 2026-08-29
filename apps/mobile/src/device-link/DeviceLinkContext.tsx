@@ -159,6 +159,8 @@ export interface DeviceLinkContextValue {
   // when its last owner unsubscribes.
   subscribe(owner: string, deviceId: string, topics: string[]): Promise<void>;
   unsubscribe(owner: string, deviceId: string, topics: string[]): Promise<void>;
+  /** 被控端 runtime Agent roster 发生变化时通知当前控制端页面。 */
+  onAgentsChanged: (listener: (deviceId: string) => void) => () => void;
 }
 
 const DeviceLinkContext = createContext<DeviceLinkContextValue | null>(null);
@@ -178,6 +180,7 @@ const CONTROLLER_CAPABILITIES = [
 // 响应性熔断;只用于判定并发返回的 unavailable 是否已被更晚目标应答推翻。
 const remoteResponseEvidenceEpochs = createPresenceAvailabilityEpochs();
 const remoteResponseEvidenceListeners = new Set<(deviceId: string) => void>();
+const remoteAgentRosterListeners = new Set<(deviceId: string) => void>();
 
 // 永久 link-close 后被抑制后台重建的设备(见 updateRehydrateSuppressionOnLinkClose)。
 // 模块级(与 remoteResponseEvidenceEpochs 同模式):sendOpenLink 等模块级函数也需要
@@ -195,6 +198,13 @@ function subscribeRemoteResponseEvidence(
 ): () => void {
   remoteResponseEvidenceListeners.add(listener);
   return () => remoteResponseEvidenceListeners.delete(listener);
+}
+
+function subscribeRemoteAgentRoster(
+  listener: (deviceId: string) => void,
+): () => void {
+  remoteAgentRosterListeners.add(listener);
+  return () => remoteAgentRosterListeners.delete(listener);
 }
 
 interface RehydrateState {
@@ -322,6 +332,20 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
   // 才会把同一代暴露给页面。这样全局补齐与页面首开使用完全相同的 single-flight key。
   const connectionEpochRef = useRef(0);
   const [lastPresenceSnapshot, setLastPresenceSnapshot] = useState<PresenceSnapshot | null>(null);
+  const accountGenerationRef = useRef<number | null>(null);
+
+  const clearPerAccountDeviceLinkState = useCallback(() => {
+    remoteSessionStore.clear();
+    remoteScheduleEventStore.clearAll();
+    revokedDevicesStore.clearAll();
+    resetDeviceResponsivenessTracking();
+    clearAllDeviceProviders();
+    clearAllDeviceModelMeta();
+    resetAgentCapabilitiesCache();
+    resetComposerPaletteCache();
+    setLastPresenceSnapshot(null);
+    setPresenceVersion((version) => version + 1);
+  }, []);
 
   /**
    * availability 放在 ref 里供 transport 同步读取；每次真实的三态变化也必须发布给
@@ -648,6 +672,9 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
   }, [rehydrateWithClient]);
 
   useEffect(() => {
+    const accountGenerationChanged =
+      accountGenerationRef.current !== auth.accountGeneration;
+    accountGenerationRef.current = auth.accountGeneration;
     if (!auth.isAuthenticated) {
       clientRef.current?.stop();
       clientRef.current = null;
@@ -666,22 +693,18 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
       backgroundReleaseInFlightRef.current = false;
       setStatus('stopped');
       setConnectionIssue(null);
-      remoteSessionStore.clear();
-      remoteScheduleEventStore.clearAll();
-      revokedDevicesStore.clearAll();
-      resetDeviceResponsivenessTracking();
       // 登出 / 进程内切号:清掉所有 per-account 残留,避免下一个账号串到上一个账号的数据。
       // - 供应商目录是 module 级单例缓存(useDeviceProviders 按 deviceId 命中),不随组件卸载清;
       // - lastPresenceSnapshot 是本 context 的 state,home 屏据它 patch 设备列表。
       // 二者若不重置,切号后会短暂看到 / 用到上一个账号的桌面端与供应商数据。
-      clearAllDeviceProviders();
-      clearAllDeviceModelMeta();
-      resetAgentCapabilitiesCache();
-      resetComposerPaletteCache();
-      setLastPresenceSnapshot(null);
-      setPresenceVersion((n) => n + 1);
+      clearPerAccountDeviceLinkState();
       return;
     }
+
+    // 账号切换期间 isAuthenticated 始终为 true，不能依赖上面的登出分支。
+    // effect cleanup 只负责 transport；新账号建连前必须同步清掉旧账号的任务、
+    // 调度、设备与 presence 投影，避免无设备的新账号永远保留旧快照。
+    if (accountGenerationChanged) clearPerAccountDeviceLinkState();
 
     const client = new DeviceLinkClient({
       getWsUrl: () => deviceLinkWsUrl(),
@@ -896,6 +919,9 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
           .catch(() => { /* 下次进入选择器或重连补齐时继续重试。 */ });
         void refreshDeviceCapabilities(client, deviceId);
       },
+      onAgentsChanged: (deviceId) => {
+        for (const listener of remoteAgentRosterListeners) listener(deviceId);
+      },
     }));
     // 与 transport-timeout link-close 同族的链路死锁自救(互为兜底):对端还在按
     // 可靠流给本机发帧,而本机侧 link 未就绪——典型成因是 link-accept 在弱网丢失
@@ -1072,8 +1098,10 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
       if (clientRef.current === client) clientRef.current = null;
     };
   }, [
+    auth.accountGeneration,
     auth.getAccessToken,
     auth.isAuthenticated,
+    clearPerAccountDeviceLinkState,
     clearRehydrateRetry,
     publishPresenceAvailabilityMutation,
     rehydrateWithClient,
@@ -1160,6 +1188,7 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
     invoke,
     subscribe,
     unsubscribe,
+    onAgentsChanged: subscribeRemoteAgentRoster,
   }), [
     closeLink,
     connectionEpoch,
@@ -1173,6 +1202,7 @@ export function DeviceLinkProvider({ children }: { children: ReactNode }) {
     status,
     subscribe,
     unsubscribe,
+    subscribeRemoteAgentRoster,
   ]);
 
   return <DeviceLinkContext.Provider value={value}>{children}</DeviceLinkContext.Provider>;
@@ -1191,6 +1221,7 @@ export function routeFrame(env: Envelope, handlers: {
   onAccessRevoked?: (deviceId: string) => void;
   onLinkClosed?: (deviceId: string, reason?: string) => void;
   onProviderChanged?: (deviceId: string) => void;
+  onAgentsChanged?: (deviceId: string) => void;
 } = {}): void {
   const peerLinkClosed = handlePeerLinkCloseFrame(
     env,
@@ -1205,6 +1236,10 @@ export function routeFrame(env: Envelope, handlers: {
   const push = env.payload as PushPayload;
   if (push.channel === 'maker:provider:changed') {
     handlers.onProviderChanged?.(env.src);
+    return;
+  }
+  if (push.channel === 'maker:agents:changed') {
+    handlers.onAgentsChanged?.(env.src);
     return;
   }
   if (push.channel === 'maker:schedule:event') {

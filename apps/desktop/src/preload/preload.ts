@@ -193,6 +193,7 @@ import type {
   DesktopAccountDeletionConfirmInput,
   DesktopAccountDeletionConfirmResult,
   DesktopAccountDeletionStatusResult,
+  DesktopAccountSwitcherSnapshot,
   DesktopLoginAction,
   DesktopLoginActionResult,
 } from '../shared/authIpc';
@@ -655,6 +656,7 @@ const fanOutHookControlWorkspaceProviderSource = createIpcFanOut(
 
 // ─── Maker Core 一阶段重构（新链路）── 与 cc-agent:* / codex:* 双轨并行 ─────
 const fanOutMakerEvent = createIpcFanOut('maker:event');
+const fanOutMakerAgentsChanged = createIpcFanOut('maker:agents:changed');
 const fanOutMakerTurnChangeSetUpdated = createIpcFanOut('maker:turn-change-set:updated');
 const fanOutMakerStatusChanged = createIpcFanOut('maker:status-changed');
 const fanOutMakerInputProjection = createIpcFanOut('maker:input:projection');
@@ -1887,6 +1889,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   authGetCaptchaChallengeUrl: (): Promise<string> =>
     ipcRenderer.invoke('auth:get-captcha-challenge-url'),
   authLogout: (): Promise<void> => ipcRenderer.invoke('auth:logout'),
+  authListAccounts: (): Promise<DesktopAccountSwitcherSnapshot> =>
+    ipcRenderer.invoke('auth:accounts:list'),
+  authSyncAccounts: (): Promise<DesktopAccountSwitcherSnapshot> =>
+    ipcRenderer.invoke('auth:accounts:sync'),
+  authSwitchAccount: (accountKey: string): Promise<void> =>
+    ipcRenderer.invoke('auth:accounts:switch', accountKey),
+  authBeginAddAccount: (): Promise<DesktopLoginActionResult> =>
+    ipcRenderer.invoke('auth:accounts:begin-add'),
+  authCancelAddAccount: (): Promise<void> => ipcRenderer.invoke('auth:accounts:cancel-add'),
   authEnterLocal: () => ipcRenderer.invoke('auth:enter-local'),
   authExitLocal: () => ipcRenderer.invoke('auth:exit-local'),
   authRefresh: (): Promise<boolean> => ipcRenderer.invoke('auth:refresh'),
@@ -3318,6 +3329,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     /** 打开系统目录选择对话框，返回用户选中的目录路径（取消时 path=null）。 */
     showOpenDirectory: (params?: {
       defaultPath?: string;
+      writableGrantScope?: string;
     }): Promise<{
       success: boolean;
       path: string | null;
@@ -4478,11 +4490,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     sessionId: string,
   ): Promise<{ ok: boolean; snapshotApplied?: boolean; message?: string }> =>
     ipcRenderer.invoke('worktree:restore-for-session', sessionId),
-  /**
-   * 订阅「worktree 回收链已跑完」。payload: { sessionId }。
-   * 归档/删除后 main 侧的回收是 fire-and-forget 的异步链,store 条目移除远晚于状态
-   * IPC 返回;renderer 只在动作里刷一次会拿到旧快照,徽标就一直陈旧。
-   */
+  /** worktree 回收完成后，按实际受影响的 sessionId 增量更新 renderer 缓存。 */
   onWorktreeChanged: fanOutWorktreeChanged,
 
   // ── Slack Hook(公司中心 slack-hook-server 接入, 单内置连接) ─────────────
@@ -5272,6 +5280,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   maker: {
     listAvailableAgents: (): Promise<Array<'claude-code' | 'codex' | 'pi'>> =>
       ipcRenderer.invoke('maker:list-available-agents'),
+    onAgentsChanged: fanOutMakerAgentsChanged,
     getCapabilities: (agentKind: 'claude-code' | 'codex' | 'pi'): Promise<unknown> =>
       ipcRenderer.invoke('maker:get-capabilities', agentKind),
     listTurnChangeSets: (
@@ -5963,6 +5972,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         userPrompt?: string;
         makerMemoryEnabled?: boolean;
         extraDirs?: string[];
+        writableDirs?: string[];
         displayReasoning?: 'off' | 'summarized' | 'full';
         vendorOptions?: Record<string, unknown>;
         remoteHostId?: string;
@@ -6117,11 +6127,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
       entryId: string,
       options?: { summarize?: boolean; customInstructions?: string },
     ) => ipcRenderer.invoke('maker:navigate-session-tree', sessionId, entryId, options),
-    // 附加只读引用目录的 closure 推送; DB 持久化由 renderer 同步调
-    // sessionService.update({ extraDirs }) (跟 setModel + sessionService.update 双 IPC 协调先例一致)。
-    // session 不在 / agent capability=false 都 no-op, 不会抛错。
-    setExtraDirs: (sessionId: string, dirs: string[]): Promise<void> =>
+    // 返回主进程校验、冲突过滤后真正应用的子集，renderer 以它持久化；session 不在或
+    // capability=false 时返回 undefined，兼容旧 no-op 语义。
+    setExtraDirs: (sessionId: string, dirs: string[]): Promise<string[] | undefined> =>
       ipcRenderer.invoke('maker:set-extra-dirs', sessionId, dirs),
+    setWritableDirs: (sessionId: string, dirs: string[]): Promise<string[] | undefined> =>
+      ipcRenderer.invoke('maker:set-writable-dirs', sessionId, dirs),
 
     // Memory 控制 (Personalization → Memory section)。
     // 由 BaseAgent 子类落地; UI 层负责 Reset 前 confirm dialog。
@@ -6871,8 +6882,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
       // runId 不是特权数据(renderer 的标记里就存着它)。
       listSidebarIndexRuns: (): Promise<unknown> =>
         ipcRenderer.invoke('maker:schedule:list-sidebar-index-runs'),
-      listCostSummaries: (): Promise<unknown[]> =>
-        ipcRenderer.invoke('maker:schedule:list-cost-summaries'),
       deleteRun: (runId: string): Promise<void> =>
         ipcRenderer.invoke('maker:schedule:delete-run', runId),
       /** delete/pause 前查这条 schedule 当前 in-flight run 数,>0 时 renderer 弹二次确认。 */

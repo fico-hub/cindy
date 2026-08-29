@@ -178,6 +178,10 @@ import {
   createPiTranslateContext,
   disposePiTranslateContext,
   isFailedOrAbortedPiCompaction,
+  markPiHostAbortRequested,
+  markPiHostTurnStartPending,
+  rollbackPiHostAbortRequest,
+  rollbackPiHostTurnStart,
   translatePiEvent,
   usageSnapshotOf,
   type PiTranslateContext,
@@ -258,6 +262,16 @@ type PiPermissionResolution =
   | 'user-deny'
   | 'auto-review-deny'
   | 'system-deny';
+
+/** Remote paths belong to the execution host, never the controller filesystem. */
+export function constrainPiDestructivePathResolution(
+  action: ReviewableAction,
+  remote: boolean,
+): ReviewableAction {
+  return remote && action.kind === 'exec'
+    ? { ...action, destructivePathResolution: 'unavailable' }
+    : action;
+}
 
 /**
  * baseUrl 是否指向本机 loopback(远端会话不可达)。与 host 侧 isLoopbackUrl 同口径:
@@ -451,6 +465,21 @@ function effortToPiThinkingLevel(effort: Effort): string {
 }
 
 const PI_NATIVE_THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+
+/**
+ * Last-resort maxTokens for models that provide no authoritative output limit.
+ * Explicit Model Access / native-provider metadata always wins. Pi separately clamps each
+ * request to the remaining context window, so keep this fallback context-bounded as well.
+ *
+ * This is deliberately a compatibility fallback rather than a claimed model capability:
+ * unknown upstreams may still have a lower output limit and should publish explicit metadata.
+ * Raising the legacy gateway/native defaults (32k/16k) to 64k prevents known long-thinking
+ * turns from being cut off solely by Cindy's synthetic value without making the fallback
+ * unbounded.
+ */
+function piMaxTokensFallback(contextWindow: number | undefined): number {
+  return contextWindow && contextWindow > 0 ? Math.min(contextWindow, 65_536) : 65_536;
+}
 
 /** 从本次启动写入 models.json 的 native model 快照提取可用 effort。 */
 function startupEffortsOfNativeModel(model: PiNativeModelSpec | undefined): readonly Effort[] | undefined {
@@ -941,14 +970,25 @@ async function buildPiPrompt(message: UserMessage, opts?: { remote?: boolean }):
   return { text: textParts.join(' ').trim(), images };
 }
 
-function piExtraDirsPrompt(dirs: readonly string[]): string {
-  if (dirs.length === 0) return '';
-  return [
-    '<cindy-extra-reference-directories>',
-    'The following absolute directories are available as read-only references. Do not modify them:',
-    ...dirs.map((dir) => `- ${dir}`),
-    '</cindy-extra-reference-directories>',
-  ].join('\n');
+function piExtraDirsPrompt(readOnlyDirs: readonly string[], writableDirs: readonly string[]): string {
+  const sections: string[] = [];
+  if (readOnlyDirs.length > 0) {
+    sections.push(
+      '<cindy-extra-reference-directories>',
+      'The following absolute directories are available as read-only references. Do not modify them:',
+      ...readOnlyDirs.map((dir) => `- ${dir}`),
+      '</cindy-extra-reference-directories>',
+    );
+  }
+  if (writableDirs.length > 0) {
+    sections.push(
+      '<cindy-extra-writable-directories>',
+      'The user explicitly allowed reading and writing inside these absolute directories:',
+      ...writableDirs.map((dir) => `- ${dir}`),
+      '</cindy-extra-writable-directories>',
+    );
+  }
+  return sections.join('\n');
 }
 
 interface FailedPiStartupCleanup {
@@ -1250,6 +1290,7 @@ export class PiAgent extends BaseAgent {
         },
       },
       extraDirs: { supported: true },
+      writableDirs: { supported: true },
       // pi 原生 export_html RPC:自带 export-html 渲染器,离线、无网关。
       sessionHtmlExport: { supported: true },
       // pi 原生 compact RPC:手动压缩(可带聚焦指令,调 LLM 生成摘要)。
@@ -1443,7 +1484,7 @@ export class PiAgent extends BaseAgent {
         input: supportsImageInput ? ['text', 'image'] : ['text'],
         // Model Access v3 requires this value; never replace the server limit with a client guess.
         contextWindow: m.contextWindow,
-        maxTokens: m.maxOutputTokens && m.maxOutputTokens > 0 ? m.maxOutputTokens : 32_000,
+        maxTokens: m.maxOutputTokens && m.maxOutputTokens > 0 ? m.maxOutputTokens : piMaxTokensFallback(m.contextWindow),
         // 计费单位与目录一致($/1M tokens);pi 按此自行计价,usage 事件的 cost 才有真值。
         cost: {
           input: m.cost?.input ?? 0,
@@ -1481,21 +1522,24 @@ export class PiAgent extends BaseAgent {
       }
       const nativeModels = (
         np.inheritModels ? np.models.filter((model) => model.api !== undefined || model.catalogAddition === true) : np.models
-      ).map((m) => ({
-        id: m.wireId ?? m.id,
-        name: m.name ?? m.id,
-        ...(m.baseUrl ? { baseUrl: m.baseUrl } : {}),
-        ...(m.headers && Object.keys(m.headers).length > 0 ? { headers: m.headers } : {}),
-        ...(m.api ? { api: m.api } : {}),
-        reasoning: m.reasoning ?? false,
-        ...(m.thinkingLevelMap ? { thinkingLevelMap: { ...m.thinkingLevelMap } } : {}),
-        input: m.input ?? ['text'],
-        contextWindow: m.contextWindow && m.contextWindow > 0 ? m.contextWindow : 128_000,
-        maxTokens: m.maxTokens && m.maxTokens > 0 ? m.maxTokens : 16_000,
-        ...(m.cost ? { cost: structuredClone(m.cost) } : {}),
-        ...(m.compat ? { compat: structuredClone(m.compat) } : {}),
-        ...(m.samplingParams ? { samplingParams: structuredClone(m.samplingParams) } : {}),
-      }));
+      ).map((m) => {
+        const contextWindow = m.contextWindow && m.contextWindow > 0 ? m.contextWindow : 128_000;
+        return {
+          id: m.wireId ?? m.id,
+          name: m.name ?? m.id,
+          ...(m.baseUrl ? { baseUrl: m.baseUrl } : {}),
+          ...(m.headers && Object.keys(m.headers).length > 0 ? { headers: m.headers } : {}),
+          ...(m.api ? { api: m.api } : {}),
+          reasoning: m.reasoning ?? false,
+          ...(m.thinkingLevelMap ? { thinkingLevelMap: { ...m.thinkingLevelMap } } : {}),
+          input: m.input ?? ['text'],
+          contextWindow,
+          maxTokens: m.maxTokens && m.maxTokens > 0 ? m.maxTokens : piMaxTokensFallback(contextWindow),
+          ...(m.cost ? { cost: structuredClone(m.cost) } : {}),
+          ...(m.compat ? { compat: structuredClone(m.compat) } : {}),
+          ...(m.samplingParams ? { samplingParams: structuredClone(m.samplingParams) } : {}),
+        };
+      });
       if (!np.inheritModels && !np.api) {
         throw new Error(`pi: native provider '${np.id}' has no default api`);
       }
@@ -2225,6 +2269,7 @@ export class PiAgent extends BaseAgent {
       mode === 'bypassPermissions' ? 'bypassPermissions' : mode === 'auto' ? 'auto' : 'ask';
     let permissionMode = reviewMode ? 'ask' : normalizePermissionMode(opts.permissionMode);
     let mutableExtraDirs = [...(opts.extraDirs ?? [])];
+    let mutableWritableDirs = [...(opts.writableDirs ?? [])];
     const reviewReadGrants = reviewMode ? await buildReviewReadGrants(opts.workingDir, opts.reviewReadPaths ?? []) : [];
     const reviewReadPaths = reviewReadGrants.map((grant) => grant.realPath);
     // Keep ordinary permission files shape-compatible with older Cindy/Pi
@@ -2240,6 +2285,7 @@ export class PiAgent extends BaseAgent {
     type PermissionSnapshot = {
       mode: 'ask' | 'auto' | 'bypassPermissions';
       readOnlyRoots: string[];
+      writableRoots: string[];
       reviewReadPaths?: string[];
       reviewOnly?: true;
     };
@@ -2247,11 +2293,13 @@ export class PiAgent extends BaseAgent {
     let requestedPermissionSnapshot: PermissionSnapshot = {
       mode: permissionMode,
       readOnlyRoots: [...mutableExtraDirs],
+      writableRoots: [...mutableWritableDirs],
       ...reviewPathSnapshot,
     };
     let persistedPermissionSnapshot: PermissionSnapshot = {
       mode: permissionMode,
       readOnlyRoots: [...mutableExtraDirs],
+      writableRoots: [...mutableWritableDirs],
       ...reviewPathSnapshot,
     };
     const permissionSnapshotHash = createHash('sha256').update(JSON.stringify(requestedPermissionSnapshot)).digest('hex').slice(0, 16);
@@ -2285,10 +2333,24 @@ export class PiAgent extends BaseAgent {
     // 仅文件写按代际串行,被更晚意图取代的写直接跳过,保证文件最终收敛到最新意图、绝不 stale 覆盖。
     let permissionWriteChain: Promise<void> = Promise.resolve();
     let permissionWriteGen = 0;
+    let autoReviewDirectoryGeneration = 0;
+    const directoryPermissionsPendingPersistence = (): boolean => (
+      requestedPermissionSnapshot.readOnlyRoots.length !== mutableExtraDirs.length
+      || requestedPermissionSnapshot.readOnlyRoots.some((dir, index) => dir !== mutableExtraDirs[index])
+      || requestedPermissionSnapshot.writableRoots.length !== mutableWritableDirs.length
+      || requestedPermissionSnapshot.writableRoots.some((dir, index) => dir !== mutableWritableDirs[index])
+    );
     const writePermissionFile = (next: PermissionSnapshot): Promise<void> => {
+      const directoryPermissionsChanged =
+        requestedPermissionSnapshot.readOnlyRoots.length !== next.readOnlyRoots.length
+        || requestedPermissionSnapshot.readOnlyRoots.some((dir, index) => dir !== next.readOnlyRoots[index])
+        || requestedPermissionSnapshot.writableRoots.length !== next.writableRoots.length
+        || requestedPermissionSnapshot.writableRoots.some((dir, index) => dir !== next.writableRoots[index]);
+      if (directoryPermissionsChanged) autoReviewDirectoryGeneration++;
       requestedPermissionSnapshot = {
         mode: next.mode,
         readOnlyRoots: [...next.readOnlyRoots],
+        writableRoots: [...next.writableRoots],
         ...reviewPathSnapshot,
       };
       // 收紧必须立刻约束 host 侧审批门；等待磁盘 I/O 才改闭包会留下一个 Full access
@@ -2301,6 +2363,7 @@ export class PiAgent extends BaseAgent {
       const snapshot = {
         ...requestedPermissionSnapshot,
         readOnlyRoots: [...requestedPermissionSnapshot.readOnlyRoots],
+        writableRoots: [...requestedPermissionSnapshot.writableRoots],
         ...reviewPathSnapshot,
       };
       const run = permissionWriteChain.then(async () => {
@@ -2336,6 +2399,7 @@ export class PiAgent extends BaseAgent {
               // 放宽失败时 permissionMode 仍是旧的已提交 mode，同样达到回滚效果。
               mode: permissionMode,
               readOnlyRoots: [...persistedPermissionSnapshot.readOnlyRoots],
+              writableRoots: [...persistedPermissionSnapshot.writableRoots],
               ...reviewPathSnapshot,
             };
           }
@@ -2346,9 +2410,11 @@ export class PiAgent extends BaseAgent {
         if (gen === permissionWriteGen) {
           permissionMode = snapshot.mode;
           mutableExtraDirs = [...snapshot.readOnlyRoots];
+          mutableWritableDirs = [...snapshot.writableRoots];
           persistedPermissionSnapshot = {
             mode: snapshot.mode,
             readOnlyRoots: [...snapshot.readOnlyRoots],
+            writableRoots: [...snapshot.writableRoots],
             ...reviewPathSnapshot,
           };
         }
@@ -2517,7 +2583,7 @@ export class PiAgent extends BaseAgent {
       this.deps.runtimeConfig.systemPrompt?.trim(),
       ghostRosterPrompt.trim(),
       reviewMode ? undefined : opts.userPrompt?.trim(),
-      piExtraDirsPrompt(mutableExtraDirs),
+      piExtraDirsPrompt(mutableExtraDirs, mutableWritableDirs),
     ].filter((s): s is string => !!s && s.length > 0);
     const appendSystemPrompt = appendSections.join('\n\n');
 
@@ -2761,6 +2827,17 @@ export class PiAgent extends BaseAgent {
     const autoReviewUnavailableNotice = createAutoReviewUnavailableNotice(emitAutoReviewRuntimeNotice);
     const autoReviewConfirmUndeliveredNotice = createAutoReviewConfirmUndeliveredNotice(emitAutoReviewRuntimeNotice);
     const reviewAutoAction = (action: ReviewableAction): Promise<AutoReviewDecision> => {
+      // Directory grants become active only after their permission snapshot is
+      // durable. While persistence is pending, neither the requested roots nor
+      // the old runtime roots are a complete authorization view, so fail closed
+      // instead of letting a reviewer decision bridge that transaction window.
+      if (directoryPermissionsPendingPersistence()) {
+        return Promise.resolve({
+          verdict: 'ask',
+          reason: 'Directory permissions are still being persisted.',
+        });
+      }
+      const directoryGeneration = autoReviewDirectoryGeneration;
       const request = {
         sessionId: opts.sessionId,
         agentKind: 'pi' as const,
@@ -2768,7 +2845,8 @@ export class PiAgent extends BaseAgent {
         model: mutableModel,
         userIntent: currentAutoReviewIntent,
         action,
-        workspaceRoots: [opts.workingDir, ...mutableExtraDirs],
+        workspaceRoots: [opts.workingDir, ...mutableExtraDirs, ...mutableWritableDirs],
+        writableRoots: [opts.workingDir, ...mutableWritableDirs],
         platform: opts.remoteHostId ? ('linux' as const) : process.platform,
       };
       const cacheKey = JSON.stringify(request);
@@ -2777,7 +2855,15 @@ export class PiAgent extends BaseAgent {
         pending = resolveAutoReviewDecision(request, this.deps.reviewAutoPermissionAction);
         autoReviewDecisionCache.set(cacheKey, pending);
       }
-      return pending;
+      return pending.then((decision) => (
+        directoryGeneration === autoReviewDirectoryGeneration
+          && !directoryPermissionsPendingPersistence()
+          ? decision
+          : {
+              verdict: 'ask',
+              reason: 'Directory permissions changed while this action was under review.',
+            }
+      ));
     };
     let closed = false;
     /**
@@ -3119,19 +3205,48 @@ export class PiAgent extends BaseAgent {
       }
       let toolName = 'tool';
       let input: Record<string, unknown> = {};
+      let resolvedWritePath: string | null | undefined;
+      let resolvedWritableRoots: string[] | null | undefined;
       const approvalPayload = approval.method === 'input'
         ? approval.placeholder
         : approval.message;
       if (approval.title === 'cindy:permission' && approvalPayload) {
         try {
-          const payload = JSON.parse(approvalPayload) as { toolName?: unknown; input?: unknown };
+          const payload = JSON.parse(approvalPayload) as {
+            toolName?: unknown;
+            input?: unknown;
+            resolvedWritePath?: unknown;
+            resolvedWritableRoots?: unknown;
+          };
           if (typeof payload.toolName === 'string' && payload.toolName) toolName = payload.toolName;
           if (payload.input && typeof payload.input === 'object' && !Array.isArray(payload.input)) {
             input = payload.input as Record<string, unknown>;
           }
+          if (Object.hasOwn(payload, 'resolvedWritePath')) {
+            resolvedWritePath = typeof payload.resolvedWritePath === 'string'
+              && payload.resolvedWritePath.length > 0
+              ? payload.resolvedWritePath
+              : null;
+          }
+          if (Object.hasOwn(payload, 'resolvedWritableRoots')) {
+            resolvedWritableRoots = Array.isArray(payload.resolvedWritableRoots)
+              && payload.resolvedWritableRoots.length <= 64
+              && payload.resolvedWritableRoots.every(
+                (root) => typeof root === 'string' && root.length > 0,
+              )
+              ? payload.resolvedWritableRoots as string[]
+              : null;
+          }
         } catch {
           /* malformed permission payload remains a generic, deny-by-default prompt */
         }
+      }
+      if ((toolName === 'write' || toolName === 'edit') && resolvedWritePath === undefined) {
+        // Durable child 可能来自旧 bridge；缺少执行期真实路径时不能回退成字面绿灯。
+        resolvedWritePath = null;
+      }
+      if ((toolName === 'write' || toolName === 'edit') && resolvedWritableRoots === undefined) {
+        resolvedWritableRoots = null;
       }
       const requestId = `pi-subagent:${key}`;
       const turnPolicyForcePrompt = (() => {
@@ -3276,12 +3391,21 @@ export class PiAgent extends BaseAgent {
           return requestUserDecision({ forcePrompt: turnPolicyForcePrompt });
         }
         try {
-          const decision = await reviewAutoAction(normalizePiToolForAutoReview({
-            toolName,
-            input,
-            workspaceRoots: [opts.workingDir],
-            readRoots: [opts.workingDir, ...mutableExtraDirs],
-          }));
+          const action = constrainPiDestructivePathResolution(
+            normalizePiToolForAutoReview({
+              toolName,
+              input,
+              workspaceRoots: [opts.workingDir],
+              readRoots: [opts.workingDir, ...mutableExtraDirs, ...mutableWritableDirs],
+              writableRoots: [opts.workingDir, ...mutableWritableDirs],
+            }),
+            Boolean(opts.remoteHostId),
+          );
+          if (action.kind === 'file-write') {
+            action.resolvedPath = resolvedWritePath;
+            action.resolvedWritableRoots = resolvedWritableRoots;
+          }
+          const decision = await reviewAutoAction(action);
           if (permissionMode !== 'auto' || turnPolicyForcePrompt) {
             return requestUserDecision({ forcePrompt: true });
           }
@@ -3942,7 +4066,8 @@ export class PiAgent extends BaseAgent {
               permissionMode,
               currentModelIds: [mutableModel, mutableWireModel],
               workspaceRoots: [opts.workingDir],
-              readRoots: [opts.workingDir, ...mutableExtraDirs],
+              readRoots: [opts.workingDir, ...mutableExtraDirs, ...mutableWritableDirs],
+              writableRoots: [opts.workingDir, ...mutableWritableDirs],
               reviewAutoAction,
               notifyAutoReviewUnavailable: () => autoReviewUnavailableNotice.notify(),
               notifyAutoReviewConfirmUndelivered: () => autoReviewConfirmUndeliveredNotice.notify(),
@@ -5115,7 +5240,11 @@ export class PiAgent extends BaseAgent {
           if (!managedPackageRoute.accepted) rejectIfCancelled(sendOpts, 'send');
           // setExtraDirs 是热更新；Pi 没有独立的 mid-session system-prompt RPC，所以在
           // 后续 user turn 前附上短引用目录段(但 /skill: 起始时不前置,见 composePiPromptText)。
-          const promptText = composePiPromptText(text, piExtraDirsPrompt(mutableExtraDirs), runtimeCapabilityManifest);
+          const promptText = composePiPromptText(
+            text,
+            piExtraDirsPrompt(mutableExtraDirs, mutableWritableDirs),
+            runtimeCapabilityManifest,
+          );
           const managedExtensionCommandName = managedExtensionSlashCommandName(
             promptText,
             runtimeCapabilityManifest,
@@ -5138,6 +5267,7 @@ export class PiAgent extends BaseAgent {
             ? await readPiUserEntryIds()
             : null;
           if (!managedPackageRoute.accepted) rejectIfCancelled(sendOpts, 'send');
+          const pendingTurnStartToken = markPiHostTurnStartPending(ctx);
           promptRequestStarted = true;
           try {
             doctorCommandActivity.enter(isDoctorCommand);
@@ -5150,6 +5280,7 @@ export class PiAgent extends BaseAgent {
                 PI_PROMPT_ACCEPTANCE_PROGRESS_EVENTS.has(event.type),
             }));
             if (!resp.success) {
+              rollbackPiHostTurnStart(ctx, pendingTurnStartToken);
               if (managedPackageRoute.accepted) {
                 // The host-owned package mutation and its deterministic visible
                 // receipt already crossed the dispatch boundary. The follow-up
@@ -5219,6 +5350,7 @@ export class PiAgent extends BaseAgent {
                   data.isCompacting !== true &&
                   (typeof data.pendingMessageCount !== 'number' || data.pendingMessageCount === 0);
                 if (runtimeIdle && piAgentLifecycleSequence === lifecycleSequenceBeforePrompt) {
+                  rollbackPiHostTurnStart(ctx, pendingTurnStartToken);
                   const result = capturedExtensionNotifications?.join('\n\n') ?? '';
                   // prompt success is only the RPC acceptance boundary. Let
                   // handle.send() resolve before publishing a synthetic terminal;
@@ -5321,7 +5453,11 @@ export class PiAgent extends BaseAgent {
         await awaitRuntimeCapabilitiesForSlashCommand(text);
         if (!managedPackageRoute.accepted) rejectIfCancelled(sendOpts, 'steer');
         // /skill: 起始时不前置 Extra Dir 引用段(否则命令退化成文本),与 send 同口径。
-        const promptText = composePiPromptText(text, piExtraDirsPrompt(mutableExtraDirs), runtimeCapabilityManifest);
+        const promptText = composePiPromptText(
+          text,
+          piExtraDirsPrompt(mutableExtraDirs, mutableWritableDirs),
+          runtimeCapabilityManifest,
+        );
         const managedExtensionCommandName = managedExtensionSlashCommandName(
           promptText,
           runtimeCapabilityManifest,
@@ -5386,6 +5522,7 @@ export class PiAgent extends BaseAgent {
               ...requestedPermissionSnapshot,
               mode: permissionMode,
               readOnlyRoots: [...requestedPermissionSnapshot.readOnlyRoots],
+              writableRoots: [...requestedPermissionSnapshot.writableRoots],
               ...reviewPathSnapshot,
             },
             runnerFallbackFile: subagentRunnerPath,
@@ -5417,9 +5554,17 @@ export class PiAgent extends BaseAgent {
 
       async requestGracefulStop(): Promise<void> {
         if (proc.isClosed) throw new Error('No active Pi turn to stop');
+        const hostAbortToken = markPiHostAbortRequested(ctx);
         dismissAllPendingPrompts('turn_aborted', 'deny');
-        const resp = await proc.request({ type: 'abort' });
+        let resp: Awaited<ReturnType<typeof proc.request>>;
+        try {
+          resp = await proc.request({ type: 'abort' });
+        } catch (error) {
+          rollbackPiHostAbortRequest(ctx, hostAbortToken);
+          throw error;
+        }
         if (!resp.success) {
+          rollbackPiHostAbortRequest(ctx, hostAbortToken);
           throw new Error(`Pi graceful stop rejected: ${resp.error ?? 'unknown'}`);
         }
         clearActiveTurnPermissionPolicy('turn_aborted');
@@ -5427,6 +5572,7 @@ export class PiAgent extends BaseAgent {
 
       async abort(): Promise<void> {
         if (proc.isClosed) return;
+        const hostAbortToken = markPiHostAbortRequested(ctx);
         // 先把等待中的调用 fail-closed 唤醒；即使 abort RPC 失败，也不能让用户刚拒绝/
         // 停止的那次工具继续等一张已失效的卡。policy 仅在 Pi 确认接受 abort 后清空，
         // RPC 失败时继续保留，防止仍在运行的 turn 失去渠道安全边界。
@@ -5436,11 +5582,13 @@ export class PiAgent extends BaseAgent {
           if (resp.success) {
             clearActiveTurnPermissionPolicy('turn_aborted');
           } else {
+            rollbackPiHostAbortRequest(ctx, hostAbortToken);
             deps.logger.warn('pi abort request rejected', {
               message: resp.error ?? 'unknown',
             });
           }
         } catch (err) {
+          rollbackPiHostAbortRequest(ctx, hostAbortToken);
           deps.logger.warn('pi abort request failed', {
             message: err instanceof Error ? err.message : String(err),
           });
@@ -5619,6 +5767,14 @@ export class PiAgent extends BaseAgent {
         await writePermissionSnapshotOrFailClosed({
           ...requestedPermissionSnapshot,
           readOnlyRoots: [...dirs],
+        });
+      },
+
+      async setWritableDirs(dirs: string[]): Promise<void> {
+        if (reviewMode) return;
+        await writePermissionSnapshotOrFailClosed({
+          ...requestedPermissionSnapshot,
+          writableRoots: [...dirs],
         });
       },
 
@@ -6141,6 +6297,7 @@ export class PiAgent extends BaseAgent {
       currentModelIds: readonly string[];
       workspaceRoots: string[];
       readRoots: string[];
+      writableRoots: string[];
       reviewAutoAction: (action: ReviewableAction) => Promise<AutoReviewDecision>;
       /** 审阅器不可用时的会话级一次性提示;去重与重置由会话侧持有(issue #1574)。 */
       notifyAutoReviewUnavailable: () => void;
@@ -6474,12 +6631,16 @@ export class PiAgent extends BaseAgent {
       let toolName = 'tool';
       let input: Record<string, unknown> = {};
       let resolvedCredentialPaths: string[] | null | undefined;
+      let resolvedWritePath: string | null | undefined;
+      let resolvedWritableRoots: string[] | null | undefined;
       try {
         const rawPayload = method === 'input' ? event.placeholder : event.message;
         const payload = JSON.parse(typeof rawPayload === 'string' ? rawPayload : '{}') as {
           toolName?: unknown;
           input?: unknown;
           resolvedCredentialPaths?: unknown;
+          resolvedWritePath?: unknown;
+          resolvedWritableRoots?: unknown;
         };
         if (typeof payload.toolName === 'string' && payload.toolName.length > 0) toolName = payload.toolName;
         if (payload.input && typeof payload.input === 'object') input = payload.input as Record<string, unknown>;
@@ -6488,6 +6649,21 @@ export class PiAgent extends BaseAgent {
             && payload.resolvedCredentialPaths.length <= 64
             && payload.resolvedCredentialPaths.every((item) => typeof item === 'string' && item.length > 0)
             ? payload.resolvedCredentialPaths as string[]
+            : null;
+        }
+        if (Object.hasOwn(payload, 'resolvedWritePath')) {
+          resolvedWritePath = typeof payload.resolvedWritePath === 'string'
+            && payload.resolvedWritePath.length > 0
+            ? payload.resolvedWritePath
+            : null;
+        }
+        if (Object.hasOwn(payload, 'resolvedWritableRoots')) {
+          resolvedWritableRoots = Array.isArray(payload.resolvedWritableRoots)
+            && payload.resolvedWritableRoots.length <= 64
+            && payload.resolvedWritableRoots.every(
+              (root) => typeof root === 'string' && root.length > 0,
+            )
+            ? payload.resolvedWritableRoots as string[]
             : null;
         }
       } catch {
@@ -6502,12 +6678,20 @@ export class PiAgent extends BaseAgent {
         // not a safe read; require explicit consent instead of trusting a link name.
         resolvedCredentialPaths = null;
       }
+      if ((toolName === 'write' || toolName === 'edit') && resolvedWritePath === undefined) {
+        // 旧版或畸形 bridge 没有执行期 canonical 证据时，Auto 不得回退到字面路径绿灯。
+        resolvedWritePath = null;
+      }
+      if ((toolName === 'write' || toolName === 'edit') && resolvedWritableRoots === undefined) {
+        resolvedWritableRoots = null;
+      }
       const {
         resolver,
         permissionMode,
         currentModelIds,
         workspaceRoots,
         readRoots,
+        writableRoots,
         reviewAutoAction,
         notifyAutoReviewUnavailable,
         notifyAutoReviewConfirmUndelivered,
@@ -6770,13 +6954,21 @@ export class PiAgent extends BaseAgent {
           return;
         }
         try {
-          const action = normalizePiToolForAutoReview({
-            toolName,
-            input,
-            resolvedCredentialPaths,
-            workspaceRoots,
-            readRoots,
-          });
+          const action = constrainPiDestructivePathResolution(
+            normalizePiToolForAutoReview({
+              toolName,
+              input,
+              resolvedCredentialPaths,
+              workspaceRoots,
+              readRoots,
+              writableRoots,
+            }),
+            getPermissionCtx().remote,
+          );
+          if (action.kind === 'file-write') {
+            action.resolvedPath = resolvedWritePath;
+            action.resolvedWritableRoots = resolvedWritableRoots;
+          }
           const decision = await reviewAutoAction(action);
           // 权限热切换:reviewAutoAction 是 async 的,期间用户可能改档。按**最新**档位收口,
           // 不能用进入审查前捕获的旧 auto 档直接放行(Pi 明确支持热切换,codex review P1):

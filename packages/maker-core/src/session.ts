@@ -1426,6 +1426,11 @@ export class Session {
     return this.handle.codexThreadModelProviderId;
   }
 
+  /** Codex-only: 当前 host 的独立 Subagent 路由是否兼容 Cindy Codex 远程压缩。 */
+  get codexCindyRemoteCompactionCompatible(): boolean | undefined {
+    return this.handle.codexCindyRemoteCompactionCompatible;
+  }
+
   /** Snapshot used by temporary host overrides to avoid undoing a newer user change. */
   get permissionModeState(): PermissionModeState {
     return { ...this.permissionModeStateValue };
@@ -1734,6 +1739,24 @@ export class Session {
       throw new NotSupportedError('extraDirs', { supported: false, reason: 'not-implemented' });
     }
     await this.handle.setExtraDirs(dirs);
+  }
+
+  /**
+   * 运行时覆盖附加可读写目录。不写 DB；持久化由 host 与 setExtraDirs 相同地协调。
+   */
+  async setWritableDirs(dirs: string[]): Promise<void> {
+    this.ensureActive();
+    const capability = this.capabilities.writableDirs;
+    if (!capability?.supported) {
+      throw new NotSupportedError('writableDirs', capability ?? {
+        supported: false,
+        reason: 'not-implemented',
+      });
+    }
+    if (!this.handle.setWritableDirs) {
+      throw new NotSupportedError('writableDirs', { supported: false, reason: 'not-implemented' });
+    }
+    await this.handle.setWritableDirs(dirs);
   }
 
   // ── Rewind (Stage 2 C2) ────────────────────────────────────────────────────
