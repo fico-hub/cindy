@@ -1,9 +1,9 @@
 import { BrowserWindow } from 'electron';
-import { and, desc, eq, inArray, ne } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, ne } from 'drizzle-orm';
 import { createId } from '@paralleldrive/cuid2';
 
 import { getDbClient } from './client/current.js';
-import { orcaWorkers, orcaTeams, sessions } from './schema.js';
+import { orcaWorkers, orcaTeams, orcaWorkerCreationReservations, sessions } from './schema.js';
 import { createLogger } from '../logger.js';
 import { throwIpcError } from '../utils/ipcValidate.js';
 import { tapWindowBroadcast } from '../device-link/broadcast-tap.js';
@@ -199,6 +199,34 @@ export async function getActiveTeamByLead(
   }
 
   return teamToRecord(latest);
+}
+
+/**
+ * #3555:判定 active team 是否为「初始化被进程退出打断」遗留的孤儿。
+ * 判据取最保守的一档:该 team 从未挂上任何 worker 行(任意状态,含归档——
+ * 全员归档的 team 是用户可继续 create_worker 的合法状态,不算孤儿),且没有
+ * 仍在租期内的创建 reservation(有则说明另一进程正在为它建 worker)。两条都
+ * 满足的 team 不可能承载任何用户状态,调用方可安全按 failed 收口重新启用。
+ */
+export async function isOrphanedTeamInit(teamId: string): Promise<boolean> {
+  const db = getDbClient().drizzle;
+  const [worker] = await db
+    .select({ id: orcaWorkers.id })
+    .from(orcaWorkers)
+    .where(eq(orcaWorkers.teamId, teamId))
+    .limit(1);
+  if (worker) return false;
+  const [reservation] = await db
+    .select({ id: orcaWorkerCreationReservations.id })
+    .from(orcaWorkerCreationReservations)
+    .where(
+      and(
+        eq(orcaWorkerCreationReservations.teamId, teamId),
+        gt(orcaWorkerCreationReservations.expiresAt, Date.now()),
+      ),
+    )
+    .limit(1);
+  return !reservation;
 }
 
 /**

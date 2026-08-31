@@ -44,6 +44,7 @@ function createDeps(overrides: Partial<OrcaLifecycleDeps> = {}) {
       calls.push(`createActiveTeam:${leadSessionId}`);
       return { id: 'team-1', leadSessionId };
     }),
+    isOrphanedTeamInit: vi.fn(async () => false),
     getWorkerPermissionMode: vi.fn(() => 'auto' as const),
     setWorkerPermissionMode: vi.fn((workerPermissionMode) => {
       calls.push(`setWorkerPermissionMode:${workerPermissionMode}`);
@@ -878,5 +879,54 @@ describe('OrcaLifecycleService', () => {
       'markTeamEnded:team-1:failed',
       'setSessionOrcaRole:lead-1:null',
     ]);
+  });
+});
+
+describe('enableTeam — 孤儿空团队自动回收 (#3555)', () => {
+  const enableParams = {
+    leadSessionId: 'lead-1',
+    workerAgent: 'codex',
+    role: 'reviewer',
+    label: 'reviewer',
+  } as const;
+
+  it('active 空团队(零 worker 且无存活 reservation)→ 按 failed 收口后继续启用', async () => {
+    const { calls, deps, service } = createDeps({
+      getActiveTeamByLead: vi.fn(async () => activeTeam()),
+      isOrphanedTeamInit: vi.fn(async () => true),
+    });
+    await expect(service.enableTeam(enableParams)).resolves.toMatchObject({
+      teamId: 'team-1',
+      workerId: 'worker-1',
+    });
+    expect(deps.isOrphanedTeamInit).toHaveBeenCalledWith('team-existing');
+    expect(deps.markTeamEnded).toHaveBeenCalledWith('team-existing', 'failed');
+    expect(calls).toContain('createActiveTeam:lead-1');
+  });
+
+  it('非孤儿 → 维持 ALREADY_EXISTS,不动既有 team', async () => {
+    const { deps, service } = createDeps({
+      getActiveTeamByLead: vi.fn(async () => activeTeam()),
+      isOrphanedTeamInit: vi.fn(async () => false),
+    });
+    await expect(service.enableTeam(enableParams)).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'ALREADY_EXISTS',
+    });
+    expect(deps.markTeamEnded).not.toHaveBeenCalled();
+  });
+
+  it('孤儿判定抛错 → 保守维持 ALREADY_EXISTS,绝不误收可能有内容的 team', async () => {
+    const { deps, service } = createDeps({
+      getActiveTeamByLead: vi.fn(async () => activeTeam()),
+      isOrphanedTeamInit: vi.fn(async () => {
+        throw new Error('db down');
+      }),
+    });
+    await expect(service.enableTeam(enableParams)).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'ALREADY_EXISTS',
+    });
+    expect(deps.markTeamEnded).not.toHaveBeenCalled();
   });
 });

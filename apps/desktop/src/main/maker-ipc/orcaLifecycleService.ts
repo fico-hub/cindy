@@ -84,6 +84,8 @@ export type OrcaEnableTeamResult =
 export interface OrcaLifecycleDeps {
   getActiveTeamByLead(leadSessionId: string): Promise<OrcaTeamSnapshot | null>;
   createActiveTeam(leadSessionId: string): Promise<OrcaTeamSnapshot>;
+  /** #3555:active team 是否为初始化中断遗留的孤儿(零 worker 行且无存活创建 reservation)。 */
+  isOrphanedTeamInit(teamId: string): Promise<boolean>;
   getWorkerPermissionMode(): OrcaWorkerPermissionMode;
   setWorkerPermissionMode(workerPermissionMode: OrcaWorkerPermissionMode): void;
   createWorkerInTeam(params: OrcaWorkerCreateInTeamParams): Promise<OrcaWorkerCreationResult>;
@@ -335,11 +337,20 @@ export function createOrcaLifecycleService(deps: OrcaLifecycleDeps): OrcaLifecyc
 
     const existing = await deps.getActiveTeamByLead(params.leadSessionId);
     if (existing) {
-      return {
-        ok: false,
-        errorCode: 'ALREADY_EXISTS',
-        message: `lead session already has active orca team ${existing.id}`,
-      };
+      // #3555:初始化补偿依赖原进程的 finally / failCreatedTeam,跨进程不原子——
+      // 进程在 createActiveTeam 之后、worker 落地之前退出会遗留 active 空团队,
+      // 此后每次启用都撞 ALREADY_EXISTS,永久阻塞。零 worker 行(任意状态)且无
+      // 存活创建 reservation 的 team 不可能承载用户状态,按 failed 收口后继续本
+      // 次启用;判定失败时保守维持 ALREADY_EXISTS,绝不误收可能有内容的 team。
+      const orphaned = await deps.isOrphanedTeamInit(existing.id).catch(() => false);
+      if (!orphaned) {
+        return {
+          ok: false,
+          errorCode: 'ALREADY_EXISTS',
+          message: `lead session already has active orca team ${existing.id}`,
+        };
+      }
+      await deps.markTeamEnded(existing.id, 'failed');
     }
 
     const team = await deps.createActiveTeam(params.leadSessionId);
