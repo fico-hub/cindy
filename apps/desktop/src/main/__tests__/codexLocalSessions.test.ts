@@ -351,16 +351,22 @@ describe('Codex local session import', () => {
     const first = await importExternalCodexSessions([threadId]);
     expect(first).toMatchObject({ inserted: 1 });
 
+    const before = currentTestDb()
+      .prepare('SELECT title, updated_at AS updatedAt FROM sessions WHERE id = ?')
+      .get(`codex-${threadId}`) as { title: string; updatedAt: number };
     currentTestDb()
-      .prepare("UPDATE sessions SET status = 'deleted', updated_at = updated_at + 999999 WHERE id = ?")
+      .prepare("UPDATE sessions SET status = 'deleted', title = 'stale-after-delete', updated_at = updated_at + 999999 WHERE id = ?")
       .run(`codex-${threadId}`);
 
     const again = await importExternalCodexSessions([threadId]);
     expect(again).toMatchObject({ inserted: 0, updated: 1 });
     const row = currentTestDb()
-      .prepare('SELECT status FROM sessions WHERE id = ?')
-      .get(`codex-${threadId}`) as { status: string };
+      .prepare('SELECT status, title, updated_at AS updatedAt FROM sessions WHERE id = ?')
+      .get(`codex-${threadId}`) as { status: string; title: string; updatedAt: number };
     expect(row.status).toBe('active');
+    // 复活即按新导入对待:元数据与 updated_at 收敛回源值(review 反馈)。
+    expect(row.title).toBe(before.title);
+    expect(row.updatedAt).toBe(before.updatedAt);
   });
 
   it('filters Codex source JSON subagent rows even when thread_source is missing', async () => {

@@ -1010,16 +1010,23 @@ describe('parseClaudeCodeMessageLine', () => {
       const first = await importExternalClaudeCodeSessions([sdkSessionId]);
       expect(first).toMatchObject({ inserted: 1 });
 
+      const before = db
+        .prepare('SELECT title, updated_at AS updatedAt FROM sessions WHERE id = ?')
+        .get(`claude-${sdkSessionId}`) as { title: string; updatedAt: number };
       db.prepare(
-        "UPDATE sessions SET status = 'deleted', updated_at = updated_at + 999999 WHERE id = ?",
+        "UPDATE sessions SET status = 'deleted', title = 'stale-after-delete', updated_at = updated_at + 999999 WHERE id = ?",
       ).run(`claude-${sdkSessionId}`);
 
       const again = await importExternalClaudeCodeSessions([sdkSessionId]);
       expect(again).toMatchObject({ scanned: 1, inserted: 0, updated: 1 });
       const row = db
-        .prepare('SELECT status FROM sessions WHERE id = ?')
-        .get(`claude-${sdkSessionId}`) as { status: string };
+        .prepare('SELECT status, title, updated_at AS updatedAt FROM sessions WHERE id = ?')
+        .get(`claude-${sdkSessionId}`) as { status: string; title: string; updatedAt: number };
       expect(row.status).toBe('active');
+      // 复活即按新导入对待:元数据与 updated_at 收敛回源值,不残留删除时刻
+      // 的旧快照(review 反馈:仅复活 status 会让侧栏行与源会话不一致)。
+      expect(row.title).toBe(before.title);
+      expect(row.updatedAt).toBe(before.updatedAt);
     } finally {
       homedir.mockRestore();
       resetLocalDb();
