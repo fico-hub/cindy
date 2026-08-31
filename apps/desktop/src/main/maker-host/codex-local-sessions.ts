@@ -4833,7 +4833,11 @@ async function upsertLocalSession(thread: CodexThreadSummary): Promise<'inserted
       model = CASE WHEN sessions.updated_at <= excluded.updated_at THEN excluded.model ELSE sessions.model END,
       effort = CASE WHEN sessions.updated_at <= excluded.updated_at THEN excluded.effort ELSE sessions.effort END,
       permission_mode = CASE WHEN sessions.updated_at <= excluded.updated_at THEN excluded.permission_mode ELSE sessions.permission_mode END,
-      status = CASE WHEN sessions.updated_at <= excluded.updated_at THEN excluded.status ELSE sessions.status END,
+      status = CASE
+        WHEN sessions.status = 'deleted' THEN excluded.status
+        WHEN sessions.updated_at <= excluded.updated_at THEN excluded.status
+        ELSE sessions.status
+      END,
       sdk_session_id = excluded.sdk_session_id,
       total_token_usage = CASE WHEN sessions.updated_at <= excluded.updated_at THEN excluded.total_token_usage ELSE sessions.total_token_usage END,
       user_send_at = COALESCE(sessions.user_send_at, excluded.user_send_at),

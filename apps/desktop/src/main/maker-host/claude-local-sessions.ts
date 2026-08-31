@@ -572,6 +572,7 @@ async function upsertLocalSession(summary: ClaudeCodeSessionSummary): Promise<'i
       permission_mode = CASE WHEN sessions.updated_at <= excluded.updated_at THEN excluded.permission_mode ELSE sessions.permission_mode END,
       sdk_session_id = excluded.sdk_session_id,
       total_token_usage = CASE WHEN sessions.updated_at <= excluded.updated_at THEN excluded.total_token_usage ELSE sessions.total_token_usage END,
+      status = CASE WHEN sessions.status = 'deleted' THEN excluded.status ELSE sessions.status END,
       user_send_at = COALESCE(sessions.user_send_at, excluded.user_send_at),
       updated_at = MAX(sessions.updated_at, excluded.updated_at)
   `, [
