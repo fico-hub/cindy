@@ -253,7 +253,9 @@ describe('Windows Git PATH PowerShell probes', () => {
         }
       }
     },
-     30_000,
+    // waitFor(5s) + descendant cleanup exec(10s) + liveness probe exec(15s) already
+    // sum to 30s; leave headroom for coordinator exit, taskkill, and scheduling.
+     45_000,
   );
 
   it('reports recoverable script failures only when a logger is supplied', () => {
