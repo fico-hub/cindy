@@ -208,8 +208,21 @@ export async function getActiveTeamByLead(
  * 仍在租期内的创建 reservation(有则说明另一进程正在为它建 worker)。两条都
  * 满足的 team 不可能承载任何用户状态,调用方可安全按 failed 收口重新启用。
  */
+/** #3555 review:太年轻的 team 视为「可能仍在别处初始化」,不判孤儿。 */
+const ORPHAN_TEAM_MIN_AGE_MS = 60_000;
+
 export async function isOrphanedTeamInit(teamId: string): Promise<boolean> {
   const db = getDbClient().drizzle;
+  // 并发初始化兜底(同进程窗口已由 lifecycle 的 in-flight 集合覆盖,这里
+  // 挡住其余场景):创建后不足 ORPHAN_TEAM_MIN_AGE_MS 的 team 不判孤儿——
+  // 进程中断遗留的孤儿在用户重启重试时天然老于该地板,收敛性不受影响。
+  const [team] = await db
+    .select({ createdAt: orcaTeams.createdAt })
+    .from(orcaTeams)
+    .where(eq(orcaTeams.id, teamId))
+    .limit(1);
+  if (!team) return false;
+  if (Date.now() - team.createdAt < ORPHAN_TEAM_MIN_AGE_MS) return false;
   const [worker] = await db
     .select({ id: orcaWorkers.id })
     .from(orcaWorkers)

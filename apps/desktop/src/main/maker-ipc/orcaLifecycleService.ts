@@ -175,6 +175,12 @@ function hasNonEmptyInitialTask(value: string | undefined): value is string {
 }
 
 export function createOrcaLifecycleService(deps: OrcaLifecycleDeps): OrcaLifecycleService {
+  // #3555 review(并发误判竞态):本进程正在初始化的 team(已 createActiveTeam、
+  // worker/reservation 尚未落地)绝不能被并发的 enableTeam 判为孤儿收口——
+  // 否则先到的请求会把 worker 写进已被标 failed 的 team,返回成功但 worker
+  // 不出现在 active team 列表。in-flight 集合覆盖同进程全部并发窗口(含长
+  // 初始化);跨进程残余由 store 侧孤儿判定的最小年龄地板兜底。
+  const initializingTeamIds = new Set<string>();
   const dispatchSource = 'maker-ipc/collab';
 
   function workerPermissionModeForCreate(
@@ -321,10 +327,13 @@ export function createOrcaLifecycleService(deps: OrcaLifecycleDeps): OrcaLifecyc
     }
 
     const team = await deps.createActiveTeam(params.leadSessionId);
+    initializingTeamIds.add(team.id);
     try {
       await activateLeadTeam({ leadSessionId: params.leadSessionId, teamId: team.id });
     } catch (err) {
       return failCreatedTeamOnly({ teamId: team.id, leadSessionId: params.leadSessionId, err });
+    } finally {
+      initializingTeamIds.delete(team.id);
     }
     return { ok: true, teamId: team.id, workerPermissionMode };
   }
@@ -342,7 +351,9 @@ export function createOrcaLifecycleService(deps: OrcaLifecycleDeps): OrcaLifecyc
       // 此后每次启用都撞 ALREADY_EXISTS,永久阻塞。零 worker 行(任意状态)且无
       // 存活创建 reservation 的 team 不可能承载用户状态,按 failed 收口后继续本
       // 次启用;判定失败时保守维持 ALREADY_EXISTS,绝不误收可能有内容的 team。
-      const orphaned = await deps.isOrphanedTeamInit(existing.id).catch(() => false);
+      const orphaned = initializingTeamIds.has(existing.id)
+        ? false
+        : await deps.isOrphanedTeamInit(existing.id).catch(() => false);
       if (!orphaned) {
         return {
           ok: false,
@@ -354,10 +365,14 @@ export function createOrcaLifecycleService(deps: OrcaLifecycleDeps): OrcaLifecyc
     }
 
     const team = await deps.createActiveTeam(params.leadSessionId);
+    initializingTeamIds.add(team.id);
     const created = await deps.createWorkerInTeam({
       ...normalized,
       teamId: team.id,
       workerPermissionMode,
+    }).finally(() => {
+      // worker 行(或其失败补偿)落地后,后续判定交还给持久化状态。
+      initializingTeamIds.delete(team.id);
     });
     if (!created.ok) {
       return failCreatedTeam({

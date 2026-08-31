@@ -929,4 +929,49 @@ describe('enableTeam — 孤儿空团队自动回收 (#3555)', () => {
     });
     expect(deps.markTeamEnded).not.toHaveBeenCalled();
   });
+
+  it('并发 enableTeam:in-flight 初始化中的 team 不会被误判孤儿收口(review P1)', async () => {
+    // 竞态:A 已 createActiveTeam、worker/reservation 尚未落地时,B 进来看到
+    // 零 worker 团队。若无 in-flight 守卫,B 会把 A 的 team 判孤儿标 failed,
+    // A 随后把 worker 写进 failed team 并返回成功——结果与持久化状态不一致。
+    let releaseCreate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseCreate = resolve;
+    });
+    const { deps, service } = createDeps({
+      // 若守卫失效,B 会调用它并走收口——断言它根本不被咨询。
+      isOrphanedTeamInit: vi.fn(async () => true),
+    });
+    let activeTeam: OrcaTeamSnapshot | null = null;
+    vi.mocked(deps.getActiveTeamByLead).mockImplementation(async () => activeTeam);
+    vi.mocked(deps.createActiveTeam).mockImplementation(async (leadSessionId) => {
+      activeTeam = { id: 'team-a', leadSessionId };
+      return activeTeam;
+    });
+    vi.mocked(deps.createWorkerInTeam).mockImplementation(async (params) => {
+      await gate;
+      return createdWorker({ teamId: params.teamId });
+    });
+
+    const first = service.enableTeam({
+      leadSessionId: 'lead-1',
+      workerAgent: 'codex',
+      role: 'reviewer',
+      label: 'reviewer',
+    });
+    await vi.waitFor(() => expect(deps.createWorkerInTeam).toHaveBeenCalled());
+
+    const second = await service.enableTeam({
+      leadSessionId: 'lead-1',
+      workerAgent: 'codex',
+      role: 'reviewer',
+      label: 'reviewer-2',
+    });
+    expect(second).toMatchObject({ ok: false, errorCode: 'ALREADY_EXISTS' });
+    expect(deps.isOrphanedTeamInit).not.toHaveBeenCalled();
+    expect(deps.markTeamEnded).not.toHaveBeenCalled();
+
+    releaseCreate();
+    await expect(first).resolves.toMatchObject({ teamId: 'team-a' });
+  });
 });

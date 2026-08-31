@@ -336,9 +336,16 @@ describe('orcaTeamStore', () => {
     const client = createTestDbClient();
     setCurrentDbClient(client, 'test-user');
     const now = Date.now();
+    // 年龄地板(review 反馈):刚创建的 team 可能仍在别处初始化,不判孤儿。
+    const staleCreatedAt = now - 120_000;
     await client.exec(
       'INSERT INTO orca_teams (id, lead_session_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
-      ['team-orphan', 'lead-1', 'active', now, now],
+      ['team-young', 'lead-1', 'active', now, now],
+    );
+    await expect(isOrphanedTeamInit('team-young')).resolves.toBe(false);
+    await client.exec(
+      'INSERT INTO orca_teams (id, lead_session_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+      ['team-orphan', 'lead-1', 'active', staleCreatedAt, staleCreatedAt],
     );
     await expect(isOrphanedTeamInit('team-orphan')).resolves.toBe(true);
 
