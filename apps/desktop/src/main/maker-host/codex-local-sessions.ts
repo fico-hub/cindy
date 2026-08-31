@@ -3843,10 +3843,44 @@ async function readThreadsFromRollouts(
   return { threads: out, rejectedThreadIds: [...rejectedThreadIds] };
 }
 
+/**
+ * session_index.jsonl 解析缓存(review #3673 P2):按 ID 导入路径对每个所选
+ * 会话 × 每个候选 home 都要读一次索引,批量导入时主进程同步 IO 随会话数 ×
+ * home 数 × 索引大小线性增长。以 (mtimeMs, size) 做新鲜度判据 —— 索引是
+ * append-only jsonl,追加必然改变 size,同秒内 mtime 粒度不足由 size 兜住;
+ * appendSessionIndexEntry 写入后下一次读取自然失效重解析。命中时直接复用
+ * 解析结果,跨扫描/导入批次同样生效。返回的 Map 视为只读,调用方只做 .get()。
+ */
+const sessionIndexCache = new Map<
+  string,
+  { mtimeMs: number; size: number; entries: Map<string, CodexSessionIndexEntry> }
+>();
+
 function readSessionIndex(home: string): Map<string, CodexSessionIndexEntry> {
   const indexPath = path.join(home, 'session_index.jsonl');
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(indexPath);
+  } catch {
+    // 索引缺席(或不可 stat):行为与旧实现的 existsSync 早退一致。不缓存
+    // 空结果 —— 文件随时可能出现,缺席路径本身已是零解析成本。
+    sessionIndexCache.delete(home);
+    return new Map();
+  }
+  const cached = sessionIndexCache.get(home);
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+    return cached.entries;
+  }
+  const entries = parseSessionIndexFile(indexPath, home);
+  sessionIndexCache.set(home, { mtimeMs: stat.mtimeMs, size: stat.size, entries });
+  return entries;
+}
+
+function parseSessionIndexFile(
+  indexPath: string,
+  home: string,
+): Map<string, CodexSessionIndexEntry> {
   const out = new Map<string, CodexSessionIndexEntry>();
-  if (!fs.existsSync(indexPath)) return out;
   try {
     const lines = fs.readFileSync(indexPath, 'utf-8').split(/\r?\n/);
     for (const line of lines) {
