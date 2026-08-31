@@ -369,6 +369,53 @@ describe('Codex local session import', () => {
     expect(row.updatedAt).toBe(before.updatedAt);
   });
 
+  it('explicit import prefers session_index thread_name over stale state DB title (#3482)', async () => {
+    // Codex 侧重命名写入 session_index.jsonl 的 thread_name;state DB 行的 title
+    // 仍是旧自动标题。导入必须按 thread_name > state DB 标题取值,且索引
+    // updated_at 合入有效更新时间。
+    const dbPath = createStateDb(externalHome);
+    const rolloutPath = path.join(externalHome, 'sessions', `rollout-2026-05-13-${threadId}.jsonl`);
+    fs.mkdirSync(path.dirname(rolloutPath), { recursive: true });
+    fs.writeFileSync(rolloutPath, '');
+    insertThread(dbPath, threadId, rolloutPath, { updatedAt: 1_000, title: 'Auto Title' });
+    fs.writeFileSync(
+      path.join(externalHome, 'session_index.jsonl'),
+      `${JSON.stringify({ id: threadId, thread_name: 'My Renamed Session', updated_at: 2_000 })}\n`,
+    );
+
+    const first = await importExternalCodexSessions([threadId]);
+    expect(first).toMatchObject({ inserted: 1 });
+    const row = currentTestDb()
+      .prepare('SELECT title, updated_at AS updatedAt FROM sessions WHERE id = ?')
+      .get(`codex-${threadId}`) as { title: string; updatedAt: number };
+    expect(row.title).toBe('My Renamed Session');
+    // timestampFromAny 把小数值按秒解释并归一为毫秒:2_000s → 2_000_000ms。
+    expect(row.updatedAt).toBe(2_000_000);
+  });
+
+  it('re-import after Codex-side rename refreshes the stored title (#3482)', async () => {
+    const dbPath = createStateDb(externalHome);
+    const rolloutPath = path.join(externalHome, 'sessions', `rollout-2026-05-13-${threadId}.jsonl`);
+    fs.mkdirSync(path.dirname(rolloutPath), { recursive: true });
+    fs.writeFileSync(rolloutPath, '');
+    insertThread(dbPath, threadId, rolloutPath, { updatedAt: 1_000, title: 'Auto Title' });
+
+    const first = await importExternalCodexSessions([threadId]);
+    expect(first).toMatchObject({ inserted: 1 });
+
+    fs.writeFileSync(
+      path.join(externalHome, 'session_index.jsonl'),
+      `${JSON.stringify({ id: threadId, thread_name: 'Renamed Later', updated_at: 2_000 })}\n`,
+    );
+    const again = await importExternalCodexSessions([threadId]);
+    expect(again).toMatchObject({ inserted: 0, updated: 1 });
+    const row = currentTestDb()
+      .prepare('SELECT title, updated_at AS updatedAt FROM sessions WHERE id = ?')
+      .get(`codex-${threadId}`) as { title: string; updatedAt: number };
+    expect(row.title).toBe('Renamed Later');
+    expect(row.updatedAt).toBe(2_000_000);
+  });
+
   it('filters Codex source JSON subagent rows even when thread_source is missing', async () => {
     const dbPath = createStateDb(externalHome);
     const rolloutPath = path.join(externalHome, 'sessions', `rollout-2026-05-13-${threadId}.jsonl`);
