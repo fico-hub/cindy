@@ -76,6 +76,7 @@ import { shouldApplyExclusiveProviderReroute } from './model-route-guard.js';
 import { getSessionProvider } from './session-provider-store.js';
 import {
   buildRouteDecision,
+  explicitProviderRouteNullCause,
   gatewayDefaultRouteDecision,
   getUserProviderIdForSession,
   resolveImplicitLocalBridgeRouteResolution,
@@ -404,6 +405,24 @@ function routingTemporarilyUnavailableRoute(): RoutingDecision {
   );
 }
 
+/**
+ * issue #3631:显式绑定的自定义供应商解析失败时 fail-closed,不回落默认网关。
+ * 回落会带着网关 key 打官方网关,模型不在用户可用集 → 403 user_model_access_denied,
+ * 前端呈现为「认证失败」,误导用户重登自定义供应商。503 + retry-after 让 catalog
+ * 重载等瞬态窗口自愈;持久错配则给出可定位的独立错误语义。
+ */
+function explicitProviderRouteUnavailableRoute(
+  providerId: string,
+  wireModel: string,
+): RoutingDecision {
+  return retryableLocalRoute(
+    'explicit_provider_route_unavailable',
+    `Session is bound to custom provider "${providerId}" but no route could be resolved`
+      + ` for model "${wireModel}". Refusing to fall back to the default gateway;`
+      + ' check the provider configuration, then retry.',
+  );
+}
+
 function carriesProviderAuthPlaceholder(headers: Readonly<Record<string, string>>): boolean {
   return headerValue(headers, 'x-api-key') === CLAUDE_PROVIDER_AUTH_PLACEHOLDER_KEY;
 }
@@ -701,8 +720,26 @@ export function createModelRoutingTransform(): RoutingTransform {
         }
         return isPiGatewayRequest ? sanitizePiGatewayDecision(route, ctx.url) : route;
       };
-      if (perSession instanceof Promise) return perSession.then(recordSelectedRoute);
+      // #3631:显式绑定的自定义供应商解析失败(catalog 缺席 / 无路由)时 fail-closed。
+      // 'scope'(#886 辅助调用出服务范围)与 builtin 供应商的 null 照旧回落 ①.5/②。
+      const refuseUnresolvedExplicitRoute = (): RoutingDecision | null => {
+        if (!explicitCustomProvider || !selectedProviderId) return null;
+        const cause = explicitProviderRouteNullCause(selectedProviderId, requestAgent, wireModel);
+        if (cause !== 'unresolvable') return null;
+        log.warn('explicit custom provider route unresolvable; refusing default upstream', {
+          selectedProviderId,
+          wireModel,
+        });
+        return explicitProviderRouteUnavailableRoute(selectedProviderId, wireModel);
+      };
+      if (perSession instanceof Promise) {
+        // async 解析出 null 时此前直接透传默认上游(连 ② 的换 key 都不走),同样必须过守卫。
+        return perSession.then((route) =>
+          route ? recordSelectedRoute(route) : (refuseUnresolvedExplicitRoute() ?? recordSelectedRoute(route)));
+      }
       if (perSession) return recordSelectedRoute(perSession);
+      const explicitRefusal = refuseUnresolvedExplicitRoute();
+      if (explicitRefusal) return explicitRefusal;
       if (isPiGatewayRequest && selectedProviderId === 'xd') {
         return sanitizePiGatewayDecision(null, ctx.url);
       }

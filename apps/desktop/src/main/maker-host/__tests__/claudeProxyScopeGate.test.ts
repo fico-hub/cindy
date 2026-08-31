@@ -56,7 +56,13 @@ import {
   readClaudeSessionRoute,
   resetClaudeSessionRouteRegistryForTest,
 } from '../claude-session-route-registry';
-import { setPendingCredentialSwitchReader, setProviderOAuthTokenReader } from '../provider-route';
+import {
+  setCustomProviderKeyReader,
+  setPendingCredentialSwitchReader,
+  setProviderOAuthTokenReader,
+} from '../provider-route';
+import { setCustomProviders } from '../active-catalog';
+import { buildUserProvider } from '@cindy/model-providers';
 import {
   authenticatePiProxySession,
   registerPiProxySession,
@@ -875,5 +881,78 @@ describe('pi routingTransform — xdt session header selects the Pi provider rou
       ],
     });
     expect(decision?.headerOverride).not.toHaveProperty('x-cindy-pi-session-token');
+  });
+});
+
+describe('cc routingTransform — 显式自定义供应商解析失败 fail-closed (issue #3631)', () => {
+  const RELAY_UPSTREAM = 'https://relay.example/v1';
+  const HEADERS = {
+    'x-claude-code-session-id': 'sdk-relay',
+    authorization: 'Bearer sk-ant-oat01',
+  };
+
+  beforeEach(() => {
+    resetClaudeSessionRouteRegistryForTest();
+    setClaudeProxyGatewayKeyReader(() => 'sk-gw');
+    setClaudeProxySessionIdResolver((sdkId) => (sdkId === 'sdk-relay' ? 'sess-relay' : null));
+    setPendingCredentialSwitchReader(() => undefined);
+    setProviderOAuthTokenReader(() => null);
+    setSessionProvider('sess-relay', 'relay-station');
+    setCustomProviders([
+      buildUserProvider({
+        id: 'relay-station',
+        name: 'Relay Station',
+        runtimes: {
+          'claude-code': {
+            baseUrl: RELAY_UPSTREAM,
+            wireProtocol: 'anthropic-messages',
+            models: [{ id: 'claude-opus-5', name: 'Claude Opus 5' }],
+          },
+        },
+      }),
+    ]);
+    setCustomProviderKeyReader(() => 'relay-user-key');
+  });
+
+  afterEach(() => {
+    setCustomProviders([]);
+    setCustomProviderKeyReader(() => null);
+    clearSessionProvider('sess-relay');
+    resetClaudeSessionRouteRegistryForTest();
+  });
+
+  it('前置校验:显式自定义供应商正常态照常路由到用户上游', async () => {
+    const decision = await Promise.resolve(
+      createModelRoutingTransform()({ model: 'claude-opus-5' }, ctxWith(HEADERS)),
+    );
+    expect(decision).toMatchObject({ upstreamOverride: RELAY_UPSTREAM });
+  });
+
+  it('绑定的自定义供应商从 catalog 缺席 → 503 explicit_provider_route_unavailable,不回落默认网关', async () => {
+    // 模拟移除 / 重载窗口:会话绑定仍在,catalog 已无此供应商。修复前 ① 段放空 →
+    // ② 段换网关 key 打官方网关,模型不在该用户可用集 → 403 user_model_access_denied,
+    // 前端呈现为「认证失败」误导用户重登自定义供应商(issue #3631)。
+    setCustomProviders([]);
+    const decision = await Promise.resolve(
+      createModelRoutingTransform()({ model: 'claude-opus-5' }, ctxWith(HEADERS)),
+    );
+    expect(decision?.localHandler).toBeDefined();
+    const writeHead = vi.fn();
+    const end = vi.fn();
+    await decision?.localHandler?.({ res: { writeHead, end } } as never);
+    expect(writeHead).toHaveBeenCalledWith(503, expect.any(Object));
+    expect(JSON.parse(end.mock.calls[0][0])).toMatchObject({
+      error: { code: 'explicit_provider_route_unavailable' },
+    });
+  });
+
+  it('builtin xd 会话缺网关 key → 照旧回落 ② 直连 Anthropic(builtin null 语义不变)', () => {
+    setSessionProvider('sess-relay', 'xd');
+    setClaudeProxyGatewayKeyReader(() => null);
+    const decision = createModelRoutingTransform()(
+      { model: 'claude-haiku-4-5-20251001' },
+      ctxWith(HEADERS),
+    );
+    expect(decision).toEqual({ upstreamOverride: 'https://api.anthropic.com' });
   });
 });

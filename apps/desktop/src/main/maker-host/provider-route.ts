@@ -535,6 +535,33 @@ export function providerRoutingServesWireModel(
 }
 
 /**
+ * 显式绑定供应商的会话在 ① 段解析出 null 时的归因(issue #3631)。
+ * 只对 user-source 自定义供应商给出 fail-closed 判定;builtin 供应商
+ * (xd / anthropic / openai-cc / …)的 null 语义由 ② 段既有回落负责,不在此改变。
+ *
+ * - 'not-custom':builtin 供应商 → 保持既有回落。
+ * - 'scope':供应商存在且有路由,但 wireModel 不在其声明的服务范围
+ *   (modelPrefixes,#886 的辅助调用语义)→ 保持既有回落。
+ * - 'unresolvable':catalog 缺席(移除 / 重载窗口)、该 agent 无路由,或服务
+ *   范围内仍建不出决策 → 调用方应 fail-closed,不得回落默认网关:回落会带着
+ *   网关 key 打官方上游,模型不在用户可用集时返回 403 user_model_access_denied,
+ *   被前端呈现为「认证失败」,误导用户去重登自定义供应商。
+ */
+export function explicitProviderRouteNullCause(
+  providerId: string,
+  agent: AgentKind,
+  wireModel?: string,
+): 'not-custom' | 'scope' | 'unresolvable' {
+  const provider = getActiveCatalog().providers.find((p) => p.id === providerId);
+  if (!provider) return 'unresolvable';
+  if (provider.source !== 'user') return 'not-custom';
+  const routing = providerRoutingForModel(provider, agent, wireModel);
+  if (!routing) return 'unresolvable';
+  if (!routingServesWireModel(routing, wireModel)) return 'scope';
+  return 'unresolvable';
+}
+
+/**
  * 据某会话**显式选定的供应商**解析本次请求的路由决策。
  * 返回 null = 该会话未显式选供应商(或该供应商对此 agent 无路由,或本次请求的 wire model
  * 不在该路由声明的服务范围内)→ 调用方回落 decideXxxRoute / spawn 默认(no-break)。
