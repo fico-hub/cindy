@@ -344,7 +344,25 @@ export class EmbeddingWorker {
           // 内存态,重启后首批失败会再次熔断,端点修好后自然恢复。
           // 其余错误码(AUTH_FAILED 可因重登恢复、网络/限流为瞬态)维持
           // 既有 backoff + attempts 计数语义不变。
-          const terminal = code === 'INVALID_MODEL';
+          //
+          // 但 INVALID_MODEL 这个 code 本身语义过宽(review #3674 P1):client 的
+          // mapStatusToCode 把 400/404/422 乃至一切未识别状态都映射成它,输入级
+          // 400(单条超长/畸形输入)会被误判成模型级失配。code 不可靠,判据改成
+          // 确定性是否跟着"模型"走 —— 用极小探针输入对同 model 补发一次探测:
+          //   - 探针同样 INVALID_MODEL → 端点确实不吃这个模型(#3416 场景)→ 终态+熔断;
+          //   - 探针成功 → 模型可用,是这批输入的问题 → 维持既有 backoff 语义
+          //     (确定性输入错误按 attempts 上限有界收敛,与修复前行为一致);
+          //   - 探针遇到其它错误(网络/限流)→ 不下结论,fail-open 不熔断。
+          // 成本有界:模型级场景熔断后不再产生新探针;输入级场景每 (source, model)
+          // 每 tick 至多一次。
+          const terminal =
+            code === 'INVALID_MODEL' && !this.aborted
+              ? await this.probeModelLevelInvalidModel(source, modelId as string)
+              : false;
+          // 探针是一次网络往返,期间可能已触发 stop() —— 与 embed 后的检查点同款,
+          // abort 后绝不再开写事务;该批 job 保持 pending,下次启动续跑。
+          if (this.aborted) return;
+          if (isProviderSuspended(source)) break;
           const fc = await this.recordFailureBatch(modelJobs, `[${code}] ${msg}`, terminal);
           failCount += fc;
           if (terminal && !isProviderSuspended(source)) {
@@ -371,6 +389,46 @@ export class EmbeddingWorker {
         failCount,
       }),
     );
+  }
+
+  /**
+   * INVALID_MODEL 的模型级/输入级仲裁探针(review #3674 P1)。
+   * 返回 true = 端点对极小合法输入也报 INVALID_MODEL,确认模型级失配,
+   * 调方可安全终态化并熔断;其余一律 false(探针成功 = 输入级;探针遇到
+   * 别的错误 = 不下结论,fail-open 交回既有 backoff)。
+   * 探针文本带时间戳后缀绕开 client 的 LRU 缓存 —— 命中旧缓存的"成功"
+   * 证明不了端点现在的状态。本地 catalog 白名单外的模型在 client 入口
+   * 同步抛 INVALID_MODEL,探针不打网络、零成本得出模型级结论。
+   */
+  private async probeModelLevelInvalidModel(source: string, modelId: string): Promise<boolean> {
+    try {
+      await this.opts.getClient().embed({
+        texts: [`cindy embedding probe ${Date.now()}`],
+        model: modelId as never,
+      });
+      this.opts.log.warn(
+        JSON.stringify({
+          event: 'embeddingWorker.invalidModelProbe.requestLevel',
+          source,
+          modelId,
+          reason: 'probe input embedded fine; batch failure is input-specific, keeping backoff semantics',
+        }),
+      );
+      return false;
+    } catch (probeErr) {
+      const probeCode = probeErr instanceof EmbeddingError ? probeErr.code : 'UNKNOWN';
+      if (probeCode === 'INVALID_MODEL') return true;
+      this.opts.log.warn(
+        JSON.stringify({
+          event: 'embeddingWorker.invalidModelProbe.inconclusive',
+          source,
+          modelId,
+          probeCode,
+          reason: 'probe failed with a different code; not suspending',
+        }),
+      );
+      return false;
+    }
   }
 
   /**
