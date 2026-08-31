@@ -293,6 +293,58 @@ describe('embedding-host 多 consumer 启停', () => {
     expect(tx).toHaveBeenCalledWith('embedding.markDone', { rowids: [1] });
     expect(embed).not.toHaveBeenCalled();
   });
+
+  it('INVALID_MODEL 终态化:整批 terminal 记失败并熔断该 source;AUTH_FAILED 保持退避语义 (#3416)', async () => {
+    const host = await loadHost();
+    const { EmbeddingWorker } = await import('../EmbeddingWorker');
+    const { registerProvider } = await import('../providers');
+    const { EmbeddingError } = await import('@cindy/embedding-client');
+    registerProvider({
+      source: 'chat',
+      getTextsForJobs: vi.fn().mockResolvedValue([{ rowid: 1, text: 'hello' }]),
+    });
+    const chatJob = {
+      rowid: 1,
+      source: 'chat',
+      source_id: 'm1',
+      chunk_index: 0,
+      model_id: 'voyage/voyage-4',
+      vec_table: 'chat_messages_vec_v1',
+      attempts: 0,
+    };
+    const query = vi.fn().mockResolvedValue([chatJob]);
+    const tx = vi.fn(async () => ({ failCount: 1 }));
+    const embed = vi.fn().mockRejectedValue(
+      new EmbeddingError('Invalid model name passed in model=voyage/voyage-4', 'INVALID_MODEL', 400),
+    );
+    const worker = new EmbeddingWorker({
+      getDbClient: () => ({ query, tx }) as never,
+      getClient: () => ({ embed }) as never,
+      isVecAvailable: () => true,
+      log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as never,
+    });
+    const runTick = () => (worker as unknown as { tick(): Promise<void> }).tick();
+
+    await runTick();
+    // 确定性失败:整批 terminal 进 'failed',并熔断该 source(后续 tick 的
+    // SQL 过滤不再取它的 job,语义索引失效不再静默空转 708 次)。
+    expect(tx).toHaveBeenCalledWith(
+      'embedding.recordFailures',
+      expect.objectContaining({ terminal: true }),
+    );
+    expect(host.isEmbeddingSourceSuspended('chat')).toBe(true);
+
+    // 边界:AUTH_FAILED 可因重登恢复,保持既有退避语义、不熔断。
+    host.setEmbeddingSourceSuspended('chat', false);
+    tx.mockClear();
+    embed.mockRejectedValue(new EmbeddingError('unauthorized', 'AUTH_FAILED', 401));
+    await runTick();
+    expect(tx).toHaveBeenCalledWith(
+      'embedding.recordFailures',
+      expect.objectContaining({ terminal: false }),
+    );
+    expect(host.isEmbeddingSourceSuspended('chat')).toBe(false);
+  });
 });
 
 describe('chat embedding availability wiring', () => {

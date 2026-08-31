@@ -31,6 +31,7 @@ import {
   getProvider,
   isProviderSuspended,
   listSuspendedProviderSources,
+  setProviderSuspended,
   type EmbeddingJobForProvider,
 } from './providers';
 
@@ -335,11 +336,29 @@ export class EmbeddingWorker {
               count: modelJobs.length,
             }),
           );
-          // AUTH_FAILED / INVALID_MODEL 在 client 内已经判断为不可重试 — 但 worker 这层
-          // 不分代码, 一律走 backoff + attempts 计数, MAX_ATTEMPTS 后 → 'failed'。
-          // 这样 INVALID_MODEL 不会立刻冲 5 次烧 token, 因为 client 抛错前没打 API。
-          const fc = await this.recordFailureBatch(modelJobs, `[${code}] ${msg}`);
+          // #3416:INVALID_MODEL 是确定性失败(模型 id 对当前端点必然 400,
+          // 目录门禁只查打包 catalog、不碰真实端点,自配置网关下必失配)——
+          // 重试永远不可能成功。整批立即终态 + 熔断该 source:后续 tick 的
+          // SQL 过滤(listSuspendedProviderSources)不再取它的 job,语义索引
+          // 停止空转;熔断态可经 isEmbeddingSourceSuspended 查询。挂起是
+          // 内存态,重启后首批失败会再次熔断,端点修好后自然恢复。
+          // 其余错误码(AUTH_FAILED 可因重登恢复、网络/限流为瞬态)维持
+          // 既有 backoff + attempts 计数语义不变。
+          const terminal = code === 'INVALID_MODEL';
+          const fc = await this.recordFailureBatch(modelJobs, `[${code}] ${msg}`, terminal);
           failCount += fc;
+          if (terminal && !isProviderSuspended(source)) {
+            setProviderSuspended(source, true);
+            this.opts.log.error(
+              JSON.stringify({
+                event: 'embeddingWorker.source.suspendedTerminal',
+                source,
+                modelId,
+                code,
+                reason: 'deterministic embedding failure; suspending source until restart or manual resume',
+              }),
+            );
+          }
         }
       }
     }
@@ -390,12 +409,17 @@ export class EmbeddingWorker {
    * attempts >= MAX → status='failed' 终态。
    * 返回失败数量 (>= MAX 进 'failed' 终态的部分)。
    */
-  private async recordFailureBatch(jobs: JobRow[], errMsg: string): Promise<number> {
+  private async recordFailureBatch(
+    jobs: JobRow[],
+    errMsg: string,
+    terminal = false,
+  ): Promise<number> {
     const now = Date.now();
     const result = await this.opts.getDbClient().tx('embedding.recordFailures', {
       jobs: jobs.map((job) => ({ rowid: job.rowid, attempts: job.attempts })),
       errMsg: truncate(errMsg, 2000),
       now,
+      terminal,
     });
     return result.failCount;
   }
