@@ -105,6 +105,13 @@ export class PiRpcProcess {
    */
   private closePromise: Promise<void> | null = null;
   private readonly logger: Logger;
+  /**
+   * #3696 定界诊断:成功轮的正文可能整帧消失(jsonl 有正文、DB/UI 均无),离线
+   * 无法复现。这里按事件类型计数、在 message_end/agent_settled 落两行元数据日志
+   * (块类型与字符数,不含任何消息内容),让下一次复现能区分「pi 未发出该帧」
+   * 与「Cindy 收到后在下游丢失」。
+   */
+  private readonly eventFrameCounts = new Map<string, number>();
 
   constructor(private readonly opts: PiRpcSpawnOptions) {
     this.logger = opts.logger;
@@ -292,6 +299,7 @@ export class PiRpcProcess {
     }
 
     const event = obj as PiRpcEvent;
+    this.recordEventFrameDiagnostics(event);
     for (const [id, entry] of this.pending) {
       if (!entry.refreshTimeoutOnEvent?.(event)) continue;
       clearTimeout(entry.timer);
@@ -302,6 +310,48 @@ export class PiRpcProcess {
       }, entry.timeoutMs);
     }
     this.opts.onEvent(event);
+  }
+
+  /** 只记帧元数据(类型 / 块类型 / 字符数),绝不落消息正文 —— 日志白名单方向。 */
+  private recordEventFrameDiagnostics(event: PiRpcEvent): void {
+    const type = typeof event.type === 'string' && event.type.length > 0 ? event.type : '(untyped)';
+    this.eventFrameCounts.set(type, (this.eventFrameCounts.get(type) ?? 0) + 1);
+    if (type === 'message_end') {
+      const message = event.message as
+        | { role?: unknown; stopReason?: unknown; content?: unknown }
+        | undefined;
+      const blocks = Array.isArray(message?.content) ? message.content : [];
+      const blockTypes: string[] = [];
+      let textChars = 0;
+      let thinkingChars = 0;
+      for (const block of blocks) {
+        if (!block || typeof block !== 'object') {
+          blockTypes.push('(invalid)');
+          continue;
+        }
+        const rec = block as Record<string, unknown>;
+        const blockType = typeof rec.type === 'string' ? rec.type : '(untyped)';
+        blockTypes.push(blockType);
+        if (blockType === 'text' && typeof rec.text === 'string') textChars += rec.text.length;
+        if (blockType === 'thinking' && typeof rec.thinking === 'string') {
+          thinkingChars += rec.thinking.length;
+        }
+      }
+      this.logger.info('pi rpc message_end frame', {
+        role: typeof message?.role === 'string' ? message.role : '(missing)',
+        stopReason: typeof message?.stopReason === 'string' ? message.stopReason : null,
+        blockTypes,
+        textChars,
+        thinkingChars,
+      });
+      return;
+    }
+    if (type === 'agent_settled') {
+      this.logger.info('pi rpc turn frame histogram', {
+        frames: Object.fromEntries(this.eventFrameCounts),
+      });
+      this.eventFrameCounts.clear();
+    }
   }
 
   private failAllPending(err: Error): void {

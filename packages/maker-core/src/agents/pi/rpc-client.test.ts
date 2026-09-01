@@ -58,6 +58,95 @@ beforeEach(() => {
   mocks.spawn.mockReset();
 });
 
+describe('PiRpcProcess frame diagnostics (#3696)', () => {
+  function createProcessWithMocks() {
+    const child = makeChild();
+    mocks.spawn.mockReturnValue(child);
+    const logger = {
+      trace: vi.fn(),
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      fatal: vi.fn(),
+      child: vi.fn(),
+    };
+    logger.child.mockReturnValue(logger);
+    const transport = createPiStdioTransport({
+      binaryPath: '/pi',
+      args: ['--mode', 'rpc'],
+      cwd: '/work',
+      env: {},
+      logger,
+    });
+    const onEvent = vi.fn();
+    const proc = new PiRpcProcess({ transport, logger, onEvent, onExit: vi.fn() });
+    const feed = (frame: Record<string, unknown>): void => {
+      child.stdout.emit('data', Buffer.from(`${JSON.stringify(frame)}\n`));
+    };
+    return { proc, logger, onEvent, feed };
+  }
+
+  it('logs message_end frame metadata (block types + char counts) without message content', () => {
+    const { logger, onEvent, feed } = createProcessWithMocks();
+    feed({
+      type: 'message_end',
+      message: {
+        role: 'assistant',
+        stopReason: 'stop',
+        content: [
+          { type: 'thinking', thinking: '思考中' },
+          { type: 'text', text: 'hello world' },
+        ],
+      },
+    });
+
+    expect(logger.info).toHaveBeenCalledWith('pi rpc message_end frame', {
+      role: 'assistant',
+      stopReason: 'stop',
+      blockTypes: ['thinking', 'text'],
+      textChars: 'hello world'.length,
+      thinkingChars: '思考中'.length,
+    });
+    // 事件仍照常透传,诊断不改变协议行为。
+    expect(onEvent).toHaveBeenCalledTimes(1);
+    // 隐私:任何日志载荷里不得出现消息正文。
+    const serializedLogs = JSON.stringify([
+      logger.info.mock.calls,
+      logger.warn.mock.calls,
+      logger.debug.mock.calls,
+    ]);
+    expect(serializedLogs).not.toContain('hello world');
+    expect(serializedLogs).not.toContain('思考中');
+  });
+
+  it('logs a per-turn frame histogram at agent_settled and resets counts', () => {
+    const { logger, feed } = createProcessWithMocks();
+    feed({ type: 'agent_start' });
+    feed({ type: 'message_update', assistantMessageEvent: { type: 'text_delta' } });
+    feed({ type: 'message_update', assistantMessageEvent: { type: 'text_delta' } });
+    feed({ type: 'message_end', message: { role: 'assistant', stopReason: 'stop', content: [] } });
+    feed({ type: 'agent_settled' });
+
+    expect(logger.info).toHaveBeenCalledWith('pi rpc turn frame histogram', {
+      frames: {
+        agent_start: 1,
+        message_update: 2,
+        message_end: 1,
+        agent_settled: 1,
+      },
+    });
+
+    logger.info.mockClear();
+    feed({ type: 'agent_start' });
+    feed({ type: 'agent_settled' });
+    // 第二轮直方图不包含第一轮计数(settled 后已清零)。
+    expect(logger.info).toHaveBeenCalledWith('pi rpc turn frame histogram', {
+      frames: { agent_start: 1, agent_settled: 1 },
+    });
+  });
+});
+
 describe('PiRpcProcess process observer', () => {
   it('registers the concrete PID and disposes that generation once on close', () => {
     const child = makeChild();
