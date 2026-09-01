@@ -1158,6 +1158,58 @@ interface FailedPiStartupCleanup {
   cleanupLocal?: () => void;
 }
 
+/**
+ * pi 官方文档的用户自配置键(Windows shell 逃生门与 npm 包装命令):Cindy 每次
+ * startSession 都覆写隔离 agentHome 的 settings.json,若把这些键一并抹掉,用户在
+ * Cindy Pi 里就失去了原生 pi 文档提供的自救手段 —— #3643:bash spawn 失败时
+ * `shellPath` 是 pi Windows shell 解析的第一顺位来源,原生 pi 用户改 settings.json
+ * 即可恢复,Cindy Pi 用户此前无路可走(pi-harness「上游非退化」红线)。
+ * Cindy 自有键(transport/retry/compaction/packages)始终以新生成内容为准。
+ */
+const PI_USER_SETTINGS_PASSTHROUGH_KEYS = ['shellPath', 'shellCommandPrefix', 'npmCommand'] as const;
+
+export function mergePiUserSettingsPassthrough(
+  builtContent: string,
+  existingContent: string | null,
+): string {
+  if (existingContent === null || existingContent.trim().length === 0) return builtContent;
+  let parsedExisting: unknown;
+  try {
+    parsedExisting = JSON.parse(existingContent);
+  } catch {
+    return builtContent;
+  }
+  if (
+    typeof parsedExisting !== 'object' ||
+    parsedExisting === null ||
+    Array.isArray(parsedExisting)
+  ) {
+    return builtContent;
+  }
+  const existing = parsedExisting as Record<string, unknown>;
+  const preserved: Record<string, unknown> = {};
+  for (const key of PI_USER_SETTINGS_PASSTHROUGH_KEYS) {
+    const value = existing[key];
+    if (key === 'npmCommand') {
+      if (
+        Array.isArray(value) &&
+        value.length > 0 &&
+        value.every((item) => typeof item === 'string')
+      ) {
+        preserved[key] = value;
+      }
+      continue;
+    }
+    if (typeof value === 'string' && value.trim().length > 0) preserved[key] = value;
+  }
+  if (Object.keys(preserved).length === 0) return builtContent;
+  const built = JSON.parse(builtContent) as Record<string, unknown>;
+  for (const [key, value] of Object.entries(preserved)) {
+    if (!(key in built)) built[key] = value;
+  }
+  return JSON.stringify(built, null, 2) + '\n';
+}
+
 export function buildPiSettingsJsonContent(
   contextWindow: number,
   piCompactionPct?: number,
@@ -1552,6 +1604,35 @@ export class PiAgent extends BaseAgent {
     );
   }
 
+  /**
+   * 生成 settings.json 内容,本地会话在覆写前读回既有文件、保留用户自配置白名单键
+   * (#3643)。远端 fileOps 无 readFile,保持原覆写行为(远端 configHome 由 Cindy
+   * 全托管,用户手改场景不存在同等入口)。
+   */
+  private async buildSettingsJsonPreservingUserKeys(
+    settingsJsonPath: string,
+    opts: {
+      fileOps?: PiRemoteFileOps;
+      contextWindow?: number;
+      piCompactionPct?: number;
+      packages?: readonly PiNativePackageEntry[];
+    },
+  ): Promise<string> {
+    const built = this.buildCurrentPiSettingsJson(
+      opts.contextWindow,
+      opts.piCompactionPct,
+      opts.packages,
+    );
+    if (opts.fileOps) return built;
+    let existingContent: string | null = null;
+    try {
+      existingContent = await fs.readFile(settingsJsonPath, 'utf8');
+    } catch {
+      existingContent = null;
+    }
+    return mergePiUserSettingsPassthrough(built, existingContent);
+  }
+
   private async writePiRuntimeSettings(
     agentHome: string,
     opts: {
@@ -1562,10 +1643,9 @@ export class PiAgent extends BaseAgent {
     } = {},
   ): Promise<void> {
     const settingsJsonPath = joinRemotePosixPath(agentHome, 'settings.json');
-    const settingsJsonContent = this.buildCurrentPiSettingsJson(
-      opts.contextWindow,
-      opts.piCompactionPct,
-      opts.packages,
+    const settingsJsonContent = await this.buildSettingsJsonPreservingUserKeys(
+      settingsJsonPath,
+      opts,
     );
     if (opts.fileOps) {
       await opts.fileOps.writeFile(settingsJsonPath, settingsJsonContent);
@@ -1774,10 +1854,9 @@ export class PiAgent extends BaseAgent {
     // isolated embedded runtime. Other PI providers ignore this transport knob.
     // Agent-level retries stay with Pi (provider maxRetries stays 0 — Pi docs:
     // SDK retries can swallow quota errors before the agent sees them).
-    const settingsJsonContent = this.buildCurrentPiSettingsJson(
-      opts.contextWindow,
-      opts.piCompactionPct,
-      opts.packages,
+    const settingsJsonContent = await this.buildSettingsJsonPreservingUserKeys(
+      settingsJsonPath,
+      opts,
     );
     // 远端 launch identity 必须覆盖进程启动才读的快照。只 hash models.json 时，
     // retry/transport/compaction 改写会落到旧 configHome，daemon 纯 attach。
