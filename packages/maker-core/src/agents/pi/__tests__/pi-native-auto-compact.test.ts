@@ -383,6 +383,33 @@ describe("PiAgent native auto-compaction ownership", () => {
     await handle.close();
   });
 
+  it("applies stable-root user shellPath to a brand-new session (#3643 cross-start)", async () => {
+    // 用户在稳定根(pi-agent-home/settings.json)配置逃生门;本地 configHome 是
+    // 每会话随机目录,新会话必须能从稳定根拿到配置。
+    writeFileSync(
+      path.join(agentHome, "settings.json"),
+      JSON.stringify({ shellPath: "C:/cygwin64/bin/bash.exe" }, null, 2),
+    );
+    const handle = await start();
+    const files: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const next = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(next);
+        else if (entry.name === "settings.json") files.push(next);
+      }
+    };
+    walk(path.join(agentHome, "run-tmp"));
+    expect(files.length).toBeGreaterThan(0);
+    const written = JSON.parse(readFileSync(files[files.length - 1]!, "utf8")) as {
+      shellPath?: string;
+      transport?: string;
+    };
+    expect(written.shellPath).toBe("C:/cygwin64/bin/bash.exe");
+    expect(written.transport).toBe("sse");
+    await handle.close();
+  });
+
   it("preserves user shellPath across settings.json rewrites (#3643)", async () => {
     const handle = await start();
     const files: string[] = [];

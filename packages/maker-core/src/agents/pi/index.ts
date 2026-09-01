@@ -1168,25 +1168,16 @@ interface FailedPiStartupCleanup {
  */
 const PI_USER_SETTINGS_PASSTHROUGH_KEYS = ['shellPath', 'shellCommandPrefix', 'npmCommand'] as const;
 
-export function mergePiUserSettingsPassthrough(
-  builtContent: string,
-  existingContent: string | null,
-): string {
-  if (existingContent === null || existingContent.trim().length === 0) return builtContent;
-  let parsedExisting: unknown;
+function collectPiUserSettingsPassthrough(content: string | null): Record<string, unknown> {
+  if (content === null || content.trim().length === 0) return {};
+  let parsed: unknown;
   try {
-    parsedExisting = JSON.parse(existingContent);
+    parsed = JSON.parse(content);
   } catch {
-    return builtContent;
+    return {};
   }
-  if (
-    typeof parsedExisting !== 'object' ||
-    parsedExisting === null ||
-    Array.isArray(parsedExisting)
-  ) {
-    return builtContent;
-  }
-  const existing = parsedExisting as Record<string, unknown>;
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {};
+  const existing = parsed as Record<string, unknown>;
   const preserved: Record<string, unknown> = {};
   for (const key of PI_USER_SETTINGS_PASSTHROUGH_KEYS) {
     const value = existing[key];
@@ -1201,6 +1192,18 @@ export function mergePiUserSettingsPassthrough(
       continue;
     }
     if (typeof value === 'string' && value.trim().length > 0) preserved[key] = value;
+  }
+  return preserved;
+}
+
+/** 多来源合并,靠后的来源同键覆盖靠前的(稳定根用户文件应排最后)。 */
+export function mergePiUserSettingsPassthrough(
+  builtContent: string,
+  ...existingContents: Array<string | null>
+): string {
+  const preserved: Record<string, unknown> = {};
+  for (const content of existingContents) {
+    Object.assign(preserved, collectPiUserSettingsPassthrough(content));
   }
   if (Object.keys(preserved).length === 0) return builtContent;
   const built = JSON.parse(builtContent) as Record<string, unknown>;
@@ -1605,9 +1608,15 @@ export class PiAgent extends BaseAgent {
   }
 
   /**
-   * 生成 settings.json 内容,本地会话在覆写前读回既有文件、保留用户自配置白名单键
-   * (#3643)。远端 fileOps 无 readFile,保持原覆写行为(远端 configHome 由 Cindy
-   * 全托管,用户手改场景不存在同等入口)。
+   * 生成 settings.json 内容,本地会话在覆写前保留用户自配置白名单键(#3643)。
+   * 两个来源,稳定根优先:
+   *  1. 会话 configHome 的既有 settings.json(同会话内 setModel 等覆写不丢配置);
+   *  2. 稳定 agentHome 根(pi-agent-home/settings.json)——本地 configHome 是
+   *     每会话随机目录(run-tmp/<hex>),只读会话文件会让「重启后新会话」拿不到
+   *     用户配置;稳定根文件才是跨启动生效的逃生门(对齐原生 pi 的
+   *     ~/.pi/agent/settings.json 位置语义,Cindy 自身从不写它)。
+   * 远端 fileOps 无 readFile,保持原覆写行为(远端 configHome 全托管,且本机
+   * shell 路径对远端主机无意义)。
    */
   private async buildSettingsJsonPreservingUserKeys(
     settingsJsonPath: string,
@@ -1624,13 +1633,21 @@ export class PiAgent extends BaseAgent {
       opts.packages,
     );
     if (opts.fileOps) return built;
-    let existingContent: string | null = null;
-    try {
-      existingContent = await fs.readFile(settingsJsonPath, 'utf8');
-    } catch {
-      existingContent = null;
-    }
-    return mergePiUserSettingsPassthrough(built, existingContent);
+    const readOrNull = async (file: string): Promise<string | null> => {
+      try {
+        return await fs.readFile(file, 'utf8');
+      } catch {
+        return null;
+      }
+    };
+    const stableUserSettingsPath = joinRemotePosixPath(this.resolveAgentHome(), 'settings.json');
+    const [sessionContent, stableContent] = await Promise.all([
+      readOrNull(settingsJsonPath),
+      stableUserSettingsPath === settingsJsonPath
+        ? Promise.resolve(null)
+        : readOrNull(stableUserSettingsPath),
+    ]);
+    return mergePiUserSettingsPassthrough(built, sessionContent, stableContent);
   }
 
   private async writePiRuntimeSettings(

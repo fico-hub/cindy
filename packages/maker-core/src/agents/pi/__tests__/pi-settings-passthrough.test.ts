@@ -54,6 +54,15 @@ describe('mergePiUserSettingsPassthrough (#3643)', () => {
     expect(merged.compaction).toEqual(JSON.parse(built).compaction);
   });
 
+  it('later sources win: the stable-root user file overrides the per-session file', () => {
+    const session = JSON.stringify({ shellPath: 'C:/old/session/bash.exe', npmCommand: ['npm'] });
+    const stable = JSON.stringify({ shellPath: 'C:/cygwin64/bin/bash.exe' });
+    const merged = JSON.parse(mergePiUserSettingsPassthrough(built, session, stable));
+    expect(merged.shellPath).toBe('C:/cygwin64/bin/bash.exe');
+    // 稳定根没写的键仍从会话文件保留。
+    expect(merged.npmCommand).toEqual(['npm']);
+  });
+
   it('falls back to the built content when the existing file is missing or corrupt', () => {
     expect(mergePiUserSettingsPassthrough(built, null)).toBe(built);
     expect(mergePiUserSettingsPassthrough(built, '')).toBe(built);
