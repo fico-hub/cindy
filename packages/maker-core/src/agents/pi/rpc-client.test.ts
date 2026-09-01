@@ -120,6 +120,53 @@ describe('PiRpcProcess frame diagnostics (#3696)', () => {
     expect(serializedLogs).not.toContain('思考中');
   });
 
+  it('flushes an unsettled turn histogram at the next agent_start (no cross-turn bleed)', () => {
+    const { logger, feed } = createProcessWithMocks();
+    // 第一轮:abort 类结束,收不到 agent_settled。
+    feed({ type: 'agent_start' });
+    feed({ type: 'message_update', assistantMessageEvent: { type: 'text_delta' } });
+    // 第二轮开始:先冲刷上一轮直方图并清零。
+    feed({ type: 'agent_start' });
+    expect(logger.info).toHaveBeenCalledWith('pi rpc turn frame histogram (no agent_settled)', {
+      frames: { agent_start: 1, message_update: 1 },
+    });
+    feed({ type: 'agent_settled' });
+    // 第二轮直方图不含第一轮的 message_update 计数。
+    expect(logger.info).toHaveBeenCalledWith('pi rpc turn frame histogram', {
+      frames: { agent_start: 1, agent_settled: 1 },
+    });
+  });
+
+  it('normalizes non-identifier labels to (other) so hostile fields never reach logs', () => {
+    const { logger, feed } = createProcessWithMocks();
+    const smuggled = 'secret token value with spaces';
+    feed({
+      type: smuggled,
+    });
+    feed({
+      type: 'message_end',
+      message: {
+        role: smuggled,
+        stopReason: smuggled,
+        content: [{ type: smuggled, text: 'x' }],
+      },
+    });
+    feed({ type: 'agent_settled' });
+    expect(logger.info).toHaveBeenCalledWith('pi rpc message_end frame', {
+      role: '(other)',
+      stopReason: '(other)',
+      blockTypes: ['(other)'],
+      textChars: 0,
+      thinkingChars: 0,
+    });
+    const serializedLogs = JSON.stringify([logger.info.mock.calls, logger.warn.mock.calls]);
+    expect(serializedLogs).not.toContain(smuggled);
+    // 直方图键同样被归一化。
+    expect(logger.info).toHaveBeenCalledWith('pi rpc turn frame histogram', {
+      frames: { '(other)': 1, message_end: 1, agent_settled: 1 },
+    });
+  });
+
   it('logs a per-turn frame histogram at agent_settled and resets counts', () => {
     const { logger, feed } = createProcessWithMocks();
     feed({ type: 'agent_start' });
