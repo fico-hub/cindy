@@ -587,6 +587,7 @@ import {
 } from '../maker-host/pi-package-mutation-grant.js';
 import { CURRENT_CINDY_REGION } from '../../shared/brandRegion.js';
 import {
+  readXaiSubscriptionUsageSnapshotForDeviceLink,
   triggerClaudeSubscriptionUsageRefresh,
   triggerCodexAccountUsageRefresh,
   triggerXaiSubscriptionUsageRefresh,
@@ -1001,6 +1002,7 @@ import {
   setRemoteReviewInputGuard as setDeviceLinkRemoteReviewInputGuard,
   setRemoteWorkingDirGuard as setDeviceLinkRemoteWorkingDirGuard,
   setRemoteSettingsPersist as setDeviceLinkRemoteSettingsPersist,
+  setRemoteXaiSubscriptionUsageReader as setDeviceLinkRemoteXaiSubscriptionUsageReader,
 } from '../device-link/dispatch.js';
 import {
   deviceLinkInvokeControllerSupports,
@@ -6223,6 +6225,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   // 必须是本机当前可访问的目录,挡掉控制端用任意路径越权起进程或执行 git。
   setDeviceLinkRemoteWorkingDirGuard(checkRemoteWorkingDir);
   setDeviceLinkRemoteReviewInputGuard(assertReviewExternalInputAllowed);
+  // 远程 xAI 订阅余量只读:该 channel 的 ipcMain handler 挂 assertTrustedSender,
+  // device-link 由 dispatch 拦截直读注入的 reader(见 dispatch.ts 同名 setter 注释)。
+  setDeviceLinkRemoteXaiSubscriptionUsageReader(readXaiSubscriptionUsageSnapshotForDeviceLink);
 
   // device-link 远程 set-* 持久化回流:effort/permission/fastMode/extraDirs 等
   // runtime-only handler 经这个注入写被控端 DB + 广播 patched。SET_MODEL 是例外:

@@ -294,4 +294,35 @@ describe('claude subscription snapshot hydration race', () => {
       null,
     );
   });
+
+  it('taps codex account broadcasts with the authoritative combined payload', async () => {
+    const broadcaster = await import('../usageBroadcaster');
+    mocks.queryOne.mockResolvedValue(null);
+
+    await broadcaster.recordCodexAccountUsageSnapshot({
+      source: 'codex-app-server',
+      limitId: 'codex',
+      primary: { usedPercent: 3, windowMinutes: 10_080 },
+    });
+
+    const tapped = mocks.tapWindowBroadcast.mock.calls.find(
+      ([channel]) => channel === 'usage:codex-account-changed',
+    );
+    // 转发的是组合 payload(远程镜像按整帧替换消费)。
+    expect(tapped?.[1]).toMatchObject({ limitId: 'codex' });
+  });
+
+  it('taps xai rate-limit record and clear broadcasts', async () => {
+    const broadcaster = await import('../usageBroadcaster');
+
+    broadcaster.recordXaiRateLimitSnapshot({ source: 'cli-chat-proxy' } as never);
+    expect(mocks.tapWindowBroadcast).toHaveBeenCalledWith(
+      'usage:xai-rate-limit-changed',
+      expect.objectContaining({ updatedAt: expect.any(Number) }),
+    );
+
+    mocks.tapWindowBroadcast.mockClear();
+    broadcaster.clearXaiRateLimitSnapshot();
+    expect(mocks.tapWindowBroadcast).toHaveBeenCalledWith('usage:xai-rate-limit-changed', null);
+  });
 });
