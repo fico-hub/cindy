@@ -26,7 +26,7 @@ export interface YieldedExecCell {
  * 接受(协议级 executionHandle 落地前的启发式边界)。
  */
 export const YIELDED_EXEC_CELL_RE =
-  /(?:^|\n)Script running with cell ID[ \t]+(\d+)(?:[ \t]+|\n)Wall time[ \t]/gi;
+  /(?:^|\r?\n)Script running with cell ID[ \t]+(\d+)(?:[ \t]+|\r?\n)Wall time[ \t]/gi;
 
 const MAX_SCAN_CHARS = 16_384;
 

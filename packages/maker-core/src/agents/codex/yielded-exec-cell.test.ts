@@ -27,6 +27,16 @@ describe('extractYieldedExecCellIds', () => {
     expect(extractYieldedExecCellIds('Exit 0\n\n> tsc --noEmit\n')).toEqual([]);
   });
 
+  // Windows 路径:执行器状态头以 CRLF 分行时同样是真实 yield,不得漏判(假完成)。
+  it('recognizes a CRLF-delimited executor status header', () => {
+    expect(extractYieldedExecCellIds(
+      'Script running with cell ID 226\r\nWall time 11.0 seconds\r\nOutput:\r\n',
+    )).toEqual(['226']);
+    expect(extractYieldedExecCellIds(
+      'chunk done\r\nScript running with cell ID 42\r\nWall time 1.0 seconds\r\n',
+    )).toEqual(['42']);
+  });
+
   // #3763:被引用/示例出现的 marker 文案不是执行器状态头,不得铸造 cell。
   it('ignores quoted or prefixed markers that are not executor status headers', () => {
     // grep 输出:路径:行号: 前缀,不在物理行首。
