@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>PR #3789 状态示意 — 远程订阅会话状态栏(演示数据)</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, "PingFang SC", "Helvetica Neue", sans-serif; padding: 28px; background: #ececec; }
+  h1 { font-size: 15px; margin-bottom: 4px; color: #333; }
+  .note { font-size: 11px; color: #777; margin-bottom: 20px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; max-width: 1060px; }
+  .pane { border-radius: 10px; overflow: hidden; box-shadow: 0 1px 4px rgba(0,0,0,.12); }
+  .pane h2 { font-size: 11.5px; font-weight: 600; padding: 8px 12px; }
+  .light .surface { background: #faf9f7; }
+  .light h2 { background: #f0efec; color: #555; }
+  .dark .surface { background: #262624; }
+  .dark h2 { background: #1d1d1b; color: #b6b4ae; }
+  /* 状态栏行:输入框下方,右下角 chip + context ring */
+  .statusrow { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; height: 40px; }
+  .workdir { display: flex; align-items: center; gap: 5px; font-size: 12px; }
+  .light .workdir { color: #8a8880; }
+  .dark .workdir { color: #85837c; }
+  .workdir svg { width: 12px; height: 12px; }
+  .right { display: flex; align-items: center; gap: 12px; }
+  .chip { font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums; line-height: 1; }
+  .light .chip { color: #8a8880; }
+  .dark .chip { color: #85837c; }
+  .chip .dim { opacity: .6; }
+  .chip .sep { opacity: .45; padding: 0 3px; }
+  .ring { width: 15px; height: 15px; }
+  .ringwrap { display: flex; align-items: center; gap: 4px; font-size: 11px; }
+  .light .ringwrap { color: #8a8880; }
+  .dark .ringwrap { color: #85837c; }
+  /* 悬停额度卡示意 */
+  .card { margin: 10px 14px 14px auto; width: 300px; border-radius: 10px; padding: 12px 14px; font-size: 12px; }
+  .light .card { background: #ffffff; border: 1px solid #e4e2dd; color: #3d3c38; box-shadow: 0 6px 22px rgba(0,0,0,.10); }
+  .dark .card { background: #30302d; border: 1px solid #45443f; color: #d6d4cd; box-shadow: 0 6px 22px rgba(0,0,0,.35); }
+  .card .row { margin-bottom: 10px; }
+  .card .rowhead { display: flex; justify-content: space-between; margin-bottom: 4px; }
+  .card .rowhead .pct { font-variant-numeric: tabular-nums; }
+  .bar { height: 4px; border-radius: 2px; overflow: hidden; }
+  .light .bar { background: #eceae5; }
+  .dark .bar { background: #45443f; }
+  .bar i { display: block; height: 100%; border-radius: 2px; background: #b3b1aa; }
+  .card .meta { font-size: 11px; opacity: .65; margin-top: 2px; }
+  .card .divider { height: 1px; margin: 10px 0; }
+  .light .card .divider { background: #eceae5; }
+  .dark .card .divider { background: #45443f; }
+  .caption { font-size: 10.5px; padding: 0 12px 10px; }
+  .light .caption { color: #999; }
+  .dark .caption { color: #777; }
+</style>
+</head>
+<body>
+<h1>PR #3789 — 控制端远程会话状态栏(TodaySpendChip)状态示意</h1>
+<div class="note">演示数据、非实机截图(端到端需两台设备各跑本分支构建);颜色为近似 token 值。左列 Light / 右列 Dark。</div>
+<div class="grid">
+
+  <!-- 改动前 light -->
+  <div class="pane light" id="before-light">
+    <h2>改动前 · device-link 远程会话(任意形态)— 仅裸货币符号占位</h2>
+    <div class="surface">
+      <div class="statusrow">
+        <span class="workdir"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>ficowang</span>
+        <span class="right">
+          <span class="chip"><span class="dim">¥</span></span>
+          <span class="ringwrap"><svg class="ring" viewBox="0 0 20 20"><circle cx="10" cy="10" r="8" fill="none" stroke="#dcdad4" stroke-width="2.5"/><path d="M10 2 A8 8 0 0 1 14.7 3.7" fill="none" stroke="#8a8880" stroke-width="2.5" stroke-linecap="round"/></svg>9%</span>
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <!-- 改动前 dark -->
+  <div class="pane dark" id="before-dark">
+    <h2>改动前 · device-link 远程会话(任意形态)— 仅裸货币符号占位</h2>
+    <div class="surface">
+      <div class="statusrow">
+        <span class="workdir"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>ficowang</span>
+        <span class="right">
+          <span class="chip"><span class="dim">¥</span></span>
+          <span class="ringwrap"><svg class="ring" viewBox="0 0 20 20"><circle cx="10" cy="10" r="8" fill="none" stroke="#45443f" stroke-width="2.5"/><path d="M10 2 A8 8 0 0 1 14.7 3.7" fill="none" stroke="#85837c" stroke-width="2.5" stroke-linecap="round"/></svg>9%</span>
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <!-- 改动后 light -->
+  <div class="pane light" id="after-light">
+    <h2>改动后 · 显式 anthropic 远程会话 — 与本机订阅形态一致的窗口段</h2>
+    <div class="surface">
+      <div class="statusrow">
+        <span class="workdir"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>ficowang</span>
+        <span class="right">
+          <span class="chip">2小时58分 剩余 96%<span class="sep">·</span>Fable 4天 剩余 92%<span class="sep">·</span>本任务 ¥3.42</span>
+          <span class="ringwrap"><svg class="ring" viewBox="0 0 20 20"><circle cx="10" cy="10" r="8" fill="none" stroke="#dcdad4" stroke-width="2.5"/><path d="M10 2 A8 8 0 0 1 14.7 3.7" fill="none" stroke="#8a8880" stroke-width="2.5" stroke-linecap="round"/></svg>9%</span>
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <!-- 改动后 dark -->
+  <div class="pane dark" id="after-dark">
+    <h2>改动后 · 显式 anthropic 远程会话 — 与本机订阅形态一致的窗口段</h2>
+    <div class="surface">
+      <div class="statusrow">
+        <span class="workdir"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>ficowang</span>
+        <span class="right">
+          <span class="chip">2小时58分 剩余 96%<span class="sep">·</span>Fable 4天 剩余 92%<span class="sep">·</span>本任务 ¥3.42</span>
+          <span class="ringwrap"><svg class="ring" viewBox="0 0 20 20"><circle cx="10" cy="10" r="8" fill="none" stroke="#45443f" stroke-width="2.5"/><path d="M10 2 A8 8 0 0 1 14.7 3.7" fill="none" stroke="#85837c" stroke-width="2.5" stroke-linecap="round"/></svg>9%</span>
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <!-- 悬停额度卡 light -->
+  <div class="pane light" id="card-light">
+    <h2>改动后 · 悬停额度卡(数据来源=被控端镜像,渲染复用 QuotaHoverCard)</h2>
+    <div class="surface" style="padding-bottom:2px;">
+      <div class="card">
+        <div class="row"><div class="rowhead"><span>5 小时</span><span class="pct">已用 4%</span></div><div class="bar"><i style="width:4%"></i></div><div class="meta">18:30 重置</div></div>
+        <div class="row"><div class="rowhead"><span>周限</span><span class="pct">已用 8%</span></div><div class="bar"><i style="width:8%"></i></div><div class="meta">周六 13:59 重置</div></div>
+        <div class="row"><div class="rowhead"><span>Fable 周限</span><span class="pct">已用 8%</span></div><div class="bar"><i style="width:8%"></i></div></div>
+        <div class="divider"></div>
+        <div style="display:flex;justify-content:space-between;font-size:11.5px;opacity:.8;"><span>本任务合计</span><span class="pct">¥3.42</span></div>
+      </div>
+      <div class="statusrow" style="height:34px;">
+        <span></span>
+        <span class="right">
+          <span class="chip">2小时58分 剩余 96%<span class="sep">·</span>Fable 4天 剩余 92%<span class="sep">·</span>本任务 ¥3.42</span>
+          <span class="ringwrap"><svg class="ring" viewBox="0 0 20 20"><circle cx="10" cy="10" r="8" fill="none" stroke="#dcdad4" stroke-width="2.5"/><path d="M10 2 A8 8 0 0 1 14.7 3.7" fill="none" stroke="#8a8880" stroke-width="2.5" stroke-linecap="round"/></svg>9%</span>
+        </span>
+      </div>
+      <div class="caption">chip 不可点:看板属被控端账号,本机浏览器打开的会是控制端自己的账号(维持既有 null 语义)。</div>
+    </div>
+  </div>
+
+  <!-- 悬停额度卡 dark + 降级 -->
+  <div class="pane dark" id="card-dark">
+    <h2>改动后 · 悬停额度卡(Dark)/ 老被控端降级维持裸占位</h2>
+    <div class="surface" style="padding-bottom:2px;">
+      <div class="card">
+        <div class="row"><div class="rowhead"><span>5 小时</span><span class="pct">已用 4%</span></div><div class="bar"><i style="width:4%"></i></div><div class="meta">18:30 重置</div></div>
+        <div class="row"><div class="rowhead"><span>周限</span><span class="pct">已用 8%</span></div><div class="bar"><i style="width:8%"></i></div><div class="meta">周六 13:59 重置</div></div>
+        <div class="row"><div class="rowhead"><span>Fable 周限</span><span class="pct">已用 8%</span></div><div class="bar"><i style="width:8%"></i></div></div>
+        <div class="divider"></div>
+        <div style="display:flex;justify-content:space-between;font-size:11.5px;opacity:.8;"><span>本任务合计</span><span class="pct">¥3.42</span></div>
+      </div>
+      <div class="statusrow" style="height:34px;">
+        <span class="workdir" style="font-size:11px;">老被控端(CHANNEL_NOT_ALLOWED)→ 降级:</span>
+        <span class="right">
+          <span class="chip"><span class="dim">¥</span></span>
+          <span class="ringwrap"><svg class="ring" viewBox="0 0 20 20"><circle cx="10" cy="10" r="8" fill="none" stroke="#45443f" stroke-width="2.5"/><path d="M10 2 A8 8 0 0 1 14.7 3.7" fill="none" stroke="#85837c" stroke-width="2.5" stroke-linecap="round"/></svg>9%</span>
+        </span>
+      </div>
+      <div class="caption">默认路由(providerId 为空)的远程会话同样维持此占位显示(不做本机启发式猜测)。</div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
