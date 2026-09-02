@@ -50,6 +50,11 @@ describe('topicForPush', () => {
       projectOrder: 'custom',
       manualProjectOrder: ['local:/a'],
     })).toBe('sessions');
+    // Claude 订阅余量快照(账号级,无 sessionId;null = 登出清除)→ 并入 sessions topic。
+    expect(topicForPush('usage:claude-subscription-changed', {
+      fiveHour: { utilization: 4, resetsAt: 1788345000 },
+    })).toBe('sessions');
+    expect(topicForPush('usage:claude-subscription-changed', null)).toBe('sessions');
   });
 
   it('learn:event → sessions(账号级:run 关联触发/蒸馏两个任务,单 sessionId 路由会漏)', () => {

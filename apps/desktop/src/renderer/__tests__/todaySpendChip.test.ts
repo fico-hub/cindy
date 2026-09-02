@@ -113,12 +113,21 @@ describe('TodaySpendChip dashboard routing', () => {
     expect(source).toContain(
       "vendorKey === 'cc' && !isRemoteClaudeSession && !isDeviceLinkRemote && providerId == null",
     );
-    // 订阅形态分类整体排除 device-link(专属分支接管渲染)
+    // 订阅形态分类的本机启发式整体排除 device-link;显式 anthropic 的远程会话走
+    // 被控端镜像快照(useRemoteClaudeSubscriptionUsage),不读任何本机账号状态。
     expect(source).toContain(
       "|| (vendorKey === 'pi' && !remoteHostId && providerId === 'anthropic')",
     );
-    // 渲染走专属分支:估算价值 / 累计 cost 有哪个显哪个,不显示本机限额窗口
-    expect(source).toContain('if (isDeviceLinkRemote) {');
+    expect(source).toContain('const isDeviceLinkRemoteClaudeSubscription =');
+    expect(source).toContain(
+      'isDeviceLinkRemoteClaudeSubscription ? deviceLinkDeviceId ?? null : null,',
+    );
+    // 本机订阅快照 hook 对 device-link 关闭(两个 hook 的 enabled 互斥)
+    expect(source).toContain(
+      'isClaudeSubscription && !isSubscriptionBridge && !isDeviceLinkRemote,',
+    );
+    // 非订阅的远程会话仍走专属分支:估算价值 / 累计 cost 有哪个显哪个,不显示本机限额窗口
+    expect(source).toContain('if (isDeviceLinkRemote && !isDeviceLinkRemoteClaudeSubscription) {');
     // 看板链接对 device-link 落 null(额度属于被控端账号,本机浏览器打开的是控制端账号)
     expect(source).toMatch(/usageDashboardUrl: string \| null = isDeviceLinkRemote\s*\?\s*null/);
   });
@@ -399,9 +408,16 @@ describe('TodaySpendChip dashboard routing', () => {
         '      requestCodexAccountRefresh();\n' +
         '    } else if (usesXaiQuotaForm) {\n' +
         '      requestXaiSubscriptionRefresh();\n' +
-        '    } else if (isClaudeSubscription && !usesCodexQuotaForm) {\n' +
-        '      requestClaudeSubscriptionRefresh();\n' +
-        '    }',
+        '    } else if (isClaudeSubscription && !usesCodexQuotaForm) {',
+    );
+    // 悬念期催刷按会话来源分路:远程订阅会话催被控端(隧道,被控端节流兜底),
+    // 本机订阅会话催本机;不得拿本机通道替远程会话催刷(账号不同)。
+    expect(source).toContain(
+      'if (isDeviceLinkRemoteClaudeSubscription && deviceLinkDeviceId) {\n' +
+        '        requestRemoteClaudeSubscriptionRefresh(deviceLinkDeviceId);\n' +
+        '      } else if (!isDeviceLinkRemote) {\n' +
+        '        requestClaudeSubscriptionRefresh();\n' +
+        '      }',
     );
     expect(source).toContain(
       'const hasPendingResetWindow = chipWindows.some((window) => window.resetPending);',

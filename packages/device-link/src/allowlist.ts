@@ -407,6 +407,13 @@ const EXTENDED_INVOKE_CHANNELS: readonly string[] = [
   // 人工 reset。mutation 不接收 creditId,不能泛化成任意账号/凭证控制入口。
   'maker:usage:codex-rate-limits',
   'maker:usage:codex-rate-limit-reset',
+  // Claude 订阅账号余量快照(只读,cached-first):控制端远程会话状态栏 chip 显示
+  // 被控端订阅的 5h/周/分模型窗口剩余(数据真相在被控端 —— turn 在被控端消耗其
+  // 订阅额度)。快照只含利用率百分比、reset 时间与账号归属指纹(单向 scrypt 哈希,
+  // 与本机 renderer 收到的广播 payload 同形),不含凭证材料。无 sender 依赖、无副
+  // 作用;老被控端无此 channel → CHANNEL_NOT_ALLOWED → 控制端降级为原「仅会话
+  // 金额」占位显示。
+  'maker:usage:claude-subscription',
   // 模型单价表(只读,main 侧 Model Access model-groups 投影缓存):控制端模型选择器展示
   // 被控端视角的单价(与被控端桌面 tooltip 同源)。无 sender 依赖、无副作用;老被控端无此 channel
   // → CHANNEL_NOT_ALLOWED → 控制端隐藏价格(与桌面「无价不显示」口径一致)。
@@ -579,6 +586,11 @@ export const PUSH_FORWARD_ALLOWLIST: ReadonlySet<string> = new Set([
   // sessions:patched,控制端远程会话底部 $ chip 依赖这两条把累计值镜像成被控端真相。
   'usage:session-spend-changed',
   'usage:session-tokens-changed',
+  // Claude 订阅账号余量变化(账号级,无 sessionId → topics.ts 归入 sessions topic):
+  // 控制端远程会话 chip 据此实时镜像被控端订阅窗口剩余。推送频率有上限:被控端
+  // headers 观察器按 (5h,7d,status) 签名去抖、端点刷新 180s 节流,只有数值变化才
+  // 广播,不随 turn 内逐请求刷帧。
+  'usage:claude-subscription-changed',
   // local-db 推送(读模型增量)
   'local-db:sessions:created',
   'local-db:sessions:patched',

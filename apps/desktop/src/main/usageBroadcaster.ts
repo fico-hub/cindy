@@ -43,6 +43,7 @@ import {
 } from '@cindy/maker-shared/codex-usage-buckets';
 
 import { createLogger } from './logger';
+import { tapWindowBroadcast } from './device-link/broadcast-tap.js';
 import type { RegionalMoney } from '../shared/regionalMoney.js';
 
 const log = createLogger('usageBroadcaster');
@@ -1107,6 +1108,9 @@ function broadcastClaudeSubscriptionUsage(payload: ClaudeSubscriptionUsageSnapsh
       win.webContents.send(USAGE_CLAUDE_SUBSCRIPTION_CHANGED, payload);
     }
   }
+  // device-link:控制端远程订阅会话的 chip 镜像被控端余量。频率上限由上游保证
+  // (headers 观察器签名去抖 + 端点 180s 节流),无 active 链路时 tap 是 O(1) no-op。
+  tapWindowBroadcast(USAGE_CLAUDE_SUBSCRIPTION_CHANGED, payload);
 }
 
 function broadcastXaiSubscriptionUsage(payload: XaiSubscriptionUsageSnapshot | null): void {

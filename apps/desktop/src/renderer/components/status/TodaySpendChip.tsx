@@ -80,6 +80,10 @@ import {
   type ClaudeSubscriptionUsageSnapshot,
 } from '@/hooks/useClaudeSubscriptionUsage';
 import {
+  requestRemoteClaudeSubscriptionRefresh,
+  useRemoteClaudeSubscriptionUsage,
+} from '@/hooks/useRemoteClaudeSubscriptionUsage';
+import {
   isClaudeSubscriptionAlerting,
   matchScopedWindowForModel,
   type ClaudeUsageWindow,
@@ -1124,7 +1128,16 @@ export function TodaySpendChip({
   const observedClaudeRoute = useClaudeSessionRoute(sessionId, isDefaultRouteClaudeSession);
   const ccBillingFormPending = isDefaultRouteClaudeSession && observedClaudeRoute == null
     && (gatewayKeyReconciling || (!hasGatewayKey && claudeOAuthConnected == null));
-  const isClaudeSubscription = !isDeviceLinkRemote && (
+  // device-link 远程会话的订阅形态只认镜像会话行的**显式**供应商选择(providerId=
+  // 'anthropic',随 sessions 同步,是被控端真相):控制端看不到被控端 proxy 的路由观察,
+  // 也不能拿本机 OAuth / 网关 key 状态替被控端做默认路由启发(张冠李戴),所以默认路由
+  // 的远程会话维持「仅会话金额」显示。快照数据经 useRemoteClaudeSubscriptionUsage 从
+  // 被控端镜像,渲染形态与本机订阅会话完全一致。
+  const isDeviceLinkRemoteClaudeSubscription =
+    isDeviceLinkRemote
+    && (vendorKey === 'cc' || vendorKey === 'pi')
+    && providerId === 'anthropic';
+  const isClaudeSubscription = isDeviceLinkRemoteClaudeSubscription || (!isDeviceLinkRemote && (
     (
       vendorKey === 'cc'
       && !isRemoteClaudeSession
@@ -1139,7 +1152,7 @@ export function TodaySpendChip({
     )
     // Pi 的 provider 在创建会话时已经显式固化，不需要再从 CC proxy route 猜。
     || (vendorKey === 'pi' && !remoteHostId && providerId === 'anthropic')
-  );
+  ));
   // cc 走「订阅直连 bridge」= model 带 chatgpt/ / xai/ 前缀(经本地 responses-bridge 打用户个人
   // 订阅额度,真实计费恒 0,gateway quota 与之无关):
   //   - chatgpt/ → 与 codex 同一 ChatGPT 账户,复用 codex 订阅 chip 形态(限额窗口 + 价值估算);
@@ -1274,10 +1287,17 @@ export function TodaySpendChip({
   const creditUsage = useModelAccessCreditUsage(usesGatewayQuota);
   const creditTotals = React.useMemo(() => resolveCreditTotals(creditUsage), [creditUsage]);
   // Claude 订阅账号余量 (5h/周/分模型窗口, 端点 + proxy 旁路 headers 双源)。bridge 模型形态
-  // 优先(不消耗 Claude 订阅额度),此时不读。
-  const claudeSubscriptionUsage = useClaudeSubscriptionUsage(
+  // 优先(不消耗 Claude 订阅额度),此时不读。device-link 远程会话读被控端镜像,
+  // 本机快照与其无关(额度事实在被控端),两个 hook 的 enabled 互斥。
+  const localClaudeSubscriptionUsage = useClaudeSubscriptionUsage(
     isClaudeSubscription && !isSubscriptionBridge && !isDeviceLinkRemote,
   );
+  const remoteClaudeSubscriptionUsage = useRemoteClaudeSubscriptionUsage(
+    isDeviceLinkRemoteClaudeSubscription ? deviceLinkDeviceId ?? null : null,
+  );
+  const claudeSubscriptionUsage = isDeviceLinkRemote
+    ? remoteClaudeSubscriptionUsage
+    : localClaudeSubscriptionUsage;
   const latestTurnUsage = useLatestTurnUsageSummary(sessionId);
   const quotaCardSessionUsage = toQuotaHoverCardSessionUsage(sessionUsage);
   const quotaCardTurnUsage = toQuotaHoverCardTurnUsage(latestTurnUsage, t);
@@ -1547,9 +1567,14 @@ export function TodaySpendChip({
     } else if (usesXaiQuotaForm) {
       requestXaiSubscriptionRefresh();
     } else if (isClaudeSubscription && !usesCodexQuotaForm) {
-      requestClaudeSubscriptionRefresh();
+      // 远程订阅会话的悬念期催被控端刷新(经隧道,被控端节流兜底);本机催本机。
+      if (isDeviceLinkRemoteClaudeSubscription && deviceLinkDeviceId) {
+        requestRemoteClaudeSubscriptionRefresh(deviceLinkDeviceId);
+      } else if (!isDeviceLinkRemote) {
+        requestClaudeSubscriptionRefresh();
+      }
     }
-  }, [hasPendingResetWindow, xaiNeedsWeeklyRefresh, isChatgptBridge, isClaudeSubscription, usesCodexQuotaForm, usesXaiQuotaForm, windowLabelNowMs]);
+  }, [hasPendingResetWindow, xaiNeedsWeeklyRefresh, isChatgptBridge, isClaudeSubscription, isDeviceLinkRemote, isDeviceLinkRemoteClaudeSubscription, deviceLinkDeviceId, usesCodexQuotaForm, usesXaiQuotaForm, windowLabelNowMs]);
 
   const isDashboardClickable = usageDashboardUrl !== null;
   const handleClick = () => {
@@ -1559,8 +1584,10 @@ export function TodaySpendChip({
 
   let labelNode: React.ReactNode;
   let tooltipNode: React.ReactNode = usageDashboardLabel;
-  if (isDeviceLinkRemote) {
+  if (isDeviceLinkRemote && !isDeviceLinkRemoteClaudeSubscription) {
     // device-link 远程会话不读取本机账号形态；金额仍使用同一个会话合计投影。
+    // (显式 anthropic 的远程订阅会话不走这里——落到下方 isClaudeSubscription 分支,
+    // 用被控端镜像快照按本机订阅形态渲染。)
     const chipSegments = sessionSegment ? [sessionSegment] : [];
     labelNode = chipSegments.length > 0
       ? renderSegmentedLabel(chipSegments)
