@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   CODEX_SANDBOX_INIT_FAILURE_NOTE,
   annotateSandboxInitFailure,
+  commandInvokesBwrap,
   isBwrapSandboxInitFailureOutput,
 } from './sandbox-init-failure.js';
 
@@ -38,7 +39,38 @@ describe('isBwrapSandboxInitFailureOutput (#3793)', () => {
   });
 });
 
+describe('commandInvokesBwrap', () => {
+  it('matches direct and pathed bwrap invocations', () => {
+    expect(commandInvokesBwrap('bwrap --ro-bind / / ls')).toBe(true);
+    expect(commandInvokesBwrap('/usr/bin/bwrap --help')).toBe(true);
+    expect(commandInvokesBwrap('sudo bwrap --unshare-net true')).toBe(true);
+    expect(commandInvokesBwrap('a && bwrap x')).toBe(true);
+  });
+
+  it('does not match commands that merely mention bwrap as data', () => {
+    expect(commandInvokesBwrap('ls bwrap.log')).toBe(false);
+    expect(commandInvokesBwrap('grep bwrapped notes.txt')).toBe(false);
+    expect(commandInvokesBwrap('pwd')).toBe(false);
+    expect(commandInvokesBwrap(null)).toBe(false);
+  });
+});
+
 describe('annotateSandboxInitFailure', () => {
+  // review P1:用户命令自身调用 bwrap 时,诊断行来自内层 bwrap,不得归因外层沙箱。
+  it('skips annotation when the failed command itself invokes bwrap', () => {
+    const text = 'bwrap: unknown option --bogus\n';
+    expect(annotateSandboxInitFailure(text, true, 'bwrap --bogus ls')).toBe(text);
+  });
+
+  it('still annotates a non-bwrap command with pure bwrap diagnostics', () => {
+    const out = annotateSandboxInitFailure(
+      'bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted\n',
+      true,
+      'ls',
+    );
+    expect(out).toContain(CODEX_SANDBOX_INIT_FAILURE_NOTE);
+  });
+
   it('appends the host note for a failed init-failure item', () => {
     const out = annotateSandboxInitFailure(
       'bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted\n',

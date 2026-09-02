@@ -45,8 +45,27 @@ export const CODEX_SANDBOX_INIT_FAILURE_NOTE =
   'they can either switch this task to Full access (their explicit choice) or run Cindy on a host ' +
   'that permits sandbox namespaces.';
 
+/**
+ * 命令本身就在调用 bwrap 时不做归因:此时 `bwrap: ` 诊断行来自**用户命令内层**
+ * 的 bwrap(参数错误 / 嵌套沙箱被拒等),把它归因为 Codex 外层沙箱初始化失败并
+ * 建议切 Full access 是误导(review P1)。外层沙箱真的起不来时,任意命令都会
+ * 中招,下一条非 bwrap 命令仍会得到标注 —— 跳过的漏报代价可忽略。
+ */
+const COMMAND_INVOKES_BWRAP_RE = /(^|[\s/\\;|&('"`])bwrap(\s|$|['"`)])/;
+
+export function commandInvokesBwrap(command: string | null | undefined): boolean {
+  if (!command) return false;
+  return COMMAND_INVOKES_BWRAP_RE.test(command);
+}
+
 /** failed exec item 收口时对 fullText 的最终改写:检出初始化失败则追加标注。 */
-export function annotateSandboxInitFailure(fullText: string, isError: boolean): string {
-  if (!isError || !isBwrapSandboxInitFailureOutput(fullText)) return fullText;
+export function annotateSandboxInitFailure(
+  fullText: string,
+  isError: boolean,
+  command?: string | null,
+): string {
+  if (!isError || commandInvokesBwrap(command) || !isBwrapSandboxInitFailureOutput(fullText)) {
+    return fullText;
+  }
   return `${fullText.trimEnd()}\n\n${CODEX_SANDBOX_INIT_FAILURE_NOTE}`;
 }

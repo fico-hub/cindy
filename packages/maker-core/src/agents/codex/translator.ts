@@ -1411,6 +1411,7 @@ function handleCommandExecution(
       fullText: annotateSandboxInitFailure(
         stripTerminalControlSequences(item.aggregatedOutput ?? ''),
         isError,
+        item.command,
       ),
       isError,
     },
