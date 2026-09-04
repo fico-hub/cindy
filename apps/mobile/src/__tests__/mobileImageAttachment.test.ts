@@ -81,6 +81,8 @@ describe('buildMobileImageAttachmentCandidate · HEIC / HEIF 归一(#3889)', () 
       uri: 'file:///tmp/converted.jpg',
       name: 'IMG_0001.jpg',
       mimeType: 'image/jpeg',
+      // 转码后 size 必须归 0:管线据此 stat 真实大小,否则沿用原 HEIC 字节数会撞大小校验。
+      size: 0,
     });
     expect(convertToJpeg).toHaveBeenCalledWith('file:///tmp/IMG_0001.HEIF');
   });
@@ -96,6 +98,7 @@ describe('buildMobileImageAttachmentCandidate · HEIC / HEIF 归一(#3889)', () 
       uri: 'file:///tmp/shot.jpg',
       name: 'screenshot.jpg',
       mimeType: 'image/jpeg',
+      size: 0,
     });
   });
 

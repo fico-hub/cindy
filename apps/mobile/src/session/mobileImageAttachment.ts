@@ -19,7 +19,7 @@ export type MobileImageAttachmentCandidate = MobileAttachmentUploadCandidate & {
    * 仅 HEIC / HEIF 等非白名单格式带此钩子:任务开跑时就地转 JPEG(#3889)。
    * 托盘预览仍用原始 uri;返回字段由上传管线覆盖到 candidate 上。
    */
-  resolve?: () => Promise<{ uri: string; name: string; mimeType: string }>;
+  resolve?: () => Promise<{ uri: string; name: string; mimeType: string; size: number }>;
 };
 
 /** JPEG 转换器(可注入,单测用假实现避免触碰原生模块)。 */
@@ -68,6 +68,10 @@ export function buildMobileImageAttachmentCandidate(
       uri: await convert(uri),
       name: replaceImageFileExt(name, 'jpg'),
       mimeType: 'image/jpeg',
+      // 转码后字节数已变:置 0 让管线 stat 转换产物的真实大小。沿用 picker 给的原
+      // HEIC 字节数会在 uploadMobileAttachmentFromFile 的大小一致性校验处被拒
+      //(Attachment size changed),恰好卡死本次要修的小图场景(review P1)。
+      size: 0,
     }),
   };
 }
