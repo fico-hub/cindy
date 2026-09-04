@@ -61,6 +61,36 @@ export type ModelRouteVerdict =
         | 'exclusive-source-unavailable';
     };
 
+export type ModelRouteRejectReason = Extract<ModelRouteVerdict, { kind: 'reject' }>['reason'];
+
+/**
+ * 路由拒绝原因 → 一句可行动的说明。会话切模(register)与定时任务触发(runner)共用,
+ * 两个入口不得各自维护一份措辞:定时任务此前把所有 reason 都写成「disabled in settings」,
+ * exclusive grok 未登录 SuperGrok 时用户被引导去设置里找一个并不存在的停用开关(#3884)。
+ */
+export function describeModelRouteRejection(
+  // runner 的 checkModelRoute 依赖契约把 reason 放宽为 string(测试桩友好);未知值落 default。
+  reason: ModelRouteRejectReason | string,
+  model: string,
+  providerId: string | null | undefined,
+): string {
+  switch (reason) {
+    case 'explicit-source-disabled':
+      return `provider "${providerId ?? ''}" is disabled for model "${model}" in settings`;
+    case 'capability-model':
+      return `model "${model}" is not an agent chat model`;
+    case 'model-retired':
+      return `model "${model}" has been retired from the catalog`;
+    case 'payment-required':
+      return `model "${model}" requires paid access`;
+    case 'exclusive-source-unavailable':
+      return `model "${model}" requires SuperGrok (xAI) or an explicitly selected custom source; the default gateway cannot serve it`;
+    case 'model-disabled':
+    default:
+      return `model "${model}" is disabled in settings`;
+  }
+}
+
 export type ExclusiveProviderRoute =
   | { kind: 'keep' }
   | { kind: 'pin'; providerId: string }
