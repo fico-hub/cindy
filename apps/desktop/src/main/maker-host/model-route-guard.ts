@@ -69,12 +69,15 @@ export type ModelRouteRejectReason = Extract<ModelRouteVerdict, { kind: 'reject'
  * exclusive grok 未登录 SuperGrok 时用户被引导去设置里找一个并不存在的停用开关(#3884)。
  */
 export function describeModelRouteRejection(
-  // runner 的 checkModelRoute 依赖契约把 reason 放宽为 string(测试桩友好);未知值落 default。
-  reason: ModelRouteRejectReason | string,
+  reason: ModelRouteRejectReason,
   model: string,
   providerId: string | null | undefined,
 ): string {
+  // 穷尽 switch,不设 default:新增 reason 时编译器逼着补文案,不会静默落回
+  // 「disabled in settings」这条本次要消除的误分类。
   switch (reason) {
+    case 'model-disabled':
+      return `model "${model}" is disabled in settings`;
     case 'explicit-source-disabled':
       return `provider "${providerId ?? ''}" is disabled for model "${model}" in settings`;
     case 'capability-model':
@@ -85,10 +88,9 @@ export function describeModelRouteRejection(
       return `model "${model}" requires paid access`;
     case 'exclusive-source-unavailable':
       return `model "${model}" requires SuperGrok (xAI) or an explicitly selected custom source; the default gateway cannot serve it`;
-    case 'model-disabled':
-    default:
-      return `model "${model}" is disabled in settings`;
   }
+  const unreachable: never = reason;
+  return `model "${model}" is unavailable (${String(unreachable)})`;
 }
 
 export type ExclusiveProviderRoute =

@@ -42,7 +42,10 @@ import type {
   TurnContinuationState,
 } from '@cindy/maker-core';
 import { clampEffortToSupported } from '@cindy/model-providers';
-import { describeModelRouteRejection } from '../maker-host/model-route-guard.js';
+import {
+  describeModelRouteRejection,
+  type ModelRouteRejectReason,
+} from '../maker-host/model-route-guard.js';
 import { shouldApplyExclusiveProviderRerouteLive } from '../maker-host/model-route-guard-live.js';
 import { SCHEDULER_RUN_ID_VENDOR_OPTION } from '@cindy/maker-scheduler';
 import type {
@@ -254,7 +257,10 @@ export interface MakerScheduleRunnerDeps {
     model: string,
     providerId: string | null,
   ) => Promise<
-    { kind: 'pass' } | { kind: 'reroute'; providerId: string } | { kind: 'reject'; reason: string }
+    | { kind: 'pass' }
+    | { kind: 'reroute'; providerId: string }
+    // reason 用 model-route-guard 的严格联合:文案映射穷尽 switch,新增原因编译期就暴露。
+    | { kind: 'reject'; reason: ModelRouteRejectReason }
   >;
   /**
    * 某 (来源, 模型, agent) 拷贝的能力(efforts / Fast)。effort 与 Fast 支持都是
