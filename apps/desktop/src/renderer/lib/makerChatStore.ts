@@ -4093,6 +4093,7 @@ function applyInputProjection(
     }
   }
   let settlingClientIds: string[] = [];
+  let locallyDispatchedQueueItems: QueuedMessage[] = [];
   const deferredPersistFromProjection: {
     payload: {
       data: Record<string, unknown> | null;
@@ -4144,6 +4145,19 @@ function applyInputProjection(
       );
     });
     settlingClientIds = settlingQueueItems.map((item) => item.clientId);
+    // A local send can race with the main coordinator becoming idle between
+    // the renderer's busy check and `input.enqueue()`. In that case the
+    // coordinator starts the turn immediately and the returned projection has
+    // an empty pendingQueue. Keep the optimistic row visible as a pending
+    // transcript message until the durable messages:created echo arrives (or
+    // a later authoritative projection puts it back in the queue after a
+    // pre-accept failure).
+    locallyDispatchedQueueItems = s.pendingQueue.filter(
+      (item) =>
+        item.isPendingEnqueue === true &&
+        !currentQueueIds.has(item.clientId) &&
+        !persistedMessageIds.has(item.clientId),
+    );
     // Only trigger if the retried message is still stuck in the pending queue:
     // projection.error is queue-level (string | null, no clientId), so we correlate
     // via pendingQueue. If the retry message was already dispatched and the agent
@@ -4174,7 +4188,10 @@ function applyInputProjection(
       queuedIds.size > 0 && s.messages.some((m) => m.isPendingPersist && queuedIds.has(m.clientId))
         ? s.messages.filter((m) => !(m.isPendingPersist && queuedIds.has(m.clientId)))
         : s.messages;
-    const withSettlingMessages = settlingQueueItems.reduce<ChatMessage[]>((messages, item) => {
+    const withSettlingMessages = [
+      ...settlingQueueItems,
+      ...locallyDispatchedQueueItems,
+    ].reduce<ChatMessage[]>((messages, item) => {
       if (messages.some((message) => message.clientId === item.clientId)) return messages;
       return [...messages, { ...item.chatMessage, isPendingPersist: true }];
     }, dedupedMessages);
@@ -11031,12 +11048,12 @@ function reconcileOpenSessionOrigins(): void {
  */
 const _remoteReconcileInFlight = new Map<
   string,
-  { run: Promise<void>; rerun: boolean; rerunForce: boolean }
+  { run: Promise<boolean>; rerun: boolean; rerunForce: boolean }
 >();
 
-function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }): Promise<void> {
+function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }): Promise<boolean> {
   // 返回完成 promise 供调用方需要时等待;既有调用方均按 fire-and-forget 使用。
-  if (!sessionId || !isRemoteSession(sessionId)) return Promise.resolve();
+  if (!sessionId || !isRemoteSession(sessionId)) return Promise.resolve(false);
   const inFlight = _remoteReconcileInFlight.get(sessionId);
   if (inFlight) {
     inFlight.rerun = true;
@@ -11044,24 +11061,26 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }):
     void reconcilePendingInteractions(sessionId).catch(() => undefined);
     return inFlight.run;
   }
-  const entry: { run: Promise<void>; rerun: boolean; rerunForce: boolean } = {
-    run: Promise.resolve(),
+  const entry: { run: Promise<boolean>; rerun: boolean; rerunForce: boolean } = {
+    run: Promise.resolve(false),
     rerun: false,
     rerunForce: false,
   };
   _remoteReconcileInFlight.set(sessionId, entry);
   entry.run = (async () => {
+    let applied = false;
     try {
-      await runRemoteReconcile(sessionId, opts);
+      applied = await runRemoteReconcile(sessionId, opts);
     } finally {
       const rerun = entry.rerun;
       const rerunForce = entry.rerunForce;
       // 先摘掉在飞标记,再补跑 —— 补跑会自己建新的 entry,期间来的触发继续被那一份合并。
       _remoteReconcileInFlight.delete(sessionId);
       if (rerun && sessions.has(sessionId)) {
-        await reconcileRemoteMessages(sessionId, rerunForce ? { force: true } : undefined);
+        applied = await reconcileRemoteMessages(sessionId, rerunForce ? { force: true } : undefined);
       }
     }
+    return applied;
   })();
   // 显式挂一个吞掉的 rejection handler:返回的 promise 语义不变(仍然会 reject,需要的调用方照样
   // 能 await 到),但 Node / renderer 不再把它当成 unhandled rejection —— 绝大多数调用方是
@@ -11071,7 +11090,7 @@ function reconcileRemoteMessages(sessionId: string, opts?: { force?: boolean }):
   return entry.run;
 }
 
-function runRemoteReconcile(sessionId: string, opts?: { force?: boolean }): Promise<void> {
+function runRemoteReconcile(sessionId: string, opts?: { force?: boolean }): Promise<boolean> {
   // 挂起交互面板重建**无条件先行**,不受下方 isStreaming 守卫约束:turn 内弹出的
   // permission / ask / plan 正是 isStreaming=true 的常见态(pendingPermission 与
   // isRunning 共存),断连重连 / 聚焦时若被守卫吞掉,交互面板不重建、用户无法回应,
@@ -11096,8 +11115,8 @@ function runRemoteReconcile(sessionId: string, opts?: { force?: boolean }): Prom
     // 映射成 Promise<void> 并吞掉 rejection(engine 路径 fire-and-forget 无 catch;
     // 失败已由 reconcilePendingInteractions 内部日志记录)。
     return interactionsSync.then(
-      () => undefined,
-      () => undefined,
+      () => false,
+      () => false,
     );
   }
   const existingIds = new Set(state.messages.map((m) => m.clientId));
@@ -11151,7 +11170,6 @@ function runRemoteReconcile(sessionId: string, opts?: { force?: boolean }): Prom
         }
         before = oldest.id;
       }
-      if (collected.length === 0) return;
       // 本次对账整体作废的两种情形:
       //  1. 代际已变:窗口被 rewind / clear / trim / demote / 另一次对账重建过;
       //  2. 已经有一次**更晚启动**的对账成功落地过:它读到的是更新的真相,本次的 existingIds
@@ -11170,6 +11188,7 @@ function runRemoteReconcile(sessionId: string, opts?: { force?: boolean }): Prom
         windowApplied = false;
         return;
       }
+      if (collected.length === 0) return;
       const mapped = mapServerMessages(collected);
       // 翻满上限仍没接回已知区段 → 下面走权威重建分支:整片旧窗口被换掉、oldestMessageId
       // 也被改写。这是第八条"整体重建窗口"的路径,必须 bump epoch 作废 in-flight 的翻页 /
@@ -11292,7 +11311,7 @@ function runRemoteReconcile(sessionId: string, opts?: { force?: boolean }): Prom
     },
     (err) => log.warn('reconcileRemoteMessages failed', { sessionId, err: String(err) }),
   );
-  return run;
+  return run.then(() => windowApplied);
 }
 
 /**
@@ -12755,8 +12774,13 @@ async function sendMessageCore(
     : undefined;
   if (deviceLinkRemote && !remoteRecord) return false;
 
-  // device-link 乐观第一拍：空闲沿用消息流气泡，忙时也立即显示 sending 队列行。
-  if (deviceLinkRemote && isSendBusyForQueue(current)) {
+  // Busy sends must be visible before the main projection round-trip.  This is
+  // especially important for local sessions: the coordinator can be waiting
+  // for a delayed/stale turn boundary, so waiting for `input.enqueue()` to
+  // resolve would make the user's message appear to disappear.  The
+  // authoritative projection will replace the temporary marker (or remove it
+  // on a pre-accept failure) once the IPC call settles.
+  if (isSendBusyForQueue(current)) {
     setState(sessionId, (s) =>
       s.pendingQueue.some((item) => item.clientId === queued.clientId)
         ? s
@@ -12886,6 +12910,12 @@ async function sendMessageCore(
       setState(sessionId, (s) => ({
         ...s,
         error: message,
+        pendingQueue: s.pendingQueue.filter(
+          (item) => !(item.clientId === queued.clientId && item.isPendingEnqueue === true),
+        ),
+        messages: s.messages.filter(
+          (item) => !(item.clientId === queued.clientId && item.isPendingPersist === true),
+        ),
         usageLimitRecovery: null,
         errorReason: null,
         recoverableError: null,
