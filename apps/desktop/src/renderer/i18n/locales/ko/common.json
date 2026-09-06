@@ -3747,24 +3747,15 @@
         "codexGuard": {
           "title": "Codex 호환성",
           "label": "Codex의 장치 점유 방지",
-          "aria": "Codex의 Codex Micro 점유 방지",
+          "aria": "Codex의 Work Louder 키보드 점유 방지",
           "recover": "환경 복원",
-          "status": {
-            "unsupported": "macOS 전용",
-            "disabled": "꺼짐",
-            "protecting": "Codex 재시작 필요",
-            "intercepted": "보호 중",
-            "recovery-required": "복원 필요",
-            "error": "사용 불가"
-          },
           "descriptions": {
             "unsupported": "이 보호 기능은 macOS에서만 사용할 수 있습니다.",
-            "disabled": "Cindy가 실행되는 동안 Codex가 Codex Micro에 연결하지 못하게 합니다. Cindy 자체는 제한하지 않습니다.",
-            "protecting": "보호 준비가 완료되었습니다. Codex를 완전히 종료한 뒤 다시 여세요. 이미 실행 중인 Codex에는 영향을 주지 않습니다.",
-            "intercepted": "Codex의 Work Louder 서비스를 차단했습니다. Cindy는 장치를 계속 사용할 수 있습니다.",
+            "disabled": "Cindy가 실행되는 동안 Codex가 Work Louder 키보드에 연결하지 못하게 합니다. Cindy 자체는 제한하지 않습니다.",
             "recovery-required": "보호가 중지되었지만 NODE_OPTIONS가 안전하게 복원되지 않았습니다. 다시 켜기 전에 복원을 재시도하세요.",
             "error": "Codex 보호를 업데이트하지 못했습니다. 기존 NODE_OPTIONS는 유지되었거나 복원 대기 중입니다."
-          }
+          },
+          "restartRequired": "적용하려면 Codex를 완전히 종료한 뒤 다시 여세요"
         },
         "commands": {
           "session.selectPrevious": {
@@ -4835,7 +4826,7 @@
         "fsWrite": "파일을 쓸 수 있음(생성/수정)",
         "fsWriteDetail": "전용 데이터 폴더에는 언제든지 쓸 수 있습니다. 현재 세션의 작업 디렉터리 쓰기는 세션의 권한 모드를 따릅니다(자동 승인 모드에서는 바로 쓰고, 개별 확인 모드에서는 먼저 승인을 요청합니다). 그 외 폴더에 쓰려면 매번 확인이 필요합니다. 파일은 항상 호스트가 대신 기록하며 플러그인 자체는 파일 시스템에 직접 접근할 수 없습니다.",
         "libraryPersist": "영구 라이브러리 사용 가능(대용량 파일 및 데이터베이스)",
-        "libraryPersistDetail": "Cindy가 관리하는 독립 저장 공간을 받아 작업 데이터(캔버스, 이미지, 데이터베이스 등)를 저장하며, 일반 플러그인 데이터 할당량 제한을 받지 않습니다. 파일과 데이터베이스 작업은 모두 호스트가 대신 실행하고 플러그인은 라이브러리 내 상대 경로만 사용하여 다른 파일에는 접근할 수 없습니다. 라이브러리 파일을 시스템 폴더에서 보여 주거나 시스템 다른 이름으로 저장 대화상자를 열어 복사 위치를 고르게 할 수도 있으며, 취소하면 아무 파일도 복사되지 않습니다. 플러그인을 제거해도 이 데이터는 삭제되지 않으며, 삭제는 Cindy 설정에서 별도 확인이 필요합니다.",
+        "libraryPersistDetail": "Cindy가 관리하는 독립 저장 공간을 받아 작업 데이터(캔버스, 이미지, 데이터베이스 등)를 저장하며, 일반 플러그인 데이터 할당량 제한을 받지 않습니다. 파일과 데이터베이스 작업은 모두 호스트가 대신 실행하고 플러그인은 라이브러리 내 상대 경로만 사용하여 다른 파일에는 접근할 수 없습니다. 라이브러리 파일을 시스템 폴더에서 보여 주거나 시스템 다른 이름으로 저장 대화상자를 열어 복사 위치를 고르게 할 수도 있으며, 취소하면 아무 파일도 복사되지 않습니다. 확인 대화상자 없이 PNG 비트맵을 시스템 클립보드에 쓸 수도 있으며, 이때 현재 클립보드 내용이 덮어쓰입니다. 플러그인을 제거해도 이 데이터는 삭제되지 않으며, 삭제는 Cindy 설정에서 별도 확인이 필요합니다.",
         "networkHost": "네트워크 도메인 {{host}}에 접근",
         "networkSecret": "자격 증명 \"{{name}}\" 입력 필요",
         "networkSecretGhostInputDetail": "이 자격 증명은 플러그인 자체 설정 화면에서 입력받으므로 입력 시점에 플러그인 페이지를 거칩니다. 이후 호스트에 한 번만 전달되어 암호화 저장되며, 저장 후에는 플러그인이 다시 읽을 수 없습니다. 주입은 선언된 도메인 요청 시에만 호스트가 수행합니다.",
@@ -5675,9 +5666,9 @@
     "openProxyUsage": "브라우저에서 전체 사용량 대시보드 열기",
     "openXaiUsage": "Grok 사용량 페이지 열기",
     "xai": {
-      "requestsLine": "속도 제한(요청): 남음 {{remaining}}/{{limit}}",
-      "tokensLine": "속도 제한(토큰): 남음 {{remaining}}/{{limit}}",
-      "noQuotaDetail": "SuperGrok 주간 사용량을 가져오지 못해 가치 추정치만 표시됩니다",
+      "requestsLine": "마지막 응답 시 요청 잔여량: {{remaining}}/{{limit}}",
+      "tokensLine": "마지막 응답 시 토큰 잔여량: {{remaining}}/{{limit}}",
+      "noQuotaDetail": "현재 SuperGrok 주간 사용량을 가져올 수 없습니다",
       "weeklyLabel": "주간",
       "windowSegment": "{{label}} 남음 {{remaining}}",
       "windowLine": "{{label}} 남음 {{remaining}}(사용 {{used}})",
@@ -5685,7 +5676,7 @@
       "resetAt": "{{at}} 초기화",
       "productLine": "{{product}} {{percent}}",
       "extraCreditsLine": "추가 크레딧 {{amount}}",
-      "accountWeeklyHint": "계정 주간 사용량이며 이 작업의 할당량이 아닙니다"
+      "accountWeeklyHint": "계정 주간 사용량"
     },
     "dailyLimitLabel": "오늘 {{spend}}/{{limit}}",
     "monthlyLimitLabel": "주기 {{spend}}/{{limit}}",
@@ -5746,10 +5737,20 @@
     }
   },
   "quotaCard": {
+    "usageCritical": "사용량이 높습니다",
+    "usageWarning": "사용량이 다소 높습니다",
+    "usageTitle": "사용량 상세",
+    "gatewayTitle": "Cindy AI Gateway",
+    "balanceLabel": "잔액 사용량",
+    "dailyLabel": "일일 소프트 한도",
+    "monthlyLabel": "월간 할당량",
+    "speedLabel": "속도",
+    "rateValue": "{{rate}} 토큰/초",
+    "waiting": "할당량 데이터 업데이트를 기다리는 중입니다.",
+    "windowsRegionLabel": "사용량 상세",
     "fiveHourLabel": "5시간",
     "weeklyLabel": "주간",
     "modelWeeklyLabel": "{{model}} 주간",
-    "windowsRegionLabel": "할당량 구간 목록",
     "usedPercent": "사용 {{percent}}%",
     "resetAt": "{{at}} 재설정",
     "noWindows": "할당량 구간 데이터가 없습니다",
@@ -5759,7 +5760,7 @@
     "costLine": "이번 메시지 비용: {{cost}}",
     "valueLine": "이번 메시지 토큰 가치: {{cost}}",
     "noBilledCost": "이번 메시지의 비용을 현재 확인할 수 없어 사용량만 표시합니다",
-    "latestMessageTitle": "최근 메시지 합계",
+    "latestMessageTitle": "최근 메시지",
     "turnCostUnavailable": "이 메시지의 비용을 현재 추정할 수 없습니다",
     "tokenLabel": "Token",
     "tokenBreakdown": "(입력 {{input}} · 출력 {{output}})",
@@ -5771,7 +5772,7 @@
     "paceTrendFast": "현재 평균 사용 속도는 빠른 편입니다(대략적인 추세)",
     "paceTrendNormal": "현재 평균 사용 속도는 보통입니다(대략적인 추세)",
     "paceTrendSlow": "현재 평균 사용 속도는 느린 편입니다(대략적인 추세)",
-    "waiting": "Claude 구독 사용량은 다음 요청이 완료된 후 업데이트됩니다."
+    "includedLabel": "그중 {{name}}"
   },
   "usageDetails": {
     "durationSeconds": "{{value}}초",

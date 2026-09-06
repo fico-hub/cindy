@@ -8,7 +8,7 @@
  *   - 默认路由(providerId=null)的远程会话:不做本机启发式猜测,维持占位显示。
  */
 
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ClaudeSubscriptionUsageSnapshot } from '../../../../shared/claudeSubscriptionUsage';
@@ -122,9 +122,9 @@ vi.mock('@/hooks/useRemoteDeviceUsage', async () => {
       return deviceId ? mocks.remoteCodexPayload : null;
     },
     useRemoteClaudeAccountUsage: (deviceId: string | null) =>
-      (deviceId ? mocks.remoteClaudeQuota : null),
+      deviceId ? mocks.remoteClaudeQuota : null,
     useRemoteXaiSubscriptionUsage: (deviceId: string | null) =>
-      (deviceId ? mocks.remoteXaiSnapshot : null),
+      deviceId ? mocks.remoteXaiSnapshot : null,
     useRemoteXaiRateLimit: () => null,
   };
 });
@@ -212,16 +212,21 @@ describe('TodaySpendChip device-link remote sessions', () => {
       fiveHour: { utilization: 12 },
     };
 
-    const { container } = renderRemoteChip('anthropic');
+    renderRemoteChip('anthropic');
 
-    // 无看板链接 → trigger 是 span 而非 button。
-    expect(screen.queryByRole('button')).toBeNull();
-    const trigger = container.querySelector('span[tabindex="-1"]');
-    expect(trigger?.textContent).toContain('5h 剩余 88%');
+    // #3972 起 trigger 统一为按钮(打开额度卡);「不可点」= 无看板链接:aria-label 回落
+    // 通用标题、点击不打开外链、卡片里没有看板按钮(看板属被控端账号,不跳本机浏览器)。
+    const trigger = screen.getByRole('button', { name: 'quotaCard.usageTitle' });
+    expect(trigger.textContent).toContain('5h 剩余 88%');
+    fireEvent.click(trigger);
+    expect(mocks.openExternal).not.toHaveBeenCalled();
 
-    fireEvent.mouseEnter(trigger!);
+    fireEvent.mouseEnter(trigger);
     act(() => vi.advanceTimersByTime(300));
-    expect(screen.getByTestId('quota-hover-card')).toBeTruthy();
+    const card = screen.getByTestId('quota-hover-card');
+    expect(within(card).queryByRole('button')).toBeNull();
+    // 额度卡用被控端镜像快照渲染同一套窗口进度条。
+    expect(within(card).queryAllByRole('progressbar').length).toBeGreaterThan(0);
   });
 
   it('被控端镜像不可用(老被控端 / 断链)时降级回 ¥ 占位', () => {

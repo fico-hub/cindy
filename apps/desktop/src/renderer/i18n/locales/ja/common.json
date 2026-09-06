@@ -3747,24 +3747,15 @@
         "codexGuard": {
           "title": "Codex との互換性",
           "label": "Codex によるデバイスの占有を防ぐ",
-          "aria": "Codex による Codex Micro の占有を防ぐ",
+          "aria": "Codex による Work Louder キーボード の占有を防ぐ",
           "recover": "環境を復元",
-          "status": {
-            "unsupported": "macOS のみ",
-            "disabled": "オフ",
-            "protecting": "Codex を再起動",
-            "intercepted": "保護中",
-            "recovery-required": "復元が必要",
-            "error": "利用不可"
-          },
           "descriptions": {
             "unsupported": "この保護機能は macOS でのみ利用できます。",
-            "disabled": "Cindy の実行中、Codex が Codex Micro に接続するのを防ぎます。Cindy 自体は制限されません。",
-            "protecting": "保護の準備ができました。Codex を完全に終了してから開き直してください。実行中の Codex には影響しません。",
-            "intercepted": "Codex の Work Louder サービスをブロックしました。Cindy は引き続きデバイスを使用できます。",
+            "disabled": "Cindy の実行中、Codex が Work Louder キーボード に接続するのを防ぎます。Cindy 自体は制限されません。",
             "recovery-required": "保護は停止しましたが、NODE_OPTIONS は安全に復元されていません。再度有効にする前に復元を再試行してください。",
             "error": "Codex の保護を更新できませんでした。以前の NODE_OPTIONS は保持されているか、復元待ちです。"
-          }
+          },
+          "restartRequired": "適用するには Codex を完全に終了して再起動"
         },
         "commands": {
           "session.selectPrevious": {
@@ -4835,7 +4826,7 @@
         "fsWrite": "ファイルを書き込めます(作成/変更)",
         "fsWriteDetail": "専用データフォルダにはいつでも書き込めます。現在のセッションの作業ディレクトリへの書き込みはセッションの権限モードに従います(自動承認モードでは直接書き込み、逐次確認モードでは事前に承認を求めます)。それ以外のフォルダへの書き込みは毎回確認が必要です。ファイルは常にホストが代理で書き込み、プラグイン自体があなたのファイルシステムに直接アクセスすることはありません。",
         "libraryPersist": "永続ライブラリを使用可能(大量のファイルとデータベース)",
-        "libraryPersistDetail": "Cindy が管理する独立した保存領域を取得し、作品データ(キャンバス、画像、データベースなど)を保存します。通常のプラグインデータ割り当ての制限を受けません。ファイルとデータベースの操作はすべてホストが代行実行し、プラグインはライブラリ内の相対パスのみを使用して、他のファイルに触れることはできません。ライブラリ内のファイルをシステムのフォルダで表示したり、システムの名前を付けて保存ダイアログを開いてコピー先を選ばせることもできます。キャンセルすれば何もコピーされません。プラグインをアンインストールしてもこのデータは削除されず、削除には Cindy 設定での個別確認が必要です。",
+        "libraryPersistDetail": "Cindy が管理する独立した保存領域を取得し、作品データ(キャンバス、画像、データベースなど)を保存します。通常のプラグインデータ割り当ての制限を受けません。ファイルとデータベースの操作はすべてホストが代行実行し、プラグインはライブラリ内の相対パスのみを使用して、他のファイルに触れることはできません。ライブラリ内のファイルをシステムのフォルダで表示したり、システムの名前を付けて保存ダイアログを開いてコピー先を選ばせることもできます。キャンセルすれば何もコピーされません。確認ダイアログなしで PNG ビットマップをシステムクリップボードに書き込むこともでき、その場合は現在のクリップボード内容が上書きされます。プラグインをアンインストールしてもこのデータは削除されず、削除には Cindy 設定での個別確認が必要です。",
         "networkHost": "ネットワークドメイン {{host}} にアクセス",
         "networkSecret": "認証情報「{{name}}」の入力が必要",
         "networkSecretGhostInputDetail": "この資格情報はプラグイン自身の設定画面で入力を受け付けるため、入力時にはプラグインのページを経由します。その後ホストへ一度だけ渡されて暗号化保存され、保存後はプラグインから読み出せません。注入は宣言されたドメインへのリクエスト時のみホストが行います。",
@@ -5675,9 +5666,9 @@
     "openProxyUsage": "ブラウザで完全な使用量ダッシュボードを開く",
     "openXaiUsage": "Grok の使用量ページを開く",
     "xai": {
-      "requestsLine": "レート制限（リクエスト）: 残り {{remaining}}/{{limit}}",
-      "tokensLine": "レート制限（トークン）: 残り {{remaining}}/{{limit}}",
-      "noQuotaDetail": "SuperGrok の週間使用量を取得できないため、価値の推定のみ表示します",
+      "requestsLine": "前回の応答時 · リクエストの残り: {{remaining}}/{{limit}}",
+      "tokensLine": "前回の応答時 · トークンの残り: {{remaining}}/{{limit}}",
+      "noQuotaDetail": "SuperGrok の週間使用量は現在取得できません",
       "weeklyLabel": "週間",
       "windowSegment": "{{label}} 残り {{remaining}}",
       "windowLine": "{{label}} 残り {{remaining}}（使用 {{used}}）",
@@ -5685,7 +5676,7 @@
       "resetAt": "{{at}} にリセット",
       "productLine": "{{product}} {{percent}}",
       "extraCreditsLine": "追加クレジット {{amount}}",
-      "accountWeeklyHint": "アカウントの週間使用量であり、このセッションのクォータではありません"
+      "accountWeeklyHint": "アカウントの週間使用量"
     },
     "dailyLimitLabel": "本日 {{spend}}/{{limit}}",
     "monthlyLimitLabel": "周期 {{spend}}/{{limit}}",
@@ -5746,10 +5737,20 @@
     }
   },
   "quotaCard": {
+    "usageCritical": "使用量が高い状態です",
+    "usageWarning": "使用量がやや高い状態です",
+    "usageTitle": "使用量の詳細",
+    "gatewayTitle": "Cindy AI Gateway",
+    "balanceLabel": "残高の使用量",
+    "dailyLabel": "1日のソフト上限",
+    "monthlyLabel": "月間クォータ",
+    "speedLabel": "速度",
+    "rateValue": "{{rate}} トークン/秒",
+    "waiting": "クォータデータの更新を待っています。",
+    "windowsRegionLabel": "使用量の詳細",
     "fiveHourLabel": "5 時間",
     "weeklyLabel": "週間",
     "modelWeeklyLabel": "{{model}} 週間",
-    "windowsRegionLabel": "クォータ期間の一覧",
     "usedPercent": "使用済み {{percent}}%",
     "resetAt": "{{at}} にリセット",
     "noWindows": "クォータ期間のデータはありません",
@@ -5759,7 +5760,7 @@
     "costLine": "このメッセージの消費: {{cost}}",
     "valueLine": "このメッセージの token 価値: {{cost}}",
     "noBilledCost": "このメッセージの料金は現在取得できないため、使用量のみ表示しています",
-    "latestMessageTitle": "直近のメッセージ合計",
+    "latestMessageTitle": "直近のメッセージ",
     "turnCostUnavailable": "このメッセージの料金は現在見積もれません",
     "tokenLabel": "Token",
     "tokenBreakdown": "（入力 {{input}} · 出力 {{output}}）",
@@ -5771,7 +5772,7 @@
     "paceTrendFast": "現在の平均使用ペースは速めです（おおよその傾向）",
     "paceTrendNormal": "現在の平均使用ペースは通常です（おおよその傾向）",
     "paceTrendSlow": "現在の平均使用ペースは遅めです（おおよその傾向）",
-    "waiting": "Claude サブスクリプションの使用量は次のリクエスト完了後に更新されます。"
+    "includedLabel": "うち {{name}}"
   },
   "usageDetails": {
     "durationSeconds": "{{value}}秒",
