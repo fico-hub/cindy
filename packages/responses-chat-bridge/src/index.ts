@@ -1,6 +1,13 @@
 export { ChatSseTranslator, type ChatSseTranslatorOptions } from './chat-sse-translator.js';
 export { createResponsesChatHandler, type ResponsesChatHandlerOptions } from './handler.js';
 export {
+  CHAT_BRIDGE_USER_AGENT,
+  CODEX_THREAD_ID_HEADER,
+  CONVERSATION_SESSION_HEADER,
+  resolveConversationSessionHeaders,
+  withChatBridgeUserAgent,
+} from './session-header.js';
+export {
   translateResponsesRequest,
   translateResponsesRequestWithContext,
   type TranslatedResponsesChatRequest,
