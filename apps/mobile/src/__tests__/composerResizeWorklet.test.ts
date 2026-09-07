@@ -59,9 +59,13 @@ describe('composerResize worklets(经 react-native-worklets 插件转译后)', (
     expect(typeof worklet).toBe('function');
     expect(typeof worklet.__workletHash).toBe('number');
     const closure = worklet.__closure ?? {};
-    // 插件抓进闭包的每一个标识符都必须已经是函数,否则 UI 线程求值即 "undefined is not a function"。
+    // 本次回归只关乎两个辅助函数的声明顺序:它们必须以函数身份进入闭包。
+    expect(typeof closure.normalizeBounds, '__closure.normalizeBounds').toBe('function');
+    expect(typeof closure.clamp, '__closure.clamp').toBe('function');
+    // 更一般的约束是「抓进闭包的标识符不能是尚未赋值的 var」;worklet 合法捕获常量 /
+    // 对象在仓库里有先例,所以只拒绝 undefined,不限定类型。
     for (const [name, value] of Object.entries(closure)) {
-      expect(typeof value, `__closure.${name}`).toBe('function');
+      expect(value, `__closure.${name}`).not.toBeUndefined();
     }
     // 转译后的 JS 线程副本与 UI 线程副本共用同一份闭包捕获:直接调用等价于 UI 线程调用。
     expect(worklet({
