@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   CHAT_BRIDGE_USER_AGENT,
+  overrideHeadersCaseInsensitive,
   resolveConversationSessionHeaders,
   withChatBridgeUserAgent,
 } from '../session-header.js';
@@ -47,5 +48,23 @@ describe('withChatBridgeUserAgent', () => {
 
   it('keeps an explicit provider User-Agent (any casing) untouched', () => {
     expect(withChatBridgeUserAgent({ 'User-Agent': 'my-ua/2' })).toEqual({ 'User-Agent': 'my-ua/2' });
+  });
+});
+
+describe('overrideHeadersCaseInsensitive', () => {
+  it('drops a provider static header whose name only differs in casing before applying the override', () => {
+    const merged = overrideHeadersCaseInsensitive(
+      { authorization: 'Bearer k', 'X-OpenCode-Session': 'machine-wide-fixed' },
+      { 'x-opencode-session': 'thr_abc' },
+    );
+    expect(merged).toEqual({ authorization: 'Bearer k', 'x-opencode-session': 'thr_abc' });
+    expect(Object.keys(merged).filter((key) => key.toLowerCase() === 'x-opencode-session')).toHaveLength(1);
+  });
+
+  it('keeps the base untouched (and copied) when there is nothing to override', () => {
+    const base = { 'X-OpenCode-Session': 'machine-wide-fixed', 'User-Agent': 'ua/1' };
+    const merged = overrideHeadersCaseInsensitive(base, {});
+    expect(merged).toEqual(base);
+    expect(merged).not.toBe(base);
   });
 });

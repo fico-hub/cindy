@@ -1126,6 +1126,26 @@ describe('createResponsesChatHandler', () => {
       expect(headers['user-agent']).toBe('custom/1');
     });
 
+    it('replaces a provider static header written in a different casing instead of sending both (Greptile P1)', async () => {
+      const headers = await captureHeaders(
+        { 'thread-id': 'thr_abc' },
+        { authorization: 'Bearer secret', 'X-OpenCode-Session': 'machine-wide-fixed' },
+      );
+      const sessionKeys = Object.keys(headers).filter((key) => key.toLowerCase() === 'x-opencode-session');
+      expect(sessionKeys).toEqual(['x-opencode-session']);
+      expect(headers['x-opencode-session']).toBe('thr_abc');
+      expect(new Headers(headers).get('x-opencode-session')).toBe('thr_abc');
+    });
+
+    it('keeps a provider static session header as-is when no stable conversation id is available', async () => {
+      const headers = await captureHeaders(
+        { 'x-client-request-id': 'req-only' },
+        { authorization: 'Bearer secret', 'X-OpenCode-Session': 'machine-wide-fixed' },
+      );
+      expect(headers['X-OpenCode-Session']).toBe('machine-wide-fixed');
+      expect(headers).not.toHaveProperty('x-opencode-session');
+    });
+
     it('sends no session header when the request carries no stable conversation id', async () => {
       const headers = await captureHeaders({ 'x-client-request-id': 'req-only' });
       expect(headers).not.toHaveProperty('x-opencode-session');

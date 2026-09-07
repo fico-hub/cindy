@@ -4,6 +4,7 @@ export {
   CHAT_BRIDGE_USER_AGENT,
   CODEX_THREAD_ID_HEADER,
   CONVERSATION_SESSION_HEADER,
+  overrideHeadersCaseInsensitive,
   resolveConversationSessionHeaders,
   withChatBridgeUserAgent,
 } from './session-header.js';

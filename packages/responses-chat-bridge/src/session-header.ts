@@ -52,3 +52,21 @@ export function withChatBridgeUserAgent(
   const hasUserAgent = Object.keys(providerHeaders).some((key) => key.toLowerCase() === 'user-agent');
   return hasUserAgent ? { ...providerHeaders } : { ...providerHeaders, 'user-agent': CHAT_BRIDGE_USER_AGENT };
 }
+
+/**
+ * 用 overrides 覆盖 base 中的同名头。HTTP 头名不区分大小写,但对象键区分:供应商静态配置里
+ * 写成 `X-OpenCode-Session` 时,普通展开不会覆盖它,两个键一起交给 fetch 会被合并成
+ * `fixed, thread-id` 这种非法复合值(Greptile P1)。这里先按小写头名剔除 base 里的同名项,
+ * 再写入 overrides;overrides 为空时原样返回 base 的拷贝。
+ */
+export function overrideHeadersCaseInsensitive(
+  base: Readonly<Record<string, string>>,
+  overrides: Readonly<Record<string, string>>,
+): Record<string, string> {
+  const overridden = new Set(Object.keys(overrides).map((key) => key.toLowerCase()));
+  const merged: Record<string, string> = {};
+  for (const [key, value] of Object.entries(base)) {
+    if (!overridden.has(key.toLowerCase())) merged[key] = value;
+  }
+  return { ...merged, ...overrides };
+}
