@@ -2574,4 +2574,25 @@ describe('new.tsx worktree 探测 effect 的离线起始态(#4046,源码契约)'
     // 提前返回条件与 fail-closed 语义不变:非 online 不发探测请求。
     expect(source).toContain("if (!selectedDeviceId || !cwd || deviceLinkStatus !== 'online') return undefined;");
   });
+
+  it('离线起始态的恢复依赖 effect 依赖数组:链路 / 连接代次 / presence / 定时重探任一变化即重跑', () => {
+    // recovering 不是终态,靠 effect 重跑回到探测;这几项漏掉任何一个,断网恢复后都会卡在
+    // 「连接恢复中」。锁住依赖数组片段,补上 initialWorktreeProbeEligibility 单测覆盖不到的那一段。
+    const effectStart = source.indexOf('initialWorktreeProbeEligibility({');
+    expect(effectStart).toBeGreaterThan(0);
+    const depsStart = source.indexOf('}, [', effectStart);
+    const depsEnd = source.indexOf(']);', depsStart);
+    const deps = source.slice(depsStart, depsEnd);
+    for (const dep of [
+      'connectionEpoch',
+      'deviceLinkStatus',
+      'presenceVersion',
+      'worktreeDetectRetryNonce',
+      'selectedDeviceId',
+      'draft.workspaceKind',
+      'draft.workingDir',
+    ]) {
+      expect(deps, `effect deps 应包含 ${dep}`).toContain(dep);
+    }
+  });
 });
