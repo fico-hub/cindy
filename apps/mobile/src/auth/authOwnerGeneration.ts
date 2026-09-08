@@ -1,4 +1,7 @@
+import { accountVaultKey, type AuthRegion } from '@cindy/auth-client';
+
 export interface MobileAuthOwnerGeneration {
+  /** Canonical realm-qualified account key, not a bare membership ID. */
   readonly accountId: string;
   readonly generation: number;
 }
@@ -9,8 +12,11 @@ let current: MobileAuthOwnerGeneration = {
 };
 
 /** Publish the account owner synchronously, before React state updates settle. */
-export function setMobileAuthOwner(accountId: string | null | undefined): void {
-  const normalized = accountId?.trim() ?? '';
+export function setMobileAuthOwner(
+  accountId: string | null | undefined,
+  realm: AuthRegion = 'global',
+): void {
+  const normalized = accountId ? accountVaultKey(realm, accountId) : '';
   if (current.accountId === normalized) return;
   current = {
     accountId: normalized,
