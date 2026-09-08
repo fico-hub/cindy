@@ -314,6 +314,7 @@ import {
   getDesktopMcpToolApprovalPresentation,
 } from './mcp-tool-approval-policy.js';
 import {
+  bumpCodexDiscoveryAuthEpoch,
   createCodexLiveModelsPublisher,
   getCodexDiscoveryAuthEpoch,
   readCodexDiscoveredModels,
@@ -1411,8 +1412,8 @@ export function getMaker(): Maker {
         );
       },
       // live 清单定成员与顺序;真实 context_window 只有 models_cache 明示,按 slug 回填,
-      // 否则「刷新模型信息」会把首次加载的 1.1M 退回 272k 兜底(#4087)。异步读 cache 后
-      // 的新鲜度(序号 + 鉴权代次)与读取上限见 createCodexLiveModelsPublisher。
+      // 否则「刷新模型信息」会把首次加载的 1.1M 退回 272k 兜底(#4087)。两阶段发布(同步
+      // 发 live、异步回填)、新鲜度(序号 + 鉴权代次)与读取上限见 createCodexLiveModelsPublisher。
       onCodexLocalModelsListed: createCodexLiveModelsPublisher({
         readCache: readCodexDiscoveredModels,
         publish: setDiscoveredCodexModels,
@@ -2685,6 +2686,9 @@ export async function preflightBotRuntimeResources(
  */
 export function resetMaker(): void {
   cancelCodexAuthModeChange();
+  // 账号边界:让仍在异步回填 cache 的旧 Maker live model/list 回调作废(旧账号清单不得在
+  // 新 Maker 建立后再发布,见 createCodexLiveModelsPublisher 的鉴权代次校验)。
+  bumpCodexDiscoveryAuthEpoch();
   setCodexAppliedCustomProviderRoutes([]);
   _maker = null;
   botRuntimeResourcePreflight = null;

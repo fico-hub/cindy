@@ -238,12 +238,15 @@ export function mergeCodexLiveModelsWithCache(
     }
   }
   if (verifiedById.size === 0) return live;
-  return live.map((model) => {
+  let changed = false;
+  const merged = live.map((model) => {
     const contextWindow = verifiedById.get(model.id);
-    return contextWindow === undefined
-      ? model
-      : { ...model, contextWindow, contextWindowVerified: true };
+    if (contextWindow === undefined) return model;
+    changed = true;
+    return { ...model, contextWindow, contextWindowVerified: true };
   });
+  // 没有任何 slug 被回填时返回同一引用,调用方可据此跳过多余的二次发布。
+  return changed ? merged : live;
 }
 
 /**
@@ -297,15 +300,16 @@ export interface CodexLiveModelsPublisherDeps {
 }
 
 /**
- * 构造 `onCodexLocalModelsListed` 的宿主实现(#4087)。
+ * 构造 `onCodexLocalModelsListed` 的宿主实现(#4087)。两阶段发布:
  *
- * maker-core 只在**进入**回调前校验来源 host 仍是当前 host;本实现为了回填真实窗口要
- * 异步读 cache,让出事件循环后账号可能已经收口、也可能有更新的 live 清单进来。因此发布前
- * 再做两道新鲜度校验,任一不满足就丢弃本次结果:
- *   1. 序号:本回调仍是最后一次进入的回调(更新的 live 清单永远赢,旧清单不覆盖新清单);
- *   2. 鉴权代次:读 cache 期间没有发生登录/登出/凭证失效(旧账号清单不复活)。
- * cache 读取有独立上限(默认 1.5s),超时/失败原样发布 live 快照;回填只是增强,不决定
- * live 刷新的成败。
+ *   1. **同步**发布 live 快照(与本修复之前完全一致):maker-core 在 `refreshLocalModels`
+ *      的 20s deadline 内 await 本回调,live 刷新的成败不能被 cache 读取拖累,所以返回的
+ *      Promise 在这一步就 resolve。
+ *   2. **异步**增强:有上限地读 cache(默认 1.5s),按 slug 回填真实窗口后再发布一次;
+ *      回填不到任何 slug 时不发二次。发布前做两道新鲜度校验,任一不满足即丢弃:
+ *      - 序号:本回调仍是最后一次进入的回调(更新的 live 清单永远赢,旧清单不覆盖新清单);
+ *      - 鉴权代次:读 cache 期间没有发生登录/登出/凭证失效/换账号(旧账号清单不复活)。
+ *      maker-core 只在**进入**回调前校验来源 host,让出事件循环后的这两道校验由这里补上。
  */
 export function createCodexLiveModelsPublisher(
   deps: CodexLiveModelsPublisherDeps,
@@ -316,19 +320,30 @@ export function createCodexLiveModelsPublisher(
     const seq = ++latestSeq;
     const epoch = deps.authEpoch();
     const live = mapCodexAppServerModelsToCatalog(models);
-    const cached = await readCodexDiscoveredModelsBounded(deps.readCache, timeoutMs);
-    if (seq !== latestSeq) {
-      deps.log?.info?.('codex live model list superseded by a newer snapshot; discarded', { seq, latestSeq });
-      return;
-    }
-    if (epoch !== deps.authEpoch()) {
-      deps.log?.info?.('codex live model list discarded: auth boundary changed during cache read', {
-        epoch,
-        current: deps.authEpoch(),
+    deps.publish(live);
+    void (async () => {
+      const cached = await readCodexDiscoveredModelsBounded(deps.readCache, timeoutMs);
+      if (seq !== latestSeq) {
+        deps.log?.info?.('codex live model list backfill superseded by a newer snapshot; discarded', {
+          seq,
+          latestSeq,
+        });
+        return;
+      }
+      if (epoch !== deps.authEpoch()) {
+        deps.log?.info?.('codex live model list backfill discarded: auth boundary changed during cache read', {
+          epoch,
+          current: deps.authEpoch(),
+        });
+        return;
+      }
+      const merged = mergeCodexLiveModelsWithCache(live, cached);
+      if (merged !== live) deps.publish(merged);
+    })().catch((error: unknown) => {
+      deps.log?.info?.('codex live model list backfill failed; live snapshot already published', {
+        error: error instanceof Error ? error.message : String(error),
       });
-      return;
-    }
-    deps.publish(mergeCodexLiveModelsWithCache(live, cached));
+    });
   };
 }
 

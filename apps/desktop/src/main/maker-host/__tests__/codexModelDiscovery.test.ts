@@ -291,86 +291,116 @@ describe('mergeCodexLiveModelsWithCache (#4087)', () => {
     });
     expect(unverifiedCache[0].contextWindowVerified).toBeUndefined();
     expect(mergeCodexLiveModelsWithCache(live, unverifiedCache)).toBe(live);
+    // 有明示窗口但没有任何 slug 命中 → 同一引用(调用方据此跳过二次发布)
+    const unrelated = mapCodexModelsToCatalog({
+      models: [{ slug: 'gpt-unrelated', display_name: 'x', visibility: 'list', supported_in_api: true, context_window: 400000, supported_reasoning_levels: [{ effort: 'high' }] }],
+    });
+    expect(mergeCodexLiveModelsWithCache(live, unrelated)).toBe(live);
   });
 });
 
-describe('createCodexLiveModelsPublisher (#4087 review: 异步读 cache 后的新鲜度与读取上限)', () => {
+describe('createCodexLiveModelsPublisher (#4087 review: 两阶段发布、新鲜度与读取上限)', () => {
   const liveItem = (slug: string): CodexModelListItem =>
     ({
       id: slug, model: slug, displayName: slug, description: '', hidden: false,
       supportedReasoningEfforts: [{ reasoningEffort: 'high', description: '' }],
       defaultReasoningEffort: 'high', additionalSpeedTiers: [], serviceTiers: [], isDefault: false,
     }) as CodexModelListItem;
-  const verifiedCache = mapCodexModelsToCatalog({
-    models: [{ slug: 'gpt-5.6-luna', display_name: 'GPT-5.6-Luna', visibility: 'list', supported_in_api: true, context_window: 1_100_000, supported_reasoning_levels: [{ effort: 'high' }] }],
+  const cacheFor = (...slugs: string[]) => mapCodexModelsToCatalog({
+    models: slugs.map((slug) => ({ slug, display_name: slug, visibility: 'list', supported_in_api: true, context_window: 1_100_000, supported_reasoning_levels: [{ effort: 'high' }] })),
   });
+  const verifiedCache = cacheFor('gpt-5.6-luna');
   const deferred = <T,>() => {
     let resolve!: (value: T) => void;
     const promise = new Promise<T>((r) => { resolve = r; });
     return { promise, resolve };
   };
+  const ids = (call: unknown[]) => (call[0] as { id: string; contextWindow: number }[]).map((m) => `${m.id}:${m.contextWindow}`);
 
-  it('正常路径:读到 cache 即发布回填后的快照', async () => {
+  it('第一阶段同步发布 live 快照,回调返回的 Promise 不等 cache 读取(不占 model/list 的 deadline)', async () => {
     const publish = vi.fn();
-    let epoch = 7;
+    const read = deferred<null>(); // 永不 resolve:模拟 cache 读取卡住
+    const publisher = createCodexLiveModelsPublisher({
+      readCache: () => read.promise,
+      publish,
+      authEpoch: () => 1,
+      cacheReadTimeoutMs: 60_000,
+    });
+    const pending = publisher([liveItem('gpt-5.6-luna')]);
+    // 还没让出事件循环,live 已经发布
+    expect(publish).toHaveBeenCalledOnce();
+    expect(ids(publish.mock.calls[0])).toEqual(['gpt-5.6-luna:272000']);
+    await expect(Promise.race([pending.then(() => 'resolved'), new Promise((r) => setTimeout(() => r('timeout'), 50))]))
+      .resolves.toBe('resolved');
+  });
+
+  it('第二阶段读到 cache 后按 slug 回填真实窗口并二次发布;回填不到任何 slug 时不发二次', async () => {
+    const publish = vi.fn();
     const publisher = createCodexLiveModelsPublisher({
       readCache: async () => verifiedCache,
       publish,
-      authEpoch: () => epoch,
+      authEpoch: () => 7,
     });
     await publisher([liveItem('gpt-5.6-luna'), liveItem('gpt-5.5')]);
-    expect(publish).toHaveBeenCalledOnce();
-    const published = publish.mock.calls[0][0] as ReturnType<typeof mapCodexAppServerModelsToCatalog>;
-    expect(published.map((m) => [m.id, m.contextWindow, m.contextWindowVerified])).toEqual([
-      ['gpt-5.6-luna', 1_100_000, true],
-      ['gpt-5.5', 272_000, undefined],
-    ]);
+    await vi.waitFor(() => expect(publish).toHaveBeenCalledTimes(2));
+    expect(ids(publish.mock.calls[0])).toEqual(['gpt-5.6-luna:272000', 'gpt-5.5:272000']);
+    expect(ids(publish.mock.calls[1])).toEqual(['gpt-5.6-luna:1100000', 'gpt-5.5:272000']);
+    expect((publish.mock.calls[1][0] as { contextWindowVerified?: boolean }[])[0].contextWindowVerified).toBe(true);
+
+    const noHit = vi.fn();
+    const publisher2 = createCodexLiveModelsPublisher({
+      readCache: async () => cacheFor('gpt-unrelated'),
+      publish: noHit,
+      authEpoch: () => 7,
+    });
+    await publisher2([liveItem('gpt-5.5')]);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(noHit).toHaveBeenCalledOnce();
   });
 
-  it('读 cache 期间鉴权代次变化(登出/换号/凭证失效)→ 丢弃本次 live 清单,不发布旧账号模型', async () => {
+  it('读 cache 期间鉴权代次变化(登出/换号/凭证失效/resetMaker)→ 丢弃回填,不发布旧账号清单', async () => {
     const publish = vi.fn();
     const log = { info: vi.fn() };
     let epoch = 1;
-    const read = deferred<null>();
+    const read = deferred<typeof verifiedCache>();
     const publisher = createCodexLiveModelsPublisher({
       readCache: () => read.promise,
       publish,
       authEpoch: () => epoch,
       log,
     });
-    const pending = publisher([liveItem('gpt-5.6-luna')]);
-    epoch = 2; // 账号收口:refreshDiscoveredCodexModels 已清空目录
-    read.resolve(null);
-    await pending;
-    expect(publish).not.toHaveBeenCalled();
-    expect(log.info).toHaveBeenCalledWith(
+    await publisher([liveItem('gpt-5.6-luna')]);
+    expect(publish).toHaveBeenCalledOnce(); // 第一阶段(进入回调时 host 仍有效)
+    epoch = 2; // 账号收口:refreshDiscoveredCodexModels / resetMaker 已推进代次
+    read.resolve(verifiedCache);
+    await vi.waitFor(() => expect(log.info).toHaveBeenCalledWith(
       expect.stringContaining('auth boundary changed'),
       expect.objectContaining({ epoch: 1, current: 2 }),
-    );
+    ));
+    expect(publish).toHaveBeenCalledOnce();
   });
 
-  it('并发回调:只有最后进入的清单会发布,较旧的清单即使后完成也不覆盖', async () => {
+  it('并发回调:只有最后进入的清单会做二次发布,较旧的回填即使后完成也不覆盖', async () => {
     const publish = vi.fn();
-    const first = deferred<null>();
-    const second = deferred<null>();
+    const first = deferred<typeof verifiedCache>();
+    const second = deferred<typeof verifiedCache>();
     const reads = [first.promise, second.promise];
     const publisher = createCodexLiveModelsPublisher({
       readCache: () => reads.shift() ?? Promise.resolve(null),
       publish,
       authEpoch: () => 1,
     });
-    const older = publisher([liveItem('gpt-old')]);
-    const newer = publisher([liveItem('gpt-new')]);
-    // 新的先完成 → 发布;旧的后完成 → 序号已过期,丢弃
-    second.resolve(null);
-    await newer;
-    first.resolve(null);
-    await older;
-    expect(publish).toHaveBeenCalledOnce();
-    expect((publish.mock.calls[0][0] as { id: string }[]).map((m) => m.id)).toEqual(['gpt-new']);
+    await publisher([liveItem('gpt-old')]);
+    await publisher([liveItem('gpt-new')]);
+    expect(publish.mock.calls.map(ids)).toEqual([['gpt-old:272000'], ['gpt-new:272000']]);
+    second.resolve(cacheFor('gpt-new'));
+    await vi.waitFor(() => expect(publish).toHaveBeenCalledTimes(3));
+    first.resolve(cacheFor('gpt-old'));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(publish.mock.calls.map(ids)).toEqual([['gpt-old:272000'], ['gpt-new:272000'], ['gpt-new:1100000']]);
   });
 
-  it('cache 读取超时 → 在独立上限内原样发布 live 快照,不拖累 model/list 的 deadline', async () => {
+  it('cache 读取超时 → 只保留第一阶段的 live 快照,不再二次发布', async () => {
     vi.useFakeTimers();
     try {
       const publish = vi.fn();
@@ -380,11 +410,11 @@ describe('createCodexLiveModelsPublisher (#4087 review: 异步读 cache 后的�
         authEpoch: () => 1,
         cacheReadTimeoutMs: 100,
       });
-      const pending = publisher([liveItem('gpt-5.6-luna')]);
+      await publisher([liveItem('gpt-5.6-luna')]);
       await vi.advanceTimersByTimeAsync(100);
-      await pending;
+      await vi.advanceTimersByTimeAsync(10);
       expect(publish).toHaveBeenCalledOnce();
-      expect((publish.mock.calls[0][0] as { contextWindow: number }[])[0].contextWindow).toBe(272_000);
+      expect(ids(publish.mock.calls[0])).toEqual(['gpt-5.6-luna:272000']);
     } finally {
       vi.useRealTimers();
     }
