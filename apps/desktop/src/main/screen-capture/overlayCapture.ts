@@ -75,10 +75,17 @@ export async function captureRegionViaOverlay(
     width: Math.round(display.size.width * scaleFactor),
     height: Math.round(display.size.height * scaleFactor),
   };
-  const sources = await desktopCapturer.getSources({
-    types: ['screen'],
-    thumbnailSize: pixelSize,
-  });
+  const deadline = Date.now() + timeoutMs;
+  let sourceTimer: ReturnType<typeof setTimeout> | undefined;
+  const sources = await Promise.race([
+    desktopCapturer.getSources({ types: ['screen'], thumbnailSize: pixelSize }),
+    new Promise<null>((resolve) => {
+      sourceTimer = setTimeout(() => resolve(null), timeoutMs);
+    }),
+  ]).finally(() => clearTimeout(sourceTimer));
+  // Electron offers no cancellation for getSources. A late result must never
+  // resume this invocation or create an overlay after its deadline.
+  if (sources === null || Date.now() >= deadline) return { cancelled: true };
   // 帧源必须能可靠对应到覆盖层所在显示器: display_id 匹配, 或"唯一源且物理
   // 显示器也唯一"(此时源只可能是这块屏)。仅凭 sources.length === 1 不够:
   // 多屏 Wayland/合并桌面后端可能只回一个空 display_id 的源, 它可以是 portal
@@ -203,7 +210,7 @@ export async function captureRegionViaOverlay(
       };
       const timer = setTimeout(
         () => settle(() => resolve({ cancelled: true })),
-        timeoutMs,
+        Math.max(0, deadline - Date.now()),
       );
 
       // 冻结帧等覆盖层脚本 announceReady 后再发 —— 避免加载完成与监听注册

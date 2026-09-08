@@ -339,3 +339,39 @@ describe('captureRegionViaOverlay', () => {
     expect(mocks.frame.crop).toHaveBeenCalledWith({ x: 2400, y: 1400, width: 160, height: 40 });
   });
 });
+
+
+it('bounds source acquisition and ignores its late result', async () => {
+  vi.useFakeTimers();
+  let finish!: (sources: Array<{ display_id: string; thumbnail: typeof mocks.frame }>) => void;
+  mocks.getSources.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+  try {
+    let outcome: unknown;
+    const pending = captureRegionViaOverlay(1000, 'capture', TEST_PALETTE).then((value) => { outcome = value; });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(outcome).toEqual({ cancelled: true });
+    finish([{ display_id: '7', thumbnail: mocks.frame }]);
+    await vi.advanceTimersByTimeAsync(0);
+    await pending;
+    expect(FakeBrowserWindow.instances).toHaveLength(0);
+    expect(vi.getTimerCount()).toBe(0);
+  } finally { vi.useRealTimers(); }
+});
+
+it('uses the remaining deadline for selection after delayed source acquisition', async () => {
+  vi.useFakeTimers();
+  mocks.getSources.mockImplementationOnce(() => new Promise((resolve) => {
+    setTimeout(() => resolve([{ display_id: '7', thumbnail: mocks.frame }]), 600);
+  }));
+  try {
+    let outcome: unknown;
+    const pending = captureRegionViaOverlay(1000, 'capture', TEST_PALETTE).then((value) => { outcome = value; });
+    await vi.advanceTimersByTimeAsync(600);
+    expect(FakeBrowserWindow.instances).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(outcome).toEqual({ cancelled: true });
+    await pending;
+    expect(FakeBrowserWindow.instances[0].destroyed).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  } finally { vi.useRealTimers(); }
+});
