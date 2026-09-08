@@ -16,6 +16,7 @@ vi.mock('node:fs/promises', () => ({ default: { readFile: vi.fn() } }));
 import {
   mapCodexModelsToCatalog,
   mapCodexAppServerModelsToCatalog,
+  mergeCodexLiveModelsWithCache,
   readCodexDiscoveredModels,
   readCodexDiscoveredModelsForAuthRefresh,
 } from '../codex-model-discovery.js';
@@ -229,6 +230,63 @@ describe('mapCodexAppServerModelsToCatalog', () => {
     // live 协议不给 context_window,这 272k 是统一兜底 → 一律不得标记为已核实。
     // 标了它就会被拿去收敛运行期上报的窗口,把真实更大的窗口压成 272k。
     expect(out.every((model) => model.contextWindowVerified === undefined)).toBe(true);
+  });
+});
+
+describe('mergeCodexLiveModelsWithCache (#4087)', () => {
+  const liveItem = (slug: string, displayName: string): CodexModelListItem =>
+    ({
+      id: slug, model: slug, displayName, description: '', hidden: false,
+      supportedReasoningEfforts: [{ reasoningEffort: 'high', description: '' }],
+      defaultReasoningEffort: 'high', additionalSpeedTiers: [], serviceTiers: [], isDefault: false,
+    }) as CodexModelListItem;
+
+  it('刷新走 live 清单时按 slug 回填 cache 明示的真实 context_window,不再退回 272k 兜底', () => {
+    // 首次加载:cache 明示 luna 1.1M(verified)。之后「刷新模型信息」走 live,协议不带窗口。
+    const cache = mapCodexModelsToCatalog({
+      models: [
+        { slug: 'gpt-5.6-luna', display_name: 'GPT-5.6-Luna', visibility: 'list', supported_in_api: true, context_window: 1_100_000, priority: 3, supported_reasoning_levels: [{ effort: 'high' }] },
+        { slug: 'gpt-5.5', display_name: 'GPT-5.5', visibility: 'list', supported_in_api: true, context_window: 272000, priority: 7, supported_reasoning_levels: [{ effort: 'high' }] },
+        { slug: 'gpt-5.4-mini', display_name: 'GPT-5.4 Mini', visibility: 'list', supported_in_api: true, context_window: 128000, priority: 23, supported_reasoning_levels: [{ effort: 'high' }] },
+        // cache 里有、live 已下架:不得凭 cache 复活
+        { slug: 'gpt-retired', display_name: 'Retired', visibility: 'list', supported_in_api: true, context_window: 400000, priority: 30, supported_reasoning_levels: [{ effort: 'high' }] },
+      ],
+    });
+    const live = mapCodexAppServerModelsToCatalog([
+      liveItem('gpt-5.6-luna', 'GPT-5.6-Luna'),
+      liveItem('gpt-5.5', 'GPT-5.5'),
+      liveItem('gpt-5.4-mini', 'GPT-5.4 Mini'),
+      // live 新上、cache 还没落盘的模型:保留 272k 兜底且不标 verified
+      liveItem('gpt-5.7', 'GPT-5.7'),
+    ]);
+
+    const merged = mergeCodexLiveModelsWithCache(live, cache);
+
+    // 成员与顺序以 live 为准(含 live 的 sortOrder 锚点),cache 独有的模型不复活
+    expect(merged.map((m) => m.id)).toEqual(['gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4-mini', 'gpt-5.7']);
+    expect(merged.map((m) => m.sortOrder)).toEqual(live.map((m) => m.sortOrder));
+    // 真实窗口回填:1.1M 不再变 272k;更小的 128k 同样照搬(窗口以数据源为准,不做"只升不降")
+    expect(merged[0]).toMatchObject({ contextWindow: 1_100_000, contextWindowVerified: true });
+    expect(merged[1]).toMatchObject({ contextWindow: 272_000, contextWindowVerified: true });
+    expect(merged[2]).toMatchObject({ contextWindow: 128_000, contextWindowVerified: true });
+    // live 独有:仍是兜底值,不得被标成已核实
+    expect(merged[3].contextWindow).toBe(272_000);
+    expect(merged[3].contextWindowVerified).toBeUndefined();
+    // 其余能力字段仍来自 live(effort 白名单等),不被 cache 覆盖
+    expect(merged[0].efforts).toEqual(live[0].efforts);
+    expect(merged[0].defaultEnabled).toBe(true);
+  });
+
+  it('cache 缺失 / 为空 / 没有明示窗口时原样返回 live 快照', () => {
+    const live = mapCodexAppServerModelsToCatalog([liveItem('gpt-5.6-luna', 'GPT-5.6-Luna')]);
+    expect(mergeCodexLiveModelsWithCache(live, null)).toBe(live);
+    expect(mergeCodexLiveModelsWithCache(live, [])).toBe(live);
+    // cache 条目没标 verified(例如 cache 也缺 context_window 只给了 272k 兜底)→ 不回填
+    const unverifiedCache = mapCodexModelsToCatalog({
+      models: [{ slug: 'gpt-5.6-luna', display_name: 'GPT-5.6-Luna', visibility: 'list', supported_in_api: true, supported_reasoning_levels: [{ effort: 'high' }] }],
+    });
+    expect(unverifiedCache[0].contextWindowVerified).toBeUndefined();
+    expect(mergeCodexLiveModelsWithCache(live, unverifiedCache)).toBe(live);
   });
 });
 

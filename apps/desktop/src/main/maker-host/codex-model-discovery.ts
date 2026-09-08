@@ -216,6 +216,36 @@ export function mapCodexAppServerModelsToCatalog(
   return out;
 }
 
+/**
+ * live `model/list` 快照 + models_cache 派生快照 → 合并后的规范化目录(#4087)。
+ *
+ * live 决定成员与顺序(它是当前账号的权威清单),但 live 协议不带 `context_window`,
+ * mapper 只能写 272k 兜底;若整份替换 cache 派生快照,首次加载时 cache 明示的真实窗口
+ * (例如 1.1M)会在「刷新模型信息」/ 登录补拉后退回 272k,展示上限与计数器分母一起变。
+ * 这里只回填 cache 里同 slug **明示**的 context_window(带 contextWindowVerified),
+ * 其余字段仍以 live 为准;cache 缺失 / 该 slug 不在 cache 时保留 live 的兜底值。
+ * 不做「刷新不得降低窗口」:cache 明示更小的窗口同样照搬,窗口以数据源为准。
+ */
+export function mergeCodexLiveModelsWithCache(
+  live: CatalogModel[],
+  cache: CatalogModel[] | null,
+): CatalogModel[] {
+  if (!cache || cache.length === 0) return live;
+  const verifiedById = new Map<string, number>();
+  for (const model of cache) {
+    if (model.contextWindowVerified === true && typeof model.contextWindow === 'number') {
+      verifiedById.set(model.id, model.contextWindow);
+    }
+  }
+  if (verifiedById.size === 0) return live;
+  return live.map((model) => {
+    const contextWindow = verifiedById.get(model.id);
+    return contextWindow === undefined
+      ? model
+      : { ...model, contextWindow, contextWindowVerified: true };
+  });
+}
+
 /** Cindy 自管的 Codex home；系统 ~/.codex 属于独立登录边界，不能混读其账号缓存。 */
 function desktopCodexHome(): string {
   return path.join(app.getPath('userData'), 'codex-home');
