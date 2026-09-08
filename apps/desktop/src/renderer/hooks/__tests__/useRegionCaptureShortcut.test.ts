@@ -241,3 +241,39 @@ it('requires a live eligible composer even on a cc-agent URL', () => {
   release();
   expect(resolveRegionCaptureComposer({ ...target, composerId: id })).toBeUndefined();
 });
+
+it('refreshes multi-composer availability on focus transitions and removes listeners', () => {
+  const key = 'capture-focus-events';
+  let focused = false;
+  let notify: (() => void) | undefined;
+  const off = vi.fn(() => { notify = undefined; });
+  const release = registerComposerCaptureDraftFlusher(key, () => {}, () => focused, Symbol(), (listener) => { notify = listener; return off; });
+  const sibling = registerComposerCaptureDraftFlusher(key, () => {}, () => false);
+  const observed: boolean[] = [];
+  const unsubscribe = subscribeComposerCaptureLocks(() => { observed.push(!!resolveRegionCaptureComposer({ sessionId: key, draftKey: key })); });
+  try {
+    focused = true; notify?.();
+    focused = false; notify?.();
+    expect(observed).toEqual([true, false]);
+  } finally { unsubscribe(); release(); sibling(); }
+  expect(off).toHaveBeenCalledOnce();
+  expect(notify).toBeUndefined();
+});
+
+it.each([true, false])('warns only when a failed cache produces a valid fallback attachment (valid=%s)', async (valid) => {
+  const key = `capture-cache-failure-${valid}`;
+  const warning = vi.fn();
+  vi.stubGlobal('window', { electronAPI: { cacheImageFromBuffer: async () => { throw new Error('disk full'); } } });
+  vi.stubGlobal('FileReader', class {
+    result = 'data:image/png;base64,AQ==';
+    onload?: () => void;
+    readAsDataURL() { this.onload?.(); }
+  });
+  const release = registerComposerCaptureDraftFlusher(key, () => {}, () => true);
+  try {
+    await appendRegionCaptureToDraft({ sessionId: key, draftKey: key }, new Uint8Array([1]), () => valid, warning);
+    expect(warning).toHaveBeenCalledTimes(valid ? 1 : 0);
+    if (valid) expect(getDraft(key)?.attachments[0]?.base64).toBe('AQ==');
+    else expect(getDraft(key)).toBeUndefined();
+  } finally { release(); vi.unstubAllGlobals(); }
+});

@@ -59,13 +59,16 @@ export function registerComposerCaptureDraftFlusher(
   flush: () => void,
   isFocused: () => boolean,
   instanceId: symbol = Symbol('capture-composer'),
+  subscribeFocus?: (listener: () => void) => () => void,
 ): () => void {
   const entry = { instanceId, flush, isFocused };
   const flushers = composerCaptureDraftFlushers.get(draftKey) ?? new Set<CaptureDraftFlusher>();
+  const unsubscribeFocus = subscribeFocus?.(notifyCaptureLockChange);
   flushers.add(entry);
   composerCaptureDraftFlushers.set(draftKey, flushers);
   notifyCaptureLockChange();
   return () => {
+    unsubscribeFocus?.();
     flushers.delete(entry);
     if (flushers.size === 0) composerCaptureDraftFlushers.delete(draftKey);
     notifyCaptureLockChange();
@@ -261,6 +264,7 @@ export async function appendRegionCaptureToDraft(
   target: RegionCaptureTarget,
   data: Uint8Array,
   isTargetStillValid: () => boolean,
+  onCacheFallback: () => void = () => {},
 ): Promise<void> {
   const timestamp = Date.now();
   const name = `region-capture-${timestamp}.png`;
@@ -275,6 +279,7 @@ export async function appendRegionCaptureToDraft(
     originalName: name,
   };
   let attached: AttachedFile;
+  let cacheFailed = false;
   if (target.sessionId) {
     try {
       const cached = await window.electronAPI.cacheImageFromBuffer({
@@ -285,6 +290,7 @@ export async function appendRegionCaptureToDraft(
       });
       attached = { ...base, url: cached.url };
     } catch {
+      cacheFailed = true;
       attached = { ...base, base64: await bytesToBase64(data) };
     }
   } else {
@@ -309,6 +315,7 @@ export async function appendRegionCaptureToDraft(
     },
     { preserveRemoteOptimisticRecovery: true, composerId: owner?.instanceId },
   );
+  if (cacheFailed) onCacheFallback();
 }
 
 export function useRegionCaptureShortcut(): () => boolean {
@@ -322,6 +329,8 @@ export function useRegionCaptureShortcut(): () => boolean {
   overlayHintRef.current = t('regionCapture.hint');
   const failedToastRef = useRef('');
   failedToastRef.current = t('regionCapture.failedToast');
+  const cacheFailedToastRef = useRef('');
+  cacheFailedToastRef.current = t('logic.toasts.attachmentLocalCacheFailed');
 
   // 向 main 上报"当前路由目标是否可消费"—— webview guest 聚焦时的快捷键
   // 转发以此决定要不要拦截按键: 无目标路由、或目标 composer 处于突变锁
@@ -387,7 +396,9 @@ export function useRegionCaptureShortcut(): () => boolean {
         });
         if (result.cancelled || !result.data) return;
         if (!isTargetStillValid()) return;
-        await appendRegionCaptureToDraft(target, result.data, isTargetStillValid);
+        await appendRegionCaptureToDraft(target, result.data, isTargetStillValid, () => {
+          toast.warning(cacheFailedToastRef.current);
+        });
       } catch (err) {
         // 非取消类失败(main 已转稳定 IPC 错误码): 弹本地化提示, 快捷键不能
         // "按了毫无反应"(review P1)。取消/去重路径走 cancelled 分支, 保持静默。

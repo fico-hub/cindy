@@ -3124,7 +3124,14 @@ export function ChatInput({
     return registerComposerCaptureDraftFlusher(storageKey, () => {
       if (storageKeyForDraftRef.current !== storageKey || !isDataOwnerIdCurrent(owner)) return;
       draftSaveSchedulerRef.current?.flush();
-    }, () => editor.isFocused, captureComposerIdRef.current);
+    }, () => editor.isFocused, captureComposerIdRef.current, (listener) => {
+      editor.on('focus', listener);
+      editor.on('blur', listener);
+      return () => {
+        editor.off('focus', listener);
+        editor.off('blur', listener);
+      };
+    });
   }, [editor, storageKey]);
   const composerTypingLocked =
     disabled || (sendDispatchInFlight && !allowTypeDuringSend) || voiceBusyOnCurrentComposer;
