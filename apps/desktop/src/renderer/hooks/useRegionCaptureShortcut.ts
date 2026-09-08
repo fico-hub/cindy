@@ -21,6 +21,7 @@ import {
 } from '../lib/composerDraftStore';
 import { createLogger } from '../lib/logger';
 import type { AttachedFile } from '../lib/fileTypes';
+import { normalizeCaptureColor } from '../lib/normalizeCaptureColor';
 import type { ScreenCaptureOverlayPalette } from '../../shared/screenCapture';
 import { useAppShortcut } from './useAppShortcut';
 
@@ -227,7 +228,7 @@ function resolveOverlayPalette(): ScreenCaptureOverlayPalette {
   const styles = getComputedStyle(document.documentElement);
   const read = (token: string, fallback: string): string => {
     const value = styles.getPropertyValue(token).trim();
-    return value || fallback;
+    return normalizeCaptureColor(value, fallback);
   };
   return {
     scrim: read('--overlay-modal', 'rgba(0, 0, 0, 0.7)'),
