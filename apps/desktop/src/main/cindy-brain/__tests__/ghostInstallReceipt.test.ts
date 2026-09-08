@@ -18,7 +18,10 @@ describe('GhostInstallReceiptStore cleanup', () => {
   let store: GhostInstallReceiptStore;
 
   beforeEach(async () => {
-    workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cindy-receipt-cleanup-'));
+    // Receipt containment checks require a canonical root (/var aliases /private/var on macOS).
+    workDir = await fs.promises.realpath(
+      await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cindy-receipt-cleanup-')),
+    );
     stateRoot = path.join(workDir, 'state');
     await fs.promises.mkdir(stateRoot);
     store = new GhostInstallReceiptStore(() => stateRoot, async ({ parentDir, targetName, operation }) => {

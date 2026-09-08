@@ -1081,9 +1081,12 @@ export class WechatIM extends BaseIM implements RichChannelIM {
           await this.#requireStore().releaseDispatch(task.bindingEpoch, task.id);
         }
       }
+      const queuedTasks = await this.#requireStore().countQueuedTasks(binding.bindingEpoch);
+      // A concurrent send rejection can invalidate the epoch while COUNT waits.
+      if (!this.#isSendEpochCurrent(binding.bindingEpoch, signal)) return;
       this.#setState({
         ...this.#state,
-        queuedTasks: await this.#requireStore().countQueuedTasks(binding.bindingEpoch),
+        queuedTasks,
       });
     }
   }

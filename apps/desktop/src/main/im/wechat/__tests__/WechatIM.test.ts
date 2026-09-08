@@ -1628,6 +1628,154 @@ describe('WechatIM host boundary', () => {
 
     await im.dispose();
   });
+  it.each(['AUTH_REPLACED', 'SEND_REJECTED'] as const)('keeps needs_reauth when %s interrupts post-task queue counting', async (errorCode) => {
+    const dataKey = Buffer.alloc(32, 7);
+    let activeBindingEpoch = '';
+    let taskLeased = false;
+    let releaseCount!: (value: { count: number }) => void;
+    let countStarted!: () => void;
+    const counting = new Promise<void>((resolve) => { countStarted = resolve; });
+    const counted = new Promise<{ count: number }>((resolve) => { releaseCount = resolve; });
+
+    const db = fakeDb({
+      query: vi.fn(async () => []),
+      queryOne: vi.fn(async (sql: string) => {
+        if (sql.includes('FROM wechat_sync_state')) return null;
+        if (sql.includes('COUNT(*) AS count')) {
+          if (!taskLeased) return { count: 0 };
+          countStarted();
+          return await counted;
+        }
+        if (sql.includes('context_nonce')) {
+          const encrypted = encryptWechatContextToken(
+            'ctx-send',
+            dataKey,
+            activeBindingEpoch,
+            'task-lease',
+          );
+          return {
+            taskId: 'task-lease',
+            sessionId: 'wechat-session-1',
+            contextNonce: encrypted.nonce,
+            contextCiphertext: encrypted.ciphertext,
+            contextTag: encrypted.tag,
+          };
+        }
+        if (sql.includes('COALESCE')) return { conversationEpoch: 0 };
+        return undefined;
+      }) as DbClient['queryOne'],
+      tx: vi.fn(async (name: string, args: Record<string, unknown>) => {
+        switch (name) {
+          case 'wechatActivateBindingEpoch':
+            activeBindingEpoch = String(args.bindingEpoch);
+            return { activated: true, previousActiveEpoch: null, activeBindingEpoch };
+          case 'wechatLeaseNextTask':
+            if (taskLeased) return null;
+            taskLeased = true;
+            return {
+              id: 'task-lease',
+              bindingEpoch: activeBindingEpoch,
+              peerId: 'peer-1',
+              sessionId: 'wechat-session-1',
+              conversationEpoch: 0,
+              payloadJson: JSON.stringify({
+                text: 'hello after abort',
+                attachments: [],
+                unsupportedMedia: [],
+              }),
+              context: encryptWechatContextToken(
+                'ctx-lease',
+                dataKey,
+                activeBindingEpoch,
+                'task-lease',
+              ),
+              attempts: 0,
+              receivedAt: 100,
+              expiresAt: 100_000,
+            };
+          case 'wechatCloseBindingEpoch':
+            return { closed: true };
+          case 'wechatUnbindCleanup':
+            return { deletedTasks: 0, deletedMediaRefs: 0, filePaths: [] };
+          default:
+            return null;
+        }
+      }),
+    });
+
+    const testHost = host({
+      secretRead: (name: string) =>
+        name === 'wechat_data_key_v1' ? dataKey.toString('base64') : null,
+    });
+
+    const authTransport = authorizationTransportReturning({
+      token: 'new-token',
+      botId: 'lease-bot',
+      userId: 'new-user',
+      baseUrl: 'https://ilinkai.weixin.qq.com',
+    });
+
+    const liveTransport = {
+      notifyStart: vi.fn(async () => undefined),
+      notifyStop: vi.fn(async () => undefined),
+      poll: vi.fn(async (_cursor: string, signal: AbortSignal) => {
+        // Long-poll that only ends when the epoch is aborted.
+        await new Promise<void>((_, reject) => {
+          signal.addEventListener(
+            'abort',
+            () => reject(new DOMException('Aborted', 'AbortError')),
+            { once: true },
+          );
+        });
+      }),
+      sendMessage: vi.fn(async () => {
+        throw new WechatIlinkError(errorCode, 'send rejected', false);
+      }),
+    } as unknown as WechatTransport;
+
+    const createTransport = vi
+      .fn()
+      .mockReturnValueOnce(authTransport)
+      .mockReturnValueOnce(liveTransport);
+
+    const dispatchAgentTurn = vi.fn(
+      async () =>
+        ({ kind: 'accepted', terminal: Promise.resolve({}) }) as never,
+    );
+
+    const im = new WechatIM(deps({ host: testHost, getDbClient: () => db, createTransport }));
+    im.attachTurnRuntime({
+      runner: {
+        dispatchAgentTurn,
+        stopActiveTurn: vi.fn(async () => ({ stopped: true })),
+      } as never,
+      repo: {
+        prepareNewSession: vi.fn(async () => ({ id: 'wechat-session-1' }) as ImSessionRow),
+        findActiveSession: vi.fn(async () => ({ id: 'wechat-session-1' }) as ImSessionRow),
+        createSession: vi.fn(async () => ({ id: 'wechat-session-1' }) as ImSessionRow),
+      } as never,
+      config: {} as never,
+      resetSessionToDefaults: vi.fn(async () => undefined),
+    });
+
+    await im.authorize();
+    await vi.waitFor(() => expect(im.getState().phase).toBe('connected'));
+    await counting;
+    const attempts = errorCode === 'SEND_REJECTED' ? 3 : 1;
+    for (let i = 0; i < attempts; i += 1) {
+      await expect(im.sendText('peer-1', 'outbound')).rejects.toThrow('send rejected');
+    }
+    expect(im.getState().phase).toBe('needs_reauth');
+    const callsBeforeRelease = vi.mocked(testHost.ipc.broadcast).mock.calls.length;
+    releaseCount({ count: 0 });
+    // Drain the real promise continuations after releasing the controlled COUNT.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(im.getState().phase).toBe('needs_reauth');
+    const laterStates = vi.mocked(testHost.ipc.broadcast).mock.calls.slice(callsBeforeRelease);
+    expect(laterStates.some((call) => (call[1] as { phase?: string }).phase === 'connected')).toBe(false);
+    await im.dispose();
+  });
+
 });
 
 function deps(overrides: Partial<WechatIMDeps> & { host?: IMHost } = {}): WechatIMDeps {
