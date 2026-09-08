@@ -30,6 +30,18 @@ describe('findLoopbackRefusedConnection (#4100)', () => {
     expect(findLoopbackRefusedConnection(aggregate)).toEqual({ address: '::1', port: 18080 });
   });
 
+  it('follows Error.cause so proxy-agent wrappers (outbound-proxy.ts / socks5.ts) keep their errno', () => {
+    const wrapped = new Error('outbound proxy http://127.0.0.1:7890 unreachable: connect ECONNREFUSED 127.0.0.1:7890', {
+      cause: errno('ECONNREFUSED', '127.0.0.1', 7890),
+    });
+    expect(findLoopbackRefusedConnection(wrapped)).toEqual({ address: '127.0.0.1', port: 7890 });
+    // 二级包装 + AggregateError 混合也能找到
+    const nested = new Error('outer', { cause: new AggregateError([errno('ECONNREFUSED', '::1', 1080)], 'agg') });
+    expect(findLoopbackRefusedConnection(nested)).toEqual({ address: '::1', port: 1080 });
+    // 没带 cause 的纯文本包装:不猜,保持通用文案
+    expect(findLoopbackRefusedConnection(new Error('outbound proxy unreachable: connect ECONNREFUSED 127.0.0.1:7890'))).toBeNull();
+  });
+
   it('leaves every other failure alone: non-loopback refusal, timeouts, DNS, non-errors', () => {
     expect(findLoopbackRefusedConnection(errno('ECONNREFUSED', '10.0.0.8', 443))).toBeNull();
     expect(findLoopbackRefusedConnection(errno('ECONNREFUSED', '127.example.com', 443))).toBeNull();

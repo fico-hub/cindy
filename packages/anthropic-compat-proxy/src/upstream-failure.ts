@@ -24,6 +24,7 @@ interface ErrnoLike {
   address?: unknown;
   port?: unknown;
   errors?: unknown;
+  cause?: unknown;
 }
 
 function isLoopbackAddress(address: string): boolean {
@@ -34,7 +35,8 @@ function isLoopbackAddress(address: string): boolean {
 }
 
 /**
- * 从错误(含 AggregateError 内层)里找出「连接被拒 + 回环地址」的那一条。
+ * 从错误链里找出「连接被拒 + 回环地址」的那一条:沿 AggregateError.errors(happy-eyeballs)
+ * 与 Error.cause(出站代理 agent 的包装错误,见 outbound-proxy.ts / socks5.ts)逐层查看。
  * 只认 ECONNREFUSED:ETIMEDOUT / ENOTFOUND 等不是「本机没监听」,不改措辞。
  */
 export function findLoopbackRefusedConnection(err: unknown): RefusedConnection | null {
@@ -50,6 +52,7 @@ export function findLoopbackRefusedConnection(err: unknown): RefusedConnection |
       return { address: e.address, port };
     }
     if (Array.isArray(e.errors)) queue.push(...e.errors);
+    if (e.cause !== undefined) queue.push(e.cause);
   }
   return null;
 }
