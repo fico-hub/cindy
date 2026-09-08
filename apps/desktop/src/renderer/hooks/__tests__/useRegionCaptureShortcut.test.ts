@@ -1,7 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { createComposerDraftSaveScheduler } from '../../lib/composerDraftSaveScheduler';
+import { getDraft, saveDraft, plainTextToTiptapDoc } from '../../lib/composerDraftStore';
 
 import { NEW_MAKER_DRAFT_KEY } from '../../features/cc-agent/newMakerDraftKeys';
 import {
+  appendRegionCaptureToDraft,
+  registerComposerCaptureDraftFlusher,
   getComposerCaptureLockVersion,
   isComposerCaptureLocked,
   registerComposerCaptureLock,
@@ -90,4 +94,50 @@ describe('resolveRegionCaptureTargetFromPath', () => {
       expect(resolveRegionCaptureTargetFromPath(pathname)).toBeNull();
     }
   });
+});
+
+
+describe('capture pending editor save', () => {
+  it('merges after cache completion using the live pending document', async () => {
+    const key = 'capture-live-pending';
+    const oldText = plainTextToTiptapDoc('before');
+    const liveText = plainTextToTiptapDoc('before newly typed');
+    saveDraft(key, { text: oldText, attachments: [], quotes: [] }, { silent: true });
+    let resolveCache!: (value: { url: string }) => void;
+    const cache = new Promise<{ url: string }>((resolve) => { resolveCache = resolve; });
+    vi.stubGlobal('window', { electronAPI: { cacheImageFromBuffer: () => cache } });
+    const scheduler = createComposerDraftSaveScheduler({ setTimer: () => 1, clearTimer: () => {} });
+    const release = registerComposerCaptureDraftFlusher(key, scheduler.flush);
+    const unrelated = vi.fn();
+    const releaseOther = registerComposerCaptureDraftFlusher('other-capture-draft', unrelated);
+    try {
+      const pending = appendRegionCaptureToDraft({ sessionId: key, draftKey: key }, new Uint8Array([1]), () => true);
+      scheduler.schedule(() => saveDraft(key, { ...getDraft(key)!, text: liveText }, { silent: true }));
+      resolveCache({ url: 'xdt-image://capture.png' });
+      await pending;
+      expect(getDraft(key)?.text).toEqual(liveText);
+      expect(getDraft(key)?.attachments).toHaveLength(1);
+      expect(unrelated).not.toHaveBeenCalled();
+    } finally {
+      release();
+      releaseOther();
+      scheduler.cancel();
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+
+it('does not append after a flush invalidates the target', async () => {
+  const key = 'capture-invalidated';
+  let valid = true;
+  vi.stubGlobal('window', { electronAPI: { cacheImageFromBuffer: async () => ({ url: 'xdt-image://capture.png' }) } });
+  const release = registerComposerCaptureDraftFlusher(key, () => { valid = false; });
+  try {
+    await appendRegionCaptureToDraft({ sessionId: key, draftKey: key }, new Uint8Array([1]), () => valid);
+    expect(getDraft(key)).toBeUndefined();
+  } finally {
+    release();
+    vi.unstubAllGlobals();
+  }
 });

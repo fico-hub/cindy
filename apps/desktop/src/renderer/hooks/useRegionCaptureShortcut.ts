@@ -45,6 +45,18 @@ let activeTrigger: ((explicitTarget?: RegionCaptureTarget) => boolean) | null = 
  * 输入"二次发送), 禁用态(review/worktree 准备中)composer 也不该被塞入
  * 无法移除的附件。同一 draftKey 可能多实例挂载(分屏同会话), 用 token 集合。
  */
+const composerCaptureDraftFlushers = new Map<string, Set<() => void>>();
+
+export function registerComposerCaptureDraftFlusher(draftKey: string, flush: () => void): () => void {
+  const flushers = composerCaptureDraftFlushers.get(draftKey) ?? new Set<() => void>();
+  flushers.add(flush);
+  composerCaptureDraftFlushers.set(draftKey, flushers);
+  return () => {
+    flushers.delete(flush);
+    if (flushers.size === 0) composerCaptureDraftFlushers.delete(draftKey);
+  };
+}
+
 const composerCaptureLocks = new Map<string, Set<symbol>>();
 // 锁变更通知: guest 快捷键转发的可用性上报要随锁变化刷新(见下方
 // setTargetAvailable effect), 否则锁定期间 main 仍会拦下 webview 按键、
@@ -201,7 +213,7 @@ function bytesToBase64(data: Uint8Array): Promise<string> {
  * handoff 字段)。isTargetStillValid 在 saveDraft 前的最后时刻复查 —— 附件
  * 缓存写入本身也是异步, 期间草稿可能被发送/丢弃。
  */
-async function appendRegionCaptureToDraft(
+export async function appendRegionCaptureToDraft(
   target: RegionCaptureTarget,
   data: Uint8Array,
   isTargetStillValid: () => boolean,
@@ -234,6 +246,10 @@ async function appendRegionCaptureToDraft(
   } else {
     attached = { ...base, base64: await bytesToBase64(data) };
   }
+  if (!isTargetStillValid()) return;
+  // Cache/base64 preparation may outlast the editor's pending keystroke save.
+  // Flush only the target's mounted editors before reading the merge snapshot.
+  for (const flush of composerCaptureDraftFlushers.get(target.draftKey) ?? []) flush();
   if (!isTargetStillValid()) return;
   const existing = getDraft(target.draftKey);
   saveDraft(

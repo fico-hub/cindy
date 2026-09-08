@@ -277,6 +277,7 @@ import {
 import { usePromptRecommendationPreference } from '@/hooks/usePromptRecommendationPreference';
 import {
   registerComposerCaptureLock,
+  registerComposerCaptureDraftFlusher,
   requestRegionCapture,
   useRegionCaptureAvailable,
 } from '@/hooks/useRegionCaptureShortcut';
@@ -3062,6 +3063,14 @@ export function ChatInput({
     if (!storageKey || !composerMutationLocked) return;
     return registerComposerCaptureLock(storageKey);
   }, [storageKey, composerMutationLocked]);
+  useEffect(() => {
+    if (!editor || !storageKey) return;
+    const owner = editorDataOwnerRef.current;
+    return registerComposerCaptureDraftFlusher(storageKey, () => {
+      if (storageKeyForDraftRef.current !== storageKey || !isDataOwnerGenerationCurrent(owner)) return;
+      draftSaveSchedulerRef.current?.flush();
+    });
+  }, [editor, storageKey]);
   const composerTypingLocked =
     disabled || (sendDispatchInFlight && !allowTypeDuringSend) || voiceBusyOnCurrentComposer;
   composerMutationLockedRef.current = composerTypingLocked;
@@ -3639,7 +3648,7 @@ export function ChatInput({
       saveComposerTextAfterAsyncTransition(prevEditorKey, editor.getJSON(), recoveryCheckpoint!);
     };
 
-    let cancelled = false;
+    const cancelled = false;
     const isCurrentTransition = () =>
       !cancelled &&
       !editor.isDestroyed &&
