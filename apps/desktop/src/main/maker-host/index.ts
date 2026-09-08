@@ -314,8 +314,8 @@ import {
   getDesktopMcpToolApprovalPresentation,
 } from './mcp-tool-approval-policy.js';
 import {
-  mapCodexAppServerModelsToCatalog,
-  mergeCodexLiveModelsWithCache,
+  createCodexLiveModelsPublisher,
+  getCodexDiscoveryAuthEpoch,
   readCodexDiscoveredModels,
 } from './codex-model-discovery.js';
 import { prepareSharedProjectSkillLinks } from './shared-global-skills.js';
@@ -1410,15 +1410,15 @@ export function getMaker(): Maker {
           getDesktopSelectableCatalog(), 'codex', source, modelId,
         );
       },
-      onCodexLocalModelsListed: async (models) => {
-        // live 清单定成员与顺序;真实 context_window 只有 models_cache 明示,按 slug 回填,
-        // 否则「刷新模型信息」会把首次加载的 1.1M 退回 272k 兜底(#4087)。cache 读失败
-        // 返回 null → 原样使用 live 快照,不阻塞目录发布。
-        const cached = await readCodexDiscoveredModels();
-        setDiscoveredCodexModels(
-          mergeCodexLiveModelsWithCache(mapCodexAppServerModelsToCatalog(models), cached),
-        );
-      },
+      // live 清单定成员与顺序;真实 context_window 只有 models_cache 明示,按 slug 回填,
+      // 否则「刷新模型信息」会把首次加载的 1.1M 退回 272k 兜底(#4087)。异步读 cache 后
+      // 的新鲜度(序号 + 鉴权代次)与读取上限见 createCodexLiveModelsPublisher。
+      onCodexLocalModelsListed: createCodexLiveModelsPublisher({
+        readCache: readCodexDiscoveredModels,
+        publish: setDiscoveredCodexModels,
+        authEpoch: getCodexDiscoveryAuthEpoch,
+        log: desktopMakerLogger,
+      }),
       // 「后端不可达」终局升级时读一次本次请求的出站路径判定,把通用猜测换成实测事实。
       // 快照的 proxy 字段在 resolver 侧已脱敏,可直接进用户可见的错误消息。
       //

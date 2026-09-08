@@ -61,6 +61,7 @@ import {
 import { readModelCatalogOverrides } from './model-catalog-override-store.js';
 import {
   readCodexDiscoveredModels,
+  bumpCodexDiscoveryAuthEpoch,
   readCodexDiscoveredModelsForAuthRefresh,
 } from './codex-model-discovery.js';
 import {
@@ -743,6 +744,8 @@ export async function refreshDiscoveredCodexModels(
   authenticated = true,
   shouldApply: () => boolean = () => true,
 ): Promise<void> {
+  // 鉴权边界:让仍在异步读 cache 的 live model/list 回调作废(旧账号清单不得在此之后发布)。
+  bumpCodexDiscoveryAuthEpoch();
   if (!authenticated) {
     if (shouldApply()) setDiscoveredCodexModels([]);
     return;

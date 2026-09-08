@@ -14,10 +14,14 @@ vi.mock('electron', () => ({ app: { getPath: () => '/tmp/xdt-codex-model-discove
 vi.mock('node:fs/promises', () => ({ default: { readFile: vi.fn() } }));
 
 import {
+  bumpCodexDiscoveryAuthEpoch,
+  createCodexLiveModelsPublisher,
+  getCodexDiscoveryAuthEpoch,
   mapCodexModelsToCatalog,
   mapCodexAppServerModelsToCatalog,
   mergeCodexLiveModelsWithCache,
   readCodexDiscoveredModels,
+  readCodexDiscoveredModelsBounded,
   readCodexDiscoveredModelsForAuthRefresh,
 } from '../codex-model-discovery.js';
 
@@ -287,6 +291,118 @@ describe('mergeCodexLiveModelsWithCache (#4087)', () => {
     });
     expect(unverifiedCache[0].contextWindowVerified).toBeUndefined();
     expect(mergeCodexLiveModelsWithCache(live, unverifiedCache)).toBe(live);
+  });
+});
+
+describe('createCodexLiveModelsPublisher (#4087 review: 异步读 cache 后的新鲜度与读取上限)', () => {
+  const liveItem = (slug: string): CodexModelListItem =>
+    ({
+      id: slug, model: slug, displayName: slug, description: '', hidden: false,
+      supportedReasoningEfforts: [{ reasoningEffort: 'high', description: '' }],
+      defaultReasoningEffort: 'high', additionalSpeedTiers: [], serviceTiers: [], isDefault: false,
+    }) as CodexModelListItem;
+  const verifiedCache = mapCodexModelsToCatalog({
+    models: [{ slug: 'gpt-5.6-luna', display_name: 'GPT-5.6-Luna', visibility: 'list', supported_in_api: true, context_window: 1_100_000, supported_reasoning_levels: [{ effort: 'high' }] }],
+  });
+  const deferred = <T,>() => {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((r) => { resolve = r; });
+    return { promise, resolve };
+  };
+
+  it('正常路径:读到 cache 即发布回填后的快照', async () => {
+    const publish = vi.fn();
+    let epoch = 7;
+    const publisher = createCodexLiveModelsPublisher({
+      readCache: async () => verifiedCache,
+      publish,
+      authEpoch: () => epoch,
+    });
+    await publisher([liveItem('gpt-5.6-luna'), liveItem('gpt-5.5')]);
+    expect(publish).toHaveBeenCalledOnce();
+    const published = publish.mock.calls[0][0] as ReturnType<typeof mapCodexAppServerModelsToCatalog>;
+    expect(published.map((m) => [m.id, m.contextWindow, m.contextWindowVerified])).toEqual([
+      ['gpt-5.6-luna', 1_100_000, true],
+      ['gpt-5.5', 272_000, undefined],
+    ]);
+  });
+
+  it('读 cache 期间鉴权代次变化(登出/换号/凭证失效)→ 丢弃本次 live 清单,不发布旧账号模型', async () => {
+    const publish = vi.fn();
+    const log = { info: vi.fn() };
+    let epoch = 1;
+    const read = deferred<null>();
+    const publisher = createCodexLiveModelsPublisher({
+      readCache: () => read.promise,
+      publish,
+      authEpoch: () => epoch,
+      log,
+    });
+    const pending = publisher([liveItem('gpt-5.6-luna')]);
+    epoch = 2; // 账号收口:refreshDiscoveredCodexModels 已清空目录
+    read.resolve(null);
+    await pending;
+    expect(publish).not.toHaveBeenCalled();
+    expect(log.info).toHaveBeenCalledWith(
+      expect.stringContaining('auth boundary changed'),
+      expect.objectContaining({ epoch: 1, current: 2 }),
+    );
+  });
+
+  it('并发回调:只有最后进入的清单会发布,较旧的清单即使后完成也不覆盖', async () => {
+    const publish = vi.fn();
+    const first = deferred<null>();
+    const second = deferred<null>();
+    const reads = [first.promise, second.promise];
+    const publisher = createCodexLiveModelsPublisher({
+      readCache: () => reads.shift() ?? Promise.resolve(null),
+      publish,
+      authEpoch: () => 1,
+    });
+    const older = publisher([liveItem('gpt-old')]);
+    const newer = publisher([liveItem('gpt-new')]);
+    // 新的先完成 → 发布;旧的后完成 → 序号已过期,丢弃
+    second.resolve(null);
+    await newer;
+    first.resolve(null);
+    await older;
+    expect(publish).toHaveBeenCalledOnce();
+    expect((publish.mock.calls[0][0] as { id: string }[]).map((m) => m.id)).toEqual(['gpt-new']);
+  });
+
+  it('cache 读取超时 → 在独立上限内原样发布 live 快照,不拖累 model/list 的 deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const publish = vi.fn();
+      const publisher = createCodexLiveModelsPublisher({
+        readCache: () => new Promise(() => {}), // 永不返回:模拟文件系统卡住
+        publish,
+        authEpoch: () => 1,
+        cacheReadTimeoutMs: 100,
+      });
+      const pending = publisher([liveItem('gpt-5.6-luna')]);
+      await vi.advanceTimersByTimeAsync(100);
+      await pending;
+      expect(publish).toHaveBeenCalledOnce();
+      expect((publish.mock.calls[0][0] as { contextWindow: number }[])[0].contextWindow).toBe(272_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('readCodexDiscoveredModelsBounded:读取抛错也归一为 null,不让回填决定刷新成败', async () => {
+    await expect(
+      readCodexDiscoveredModelsBounded(() => Promise.reject(new Error('EIO')), 50),
+    ).resolves.toBeNull();
+    await expect(
+      readCodexDiscoveredModelsBounded(async () => verifiedCache, 50),
+    ).resolves.toBe(verifiedCache);
+  });
+
+  it('bumpCodexDiscoveryAuthEpoch 单调递增并可读回', () => {
+    const before = getCodexDiscoveryAuthEpoch();
+    expect(bumpCodexDiscoveryAuthEpoch()).toBe(before + 1);
+    expect(getCodexDiscoveryAuthEpoch()).toBe(before + 1);
   });
 });
 

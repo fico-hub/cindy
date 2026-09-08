@@ -246,6 +246,92 @@ export function mergeCodexLiveModelsWithCache(
   });
 }
 
+/**
+ * Codex 目录的「鉴权代次」:每次走鉴权边界重读/清空快照(登录、登出、凭证失效、auth 模式切换)
+ * 时 +1。live `model/list` 回调在异步读 cache 前后比对它,代次变了就丢弃本次结果——
+ * 旧账号的 live 清单绝不能在账号收口之后再被发布回目录(Greptile / Codex review P1)。
+ */
+let codexDiscoveryAuthEpoch = 0;
+
+export function bumpCodexDiscoveryAuthEpoch(): number {
+  codexDiscoveryAuthEpoch += 1;
+  return codexDiscoveryAuthEpoch;
+}
+
+export function getCodexDiscoveryAuthEpoch(): number {
+  return codexDiscoveryAuthEpoch;
+}
+
+/** live 回填时允许等待 cache 读取的上限;超时直接发布 live 快照,不拖累 model/list 的整体 deadline。 */
+export const CODEX_LIVE_CACHE_READ_TIMEOUT_MS = 1_500;
+
+/**
+ * 有上限的 cache 读取:超时 / 抛错都返回 null(= 没读到,原样用 live)。挂起的读取继续跑完
+ * 但结果被丢弃;定时器 unref,不阻塞进程退出。
+ */
+export async function readCodexDiscoveredModelsBounded(
+  read: () => Promise<CatalogModel[] | null>,
+  timeoutMs: number,
+): Promise<CatalogModel[] | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), timeoutMs);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([read().catch(() => null), timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+export interface CodexLiveModelsPublisherDeps {
+  /** 读 Cindy 自管 models_cache(生产 = readCodexDiscoveredModels);null = 没读到。 */
+  readCache: () => Promise<CatalogModel[] | null>;
+  /** 发布合并后的快照(生产 = setDiscoveredCodexModels)。 */
+  publish: (models: CatalogModel[]) => void;
+  /** 当前鉴权代次(生产 = getCodexDiscoveryAuthEpoch)。 */
+  authEpoch: () => number;
+  cacheReadTimeoutMs?: number;
+  log?: { info?: (msg: string, meta?: Record<string, unknown>) => void };
+}
+
+/**
+ * 构造 `onCodexLocalModelsListed` 的宿主实现(#4087)。
+ *
+ * maker-core 只在**进入**回调前校验来源 host 仍是当前 host;本实现为了回填真实窗口要
+ * 异步读 cache,让出事件循环后账号可能已经收口、也可能有更新的 live 清单进来。因此发布前
+ * 再做两道新鲜度校验,任一不满足就丢弃本次结果:
+ *   1. 序号:本回调仍是最后一次进入的回调(更新的 live 清单永远赢,旧清单不覆盖新清单);
+ *   2. 鉴权代次:读 cache 期间没有发生登录/登出/凭证失效(旧账号清单不复活)。
+ * cache 读取有独立上限(默认 1.5s),超时/失败原样发布 live 快照;回填只是增强,不决定
+ * live 刷新的成败。
+ */
+export function createCodexLiveModelsPublisher(
+  deps: CodexLiveModelsPublisherDeps,
+): (models: readonly CodexModelListItem[]) => Promise<void> {
+  let latestSeq = 0;
+  const timeoutMs = deps.cacheReadTimeoutMs ?? CODEX_LIVE_CACHE_READ_TIMEOUT_MS;
+  return async (models) => {
+    const seq = ++latestSeq;
+    const epoch = deps.authEpoch();
+    const live = mapCodexAppServerModelsToCatalog(models);
+    const cached = await readCodexDiscoveredModelsBounded(deps.readCache, timeoutMs);
+    if (seq !== latestSeq) {
+      deps.log?.info?.('codex live model list superseded by a newer snapshot; discarded', { seq, latestSeq });
+      return;
+    }
+    if (epoch !== deps.authEpoch()) {
+      deps.log?.info?.('codex live model list discarded: auth boundary changed during cache read', {
+        epoch,
+        current: deps.authEpoch(),
+      });
+      return;
+    }
+    deps.publish(mergeCodexLiveModelsWithCache(live, cached));
+  };
+}
+
 /** Cindy 自管的 Codex home；系统 ~/.codex 属于独立登录边界，不能混读其账号缓存。 */
 function desktopCodexHome(): string {
   return path.join(app.getPath('userData'), 'codex-home');
