@@ -3122,7 +3122,7 @@ export function ChatInput({
     if (!editor || !storageKey) return;
     const owner = editorDataOwnerRef.current;
     return registerComposerCaptureDraftFlusher(storageKey, () => {
-      if (storageKeyForDraftRef.current !== storageKey || !isDataOwnerGenerationCurrent(owner)) return;
+      if (storageKeyForDraftRef.current !== storageKey || !isDataOwnerIdCurrent(owner)) return;
       draftSaveSchedulerRef.current?.flush();
     }, () => editor.isFocused, captureComposerIdRef.current);
   }, [editor, storageKey]);

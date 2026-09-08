@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { getDataOwnerGeneration, setDataOwnerGeneration, isDataOwnerIdCurrent, isDataOwnerGenerationCurrent, __testing as ownerTesting } from '../../contexts/dataOwnerGeneration';
 import { describe, expect, it, vi } from 'vitest';
 import { createComposerDraftSaveScheduler } from '../../lib/composerDraftSaveScheduler';
 import { getDraft, saveDraft, plainTextToTiptapDoc } from '../../lib/composerDraftStore';
@@ -162,5 +164,26 @@ it.each([false, true])('does not flush a stale same-key composer (menu=%s)', asy
     releaseTarget();
     releaseStale();
     vi.unstubAllGlobals();
+  }
+});
+
+
+it.each([false, true])('capture flusher survives same-owner refresh but rejects account switches (%s)', (switchAccount) => {
+  const source = readFileSync(new URL('../../components/new-chat/ChatInput.tsx', import.meta.url), 'utf8');
+  const callback = source.match(/registerComposerCaptureDraftFlusher\(storageKey, \(\) => \{([\s\S]*?)\n {4}\},/);
+  expect(callback).not.toBeNull();
+  setDataOwnerGeneration('capture-owner', 1);
+  const owner = getDataOwnerGeneration();
+  const flush = vi.fn();
+  const run = new Function('storageKeyForDraftRef', 'storageKey', 'isDataOwnerIdCurrent', 'isDataOwnerGenerationCurrent', 'owner', 'draftSaveSchedulerRef', callback![1]);
+  try {
+    setDataOwnerGeneration(switchAccount ? 'other-owner' : 'capture-owner', 2);
+    run({ current: 'draft' }, 'draft', isDataOwnerIdCurrent, isDataOwnerGenerationCurrent, owner, { current: { flush } });
+    expect(flush).toHaveBeenCalledTimes(switchAccount ? 0 : 1);
+    flush.mockClear();
+    run({ current: 'different-draft' }, 'draft', isDataOwnerIdCurrent, isDataOwnerGenerationCurrent, owner, { current: { flush } });
+    expect(flush).not.toHaveBeenCalled();
+  } finally {
+    ownerTesting.reset();
   }
 });
