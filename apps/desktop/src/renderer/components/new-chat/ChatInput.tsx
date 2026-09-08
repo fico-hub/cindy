@@ -3876,7 +3876,7 @@ export function ChatInput({
       } finally {
         isRestoringRef.current = false;
       }
-    });
+    }, { composerId: captureComposerIdRef.current });
   }, [editor, storageKey]);
 
   // device-link 归属解析成「已确认远程」后补剥 Host capability 芯片。草稿恢复

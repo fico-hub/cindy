@@ -2,11 +2,12 @@ import { readFileSync } from 'node:fs';
 import { getDataOwnerGeneration, setDataOwnerGeneration, isDataOwnerIdCurrent, isDataOwnerGenerationCurrent, __testing as ownerTesting } from '../../contexts/dataOwnerGeneration';
 import { describe, expect, it, vi } from 'vitest';
 import { createComposerDraftSaveScheduler } from '../../lib/composerDraftSaveScheduler';
-import { getDraft, saveDraft, plainTextToTiptapDoc } from '../../lib/composerDraftStore';
+import { getDraft, saveDraft, subscribeDraft, plainTextToTiptapDoc } from '../../lib/composerDraftStore';
 
 import { NEW_MAKER_DRAFT_KEY } from '../../features/cc-agent/newMakerDraftKeys';
 import {
   appendRegionCaptureToDraft,
+  resolveRegionCaptureComposer,
   registerRegionCaptureRouteOwner,
   registerComposerCaptureDraftFlusher,
   getComposerCaptureLockVersion,
@@ -207,4 +208,36 @@ it('resolves only a mounted verified Bot route owner and revokes it on unmount/a
     expect(resolveRegionCaptureTargetFromPath(path)).toBeNull();
   } finally { releaseComposer(); release(); ownerTesting.reset(); }
   expect(resolveRegionCaptureTargetFromPath(path)).toBeNull();
+});
+
+
+it('preserves sibling live edits through real draft notifications and their later save', () => {
+  const key = 'capture-notification-siblings';
+  const owner = Symbol('owner');
+  const sibling = Symbol('sibling');
+  let siblingDocument: ReturnType<typeof plainTextToTiptapDoc> | null = plainTextToTiptapDoc('unsaved sibling edit');
+  const ownerDocument = plainTextToTiptapDoc('owner edit');
+  const scheduler = createComposerDraftSaveScheduler({ setTimer: () => 1, clearTimer: () => {} });
+  const applyOwner = vi.fn();
+  const offOwner = subscribeDraft(key, applyOwner, { composerId: owner });
+  const offSibling = subscribeDraft(key, () => { siblingDocument = getDraft(key)!.text; }, { composerId: sibling });
+  scheduler.schedule(() => saveDraft(key, { text: siblingDocument, attachments: [], quotes: [] }, { silent: true }));
+  try {
+    saveDraft(key, { text: ownerDocument, attachments: [], quotes: [] }, { composerId: owner });
+    expect(applyOwner).toHaveBeenCalledOnce();
+    scheduler.flush();
+    expect(getDraft(key)?.text).toEqual(plainTextToTiptapDoc('unsaved sibling edit'));
+  } finally { offOwner(); offSibling(); scheduler.cancel(); }
+});
+
+
+it('requires a live eligible composer even on a cc-agent URL', () => {
+  const target = { sessionId: 'surface-mask', draftKey: 'surface-mask' };
+  expect(resolveRegionCaptureTargetFromPath('/cc-agent/surface-mask')).toEqual(target);
+  expect(resolveRegionCaptureComposer(target)).toBeUndefined();
+  const id = Symbol('live-composer');
+  const release = registerComposerCaptureDraftFlusher(target.draftKey, () => {}, () => false, id);
+  expect(resolveRegionCaptureComposer(target)?.instanceId).toBe(id);
+  release();
+  expect(resolveRegionCaptureComposer({ ...target, composerId: id })).toBeUndefined();
 });

@@ -71,6 +71,13 @@ export function registerComposerCaptureDraftFlusher(
   };
 }
 
+export function resolveRegionCaptureComposer(target: RegionCaptureTarget): CaptureDraftFlusher | undefined {
+  const candidates = [...(composerCaptureDraftFlushers.get(target.draftKey) ?? [])];
+  return target.composerId
+    ? candidates.find((entry) => entry.instanceId === target.composerId)
+    : candidates.find((entry) => entry.isFocused()) ?? (candidates.length === 1 ? candidates[0] : undefined);
+}
+
 const composerCaptureLocks = new Map<string, Set<symbol>>();
 // 锁变更通知: guest 快捷键转发的可用性上报要随锁变化刷新(见下方
 // setTargetAvailable effect), 否则锁定期间 main 仍会拦下 webview 按键、
@@ -285,11 +292,9 @@ export async function appendRegionCaptureToDraft(
   if (!isTargetStillValid()) return;
   // Cache/base64 preparation may outlast the editor's pending keystroke save.
   // Flush only the target's mounted editors before reading the merge snapshot.
-  const flushers = [...(composerCaptureDraftFlushers.get(target.draftKey) ?? [])];
-  const owner = target.composerId
-    ? flushers.find((entry) => entry.instanceId === target.composerId)
-    : flushers.find((entry) => entry.isFocused());
-  owner?.flush();
+  const owner = resolveRegionCaptureComposer(target);
+  if (!owner) return;
+  owner.flush();
   if (!isTargetStillValid()) return;
   const existing = getDraft(target.draftKey);
   saveDraft(
@@ -301,7 +306,7 @@ export async function appendRegionCaptureToDraft(
       quotes: existing?.quotes ?? [],
       browserComments: existing?.browserComments ?? [],
     },
-    { preserveRemoteOptimisticRecovery: true },
+    { preserveRemoteOptimisticRecovery: true, composerId: owner?.instanceId },
   );
 }
 
@@ -329,7 +334,7 @@ export function useRegionCaptureShortcut(): () => boolean {
   useEffect(() => {
     const target = resolveRegionCaptureTargetFromPath(location.pathname);
     window.electronAPI.screenCapture.setTargetAvailable(
-      target !== null && !isComposerCaptureLocked(target.draftKey),
+      target !== null && !!resolveRegionCaptureComposer(target) && !isComposerCaptureLocked(target.draftKey),
     );
     // lockVersion 只作重报信号, 不进计算。
     void lockVersion;
@@ -337,6 +342,9 @@ export function useRegionCaptureShortcut(): () => boolean {
 
   // 目标已定格后的捕获执行体: 快捷键(路由解析)与菜单入口(显式归属)共用。
   const runCapture = useCallback((target: RegionCaptureTarget): boolean => {
+    const composer = resolveRegionCaptureComposer(target);
+    if (!composer) return false;
+    target = { ...target, composerId: composer.instanceId };
     // 目标 composer 处于突变锁(发送中/禁用/语音占用)时不启动捕获 —— 与
     // 菜单项 disabled 同语义, 快捷键不消费按键(review P1)。
     if (isComposerCaptureLocked(target.draftKey)) return false;
