@@ -40,6 +40,7 @@ describe('newSessionPreferenceStore', () => {
       device: { deviceId: 'devA', name: 'Mac A' },
       workspaceKind: null,
       permissionModeByAgent: {},
+      workingDirByDevice: {},
     });
     expect(JSON.parse(store.get(__testing.storageKey) ?? '{}')).toEqual({
       agentKind: 'codex',
@@ -66,6 +67,7 @@ describe('newSessionPreferenceStore', () => {
       device: { deviceId: 'devB', name: 'devB' },
       workspaceKind: null,
       permissionModeByAgent: {},
+      workingDirByDevice: {},
     });
 
     store.set(__testing.storageKey, '{broken');
@@ -74,6 +76,7 @@ describe('newSessionPreferenceStore', () => {
       device: null,
       workspaceKind: null,
       permissionModeByAgent: {},
+      workingDirByDevice: {},
     });
 
     await saveNewSessionPreferences({
@@ -84,6 +87,7 @@ describe('newSessionPreferenceStore', () => {
       device: { deviceId: 'devC', name: 'devC' },
       workspaceKind: null,
       permissionModeByAgent: {},
+      workingDirByDevice: {},
     });
   });
 
@@ -110,6 +114,7 @@ describe('newSessionPreferenceStore', () => {
       device: null,
       workspaceKind: null,
       permissionModeByAgent: { 'claude-code': 'bypassPermissions', codex: 'ask' },
+      workingDirByDevice: {},
     });
 
     // 落盘的 plan / 非法 agent 键在读取时被清洗。
@@ -121,7 +126,46 @@ describe('newSessionPreferenceStore', () => {
       device: null,
       workspaceKind: null,
       permissionModeByAgent: { codex: 'auto' },
+      workingDirByDevice: {},
     });
+  });
+
+  it('remembers the last explicitly chosen project directory per device (#4103)', async () => {
+    const {
+      __testing,
+      readNewSessionPreferences,
+      saveNewSessionPreferences,
+    } = await import('@/session/newSessionPreferenceStore');
+
+    await saveNewSessionPreferences({ workingDirForDevice: { deviceId: 'devA', workingDir: '/repo/third' } });
+    await saveNewSessionPreferences({ workingDirForDevice: { deviceId: 'devB', workingDir: ' /other/app ' } });
+    // 同设备再次选择覆盖上次;空值 / 空设备被忽略,不清掉已有记忆。
+    await saveNewSessionPreferences({ workingDirForDevice: { deviceId: 'devA', workingDir: '/repo/fourth' } });
+    await saveNewSessionPreferences({ workingDirForDevice: { deviceId: 'devA', workingDir: '   ' } });
+    await saveNewSessionPreferences({ workingDirForDevice: { deviceId: '', workingDir: '/nope' } });
+    await saveNewSessionPreferences({ workspaceKind: 'dialogue' });
+
+    await expect(readNewSessionPreferences()).resolves.toEqual({
+      agentKind: null,
+      device: null,
+      workspaceKind: 'dialogue',
+      permissionModeByAgent: {},
+      workingDirByDevice: { devA: '/repo/fourth', devB: '/other/app' },
+    });
+    expect(JSON.parse(store.get(__testing.storageKey) ?? '{}')).toEqual({
+      workspaceKind: 'dialogue',
+      workingDirByDevice: { devA: '/repo/fourth', devB: '/other/app' },
+    });
+
+    // 落盘里的非法条目(非字符串 / 空)在读取时被清洗,旧存储没有该字段也不报错。
+    store.set(__testing.storageKey, JSON.stringify({
+      workingDirByDevice: { devA: '/repo/ok', devB: 42, ' ': '/x', devC: '' },
+    }));
+    await expect(readNewSessionPreferences()).resolves.toMatchObject({
+      workingDirByDevice: { devA: '/repo/ok' },
+    });
+    store.set(__testing.storageKey, JSON.stringify({ workingDirByDevice: 'bad' }));
+    await expect(readNewSessionPreferences()).resolves.toMatchObject({ workingDirByDevice: {} });
   });
 
   it('remembers either workspace mode across reloads without losing other preferences', async () => {
@@ -148,6 +192,7 @@ describe('newSessionPreferenceStore', () => {
       workspaceKind: 'dialogue',
       agentKind: 'codex',
       permissionModeByAgent: { codex: 'ask' },
+      workingDirByDevice: {},
     });
   });
 

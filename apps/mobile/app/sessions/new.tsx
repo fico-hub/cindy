@@ -2148,6 +2148,16 @@ export default function NewRemoteSessionScreen() {
     setShowHiddenDirectories(false);
   }, [patchDraft]);
 
+  // 用户显式选定目录(快捷选择 / 目录浏览器确认):按设备记住,下次空白新建先恢复它(#4103)。
+  // 自动取最近项目首项走上面的 selectWorkingDir,不算显式选择,不写记忆。
+  const chooseWorkingDir = useCallback((workingDir: string) => {
+    const trimmed = workingDir.trim();
+    if (selectedDeviceId && trimmed) {
+      void saveNewSessionPreferences({ workingDirForDevice: { deviceId: selectedDeviceId, workingDir: trimmed } });
+    }
+    selectWorkingDir(workingDir);
+  }, [selectWorkingDir, selectedDeviceId]);
+
   const selectDialogueWorkspace = useCallback(() => {
     userTouchedWorkspaceRef.current = true;
     void saveNewSessionPreferences({ workspaceKind: 'dialogue' });
@@ -2159,12 +2169,19 @@ export default function NewRemoteSessionScreen() {
 
   const selectRecentProject = useCallback((workingDir: string) => {
     userTouchedWorkspaceRef.current = true;
-    void saveNewSessionPreferences({ workspaceKind: 'project' });
+    const trimmed = workingDir.trim();
+    void saveNewSessionPreferences({
+      workspaceKind: 'project',
+      // 显式点选最近项目 = 该设备的目录记忆(#4103);设备未定时只记模式。
+      ...(selectedDeviceId && trimmed
+        ? { workingDirForDevice: { deviceId: selectedDeviceId, workingDir: trimmed } }
+        : {}),
+    });
     patchDraft({ workspaceKind: 'project', workingDir });
     setWorkspacePickerOpen(false);
     setBrowseOpen(false);
     setShowHiddenDirectories(false);
-  }, [patchDraft]);
+  }, [patchDraft, selectedDeviceId]);
 
   const openProjectBrowse = useCallback(() => {
     userTouchedWorkspaceRef.current = true;
@@ -3697,7 +3714,12 @@ export default function NewRemoteSessionScreen() {
     if (initialWorkspaceKeyRef.current === key) return;
     initialWorkspaceKeyRef.current = key;
 
-    const initialWorkspace = pickInitialNewSessionWorkspace(draft.workingDir, recentWorkspaces);
+    // 先用该设备记住的上次显式选择(#4103),没有再取最近项目首项。
+    const initialWorkspace = pickInitialNewSessionWorkspace(
+      draft.workingDir,
+      recentWorkspaces,
+      newSessionPreferences?.workingDirByDevice?.[selectedDeviceId] ?? null,
+    );
     if (initialWorkspace) {
       selectWorkingDir(initialWorkspace);
       return;
@@ -3714,6 +3736,7 @@ export default function NewRemoteSessionScreen() {
     recentWorkspaces,
     selectWorkingDir,
     newSessionPreferencesLoaded,
+    newSessionPreferences?.workingDirByDevice,
     preferredDefaultDevice?.deviceId,
   ]);
 
@@ -5640,7 +5663,7 @@ export default function NewRemoteSessionScreen() {
                         accessibilityRole="button"
                         disabled={creating}
                         key={workspace.workingDir}
-                        onPress={() => selectWorkingDir(workspace.workingDir)}
+                        onPress={() => chooseWorkingDir(workspace.workingDir)}
                         style={({ pressed }) => [styles.workspaceQuickPick, pressed && styles.pressed]}
                         testID="newSession.workspaceQuickPick"
                       >
@@ -5668,7 +5691,7 @@ export default function NewRemoteSessionScreen() {
                     accessibilityLabel={t('session.new.useCurrentRemoteDir')}
                     accessibilityRole="button"
                     disabled={!browsePath || browseLoading}
-                    onPress={() => browsePath && selectWorkingDir(browsePath)}
+                    onPress={() => browsePath && chooseWorkingDir(browsePath)}
                     style={({ pressed }) => [
                       styles.browseActionButton,
                       (!browsePath || browseLoading) && styles.disabled,
@@ -5715,7 +5738,7 @@ export default function NewRemoteSessionScreen() {
                       disabled={creating || browseLoading}
                       entry={item}
                       onEnter={() => void loadBrowsePath(item.path)}
-                      onSelect={() => selectWorkingDir(item.path)}
+                      onSelect={() => chooseWorkingDir(item.path)}
                     />
                   )}
                   nestedScrollEnabled

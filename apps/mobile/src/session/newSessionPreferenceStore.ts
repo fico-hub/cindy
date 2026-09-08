@@ -15,6 +15,8 @@ export interface NewSessionPreferencePatch {
   workspaceKind?: NewSessionWorkspaceKind;
   /** 记住某 agent 在新建页选的权限档(单键合并进 permissionModeByAgent;'plan' 被忽略)。 */
   permissionModeForAgent?: { agentKind: NewSessionAgentKind; mode: string };
+  /** 记住某台被控电脑上次显式选择的项目目录(单键合并进 workingDirByDevice;空值被忽略,#4103)。 */
+  workingDirForDevice?: { deviceId: string; workingDir: string };
 }
 
 export async function readNewSessionPreferences(): Promise<NewSessionStoredPreferences> {
@@ -45,6 +47,9 @@ export function saveNewSessionPreferences(patch: NewSessionPreferencePatch): Pro
 async function writeNewSessionPreferences(patch: NewSessionPreferencePatch): Promise<void> {
   const current = await loadNewSessionPreferences();
   const permissionPatch = patch.permissionModeForAgent;
+  const workingDirPatch = patch.workingDirForDevice;
+  const workingDirDeviceId = workingDirPatch?.deviceId.trim() ?? '';
+  const workingDirValue = workingDirPatch?.workingDir.trim() ?? '';
   const next: NewSessionStoredPreferences = {
     agentKind: patch.agentKind ?? current.agentKind,
     workspaceKind: patch.workspaceKind ?? current.workspaceKind,
@@ -55,6 +60,10 @@ async function writeNewSessionPreferences(patch: NewSessionPreferencePatch): Pro
       permissionPatch && isRememberablePermissionMode(permissionPatch.mode)
         ? { ...current.permissionModeByAgent, [permissionPatch.agentKind]: permissionPatch.mode }
         : current.permissionModeByAgent,
+    workingDirByDevice:
+      workingDirDeviceId && workingDirValue
+        ? { ...current.workingDirByDevice, [workingDirDeviceId]: workingDirValue }
+        : current.workingDirByDevice,
   };
   await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(serializePreferences(next))).catch(() => undefined);
 }
@@ -71,7 +80,20 @@ function emptyPreferences(): NewSessionStoredPreferences {
     workspaceKind: null,
     device: null,
     permissionModeByAgent: {},
+    workingDirByDevice: {},
   };
+}
+
+function normalizeWorkingDirByDevice(value: unknown): Record<string, string> {
+  const record = readRecord(value);
+  if (!record) return {};
+  const out: Record<string, string> = {};
+  for (const [deviceId, workingDir] of Object.entries(record)) {
+    const id = deviceId.trim();
+    const dir = readString(workingDir);
+    if (id && dir) out[id] = dir;
+  }
+  return out;
 }
 
 // 'plan' 是计划模式的实现细节(老被控端兼容路径),不是用户可记忆的权限档。
@@ -106,6 +128,7 @@ function normalizeStoredPreferences(value: unknown): NewSessionStoredPreferences
       ? { deviceId, name: deviceName || deviceId }
       : null,
     permissionModeByAgent: normalizePermissionModeByAgent(record.permissionModeByAgent),
+    workingDirByDevice: normalizeWorkingDirByDevice(record.workingDirByDevice),
   };
 }
 
@@ -135,6 +158,9 @@ function serializePreferences(
       : {}),
     ...(permissionEntries.length > 0
       ? { permissionModeByAgent: Object.fromEntries(permissionEntries) }
+      : {}),
+    ...(Object.keys(preferences.workingDirByDevice).length > 0
+      ? { workingDirByDevice: { ...preferences.workingDirByDevice } }
       : {}),
   };
 }
