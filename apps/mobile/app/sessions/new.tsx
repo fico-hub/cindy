@@ -453,6 +453,7 @@ export default function NewRemoteSessionScreen() {
   const [selectedDeviceId, setSelectedDeviceId] = useState(routeDeviceId);
   const [selectedDeviceName, setSelectedDeviceName] = useState(routeDeviceName);
   const [newSessionPreferences, setNewSessionPreferences] = useState<NewSessionStoredPreferences | null>(null);
+  const workingDirPreferenceOverridesRef = useRef<Record<string, string>>({});
   const [newSessionPreferencesLoaded, setNewSessionPreferencesLoaded] = useState(false);
   const [devicePickerOpen, setDevicePickerOpen] = useState(false);
   const preferredDefaultDevice = useMemo(
@@ -838,7 +839,11 @@ export default function NewRemoteSessionScreen() {
     void readNewSessionPreferences()
       .then((preferences) => {
         if (cancelled) return;
-        setNewSessionPreferences(preferences);
+        // A late initial read must not replace directories explicitly chosen while it was pending.
+        setNewSessionPreferences({
+          ...preferences,
+          workingDirByDevice: { ...preferences.workingDirByDevice, ...workingDirPreferenceOverridesRef.current },
+        });
         const workspaceKind = preferences.workspaceKind;
         if (!initialWorkingDir && workspaceKind) {
           setDraft((current) => userTouchedWorkspaceRef.current
@@ -2153,6 +2158,7 @@ export default function NewRemoteSessionScreen() {
   // 路径原样保存,只用 trim 判空(首尾空格可能是路径的一部分)。设备未定时不记。
   const rememberWorkingDirForDevice = useCallback((workingDir: string) => {
     if (!selectedDeviceId || !workingDir.trim()) return undefined;
+    workingDirPreferenceOverridesRef.current[selectedDeviceId] = workingDir;
     setNewSessionPreferences((prev) => prev
       ? { ...prev, workingDirByDevice: { ...prev.workingDirByDevice, [selectedDeviceId]: workingDir } }
       : prev);

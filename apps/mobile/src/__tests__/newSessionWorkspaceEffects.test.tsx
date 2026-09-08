@@ -25,6 +25,7 @@ const page = source.statements.find((node): node is ts.FunctionDeclaration =>
 if (!page?.body) throw new Error('NewRemoteSessionScreen not found');
 const declarations = new Set([
   'selectedDeviceId', 'selectedDeviceName', 'newSessionPreferences', 'newSessionPreferencesLoaded',
+  'workingDirPreferenceOverridesRef',
   'preferredDefaultDevice', 'recentWorkspaces', 'draft', 'initialWorkspaceKeyRef',
   'appliedDefaultDeviceKeyRef', 'userTouchedDeviceRef', 'userTouchedWorkspaceRef',
   'patchDraft', 'selectWorkingDir', 'rememberWorkingDirForDevice', 'selectDialogueWorkspace',
@@ -154,6 +155,19 @@ function mountWorkspace(options: { initialWorkingDir?: string; restoredKind?: Ne
 }
 
 describe('new session workspace page effects', () => {
+  it('keeps choices for both devices made before the stored preferences arrive', async () => {
+    const page = mountWorkspace();
+    act(() => page.current.selectRecentProject(' /manual/a '));
+    act(() => page.current.switchDevice('b'));
+    act(() => page.current.selectRecentProject('/manual/b'));
+    await page.resolvePreferences('project', 'a', { a: '/old/a', b: '/old/b' });
+    act(() => page.current.switchDevice('a'));
+    expect(page.current.draft.workingDir).toBe(' /manual/a ');
+    act(() => page.current.switchDevice('b'));
+    expect(page.current.draft.workingDir).toBe('/manual/b');
+    expect(page.bindings.saveNewSessionPreferences).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps an explicit project entry when a different preference arrives late', async () => {
     const page = mountWorkspace({ initialWorkingDir: '/explicit/project' });
     await page.resolvePreferences('dialogue', 'b');
