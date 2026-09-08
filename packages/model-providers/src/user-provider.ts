@@ -23,6 +23,7 @@ import type {
 } from "./types.js";
 import type { ModelRegistry } from "./modelAccessBean.js";
 import { isLoopbackProviderUrl } from "./provider-url.js";
+import { clampEffortToSupported, modelDefaultEffort, defaultEffortForCapabilities } from "./effortResolution.js";
 
 /** 自定义模型缺省上下文窗口（用户不填元数据时的保守默认，仅用于展示）。 */
 export const DEFAULT_CUSTOM_CONTEXT_WINDOW = 200_000;
@@ -32,6 +33,8 @@ export const DEFAULT_CUSTOM_CONTEXT_WINDOW = 200_000;
  * source. Preserve the stored id, but project that legacy row under a collision-free runtime id.
  */
 export const LEGACY_XAI_CUSTOM_PROVIDER_RUNTIME_ID = "custom:xai";
+/** Official API-key preset for xAI; distinct from the built-in SuperGrok OAuth provider. */
+export const XAI_API_CUSTOM_PROVIDER_ID = "xai-api";
 
 export function runtimeCustomProviderId(providerId: string): string {
   return providerId === "xai"
@@ -45,23 +48,86 @@ export function storedCustomProviderId(providerId: string): string {
     : providerId;
 }
 
+function isOfficialXaiApiUpstream(upstream: string | undefined): boolean {
+  try {
+    const url = new URL(upstream ?? "");
+    return (
+      url.protocol === "https:" &&
+      url.hostname === "api.x.ai" &&
+      (url.pathname === "/v1" || url.pathname === "/v1/")
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The chat-only xAI API preset uses the same public Imagine endpoints as the built-in
+ * OAuth source. Project those catalog entries onto the API-key source only after the
+ * official endpoint has been confirmed by the saved runtime routing.
+ */
+export function projectXaiApiImageModels(
+  providers: readonly Provider[],
+): readonly Provider[] {
+  const xaiSource = providers.find((provider) => provider.id === "xai");
+  if (
+    !xaiSource?.imageModels?.length ||
+    !providers.some((provider) => provider.id === XAI_API_CUSTOM_PROVIDER_ID)
+  ) {
+    return providers;
+  }
+  // 属性收窄无法跨越 map 回调边界，这里显式捕获非空清单。
+  const sourceImageModels = xaiSource.imageModels;
+  let changed = false;
+  const projected = providers.map((provider) => {
+    if (
+      provider.id !== XAI_API_CUSTOM_PROVIDER_ID ||
+      provider.source !== "user" ||
+      provider.auth.method !== "apiKey" ||
+      provider.imageModels?.length ||
+      !Object.values(provider.routing).some((routing) =>
+        isOfficialXaiApiUpstream(routing?.upstream),
+      )
+    ) {
+      return provider;
+    }
+    changed = true;
+    return { ...provider, imageModels: [...sourceImageModels] };
+  });
+  return changed ? projected : providers;
+}
+
+/**
+ * Official-API image credentials may only come from runtimes whose saved routing
+ * targets the official endpoint. Binding key reads to these agents prevents a
+ * proxy-configured runtime's key from being disclosed to api.x.ai. Agents are
+ * returned in fixed AGENT_ORDER so key selection stays deterministic when
+ * several runtimes are official.
+ */
+export function xaiApiOfficialRuntimeAgents(
+  provider: Provider | undefined,
+): readonly AgentKind[] {
+  if (!provider) return [];
+  return AGENT_ORDER.filter((agent) =>
+    isOfficialXaiApiUpstream(provider.routing[agent]?.upstream),
+  );
+}
+
 /**
  * 自定义模型的默认 effort 档位（「参考默认设置」）——与内置当代旗舰模型对齐：
  *   - claude-code：low/medium/high/xhigh/max（同 opus / fable）；
  *   - codex：low/medium/high/xhigh/max（gpt-5.x 同款五档，ultra 仍仅限已登记模型）。
- * 让自定义模型像内置模型一样能在选择器里切 reasoning/thinking 强度（默认 high）。
+ * 让自定义模型像内置模型一样能在选择器里切 reasoning/thinking 强度（默认 medium）。
  * 端点是否真支持由其后端决定：cc 经 `thinking`、codex 经 reasoning effort 透传，
  * anthropic-compat-proxy 仅对个别内置 model id strip 字段、对自定义 id 一律字节透传。
  * 未登记模型（Registry 无法确认能力）也放开到 max：第三方 Responses 兼容端点普遍
  * 接受与否只有端点方/用户知道，选到不支持的档位会被上游拒绝，用户改选即可；
- * 默认档保持 high，存量行为不变（见 #2964）。
+ * 默认中档；用户显式配置仍优先。
  */
 const CUSTOM_EFFORTS: Partial<Record<AgentKind, Effort[]>> = {
   "claude-code": ["low", "medium", "high", "xhigh", "max"],
   codex: ["low", "medium", "high", "xhigh", "max"],
 };
-/** 自定义模型默认选中的 effort（与内置旗舰一致）。 */
-const DEFAULT_CUSTOM_EFFORT: Effort = "high";
 
 interface RegistryEffortMetadata {
   efforts: Effort[];
@@ -75,13 +141,12 @@ function toRegistryEffortMetadata(
   const perAgent = entry.perAgent?.[agent];
   const efforts = perAgent?.efforts ?? entry.efforts;
   if (!efforts) return undefined;
-  const declaredDefault = perAgent?.defaultEffort ?? entry.defaultEffort;
+  const declaredDefault = modelDefaultEffort(entry);
   const defaultEffort =
-    declaredDefault && efforts.includes(declaredDefault)
-      ? declaredDefault
-      : efforts.includes(DEFAULT_CUSTOM_EFFORT)
-        ? DEFAULT_CUSTOM_EFFORT
-        : (efforts[efforts.length - 1] ?? null);
+    efforts.length === 0 || declaredDefault === null ? null
+      : declaredDefault !== undefined
+        ? clampEffortToSupported(declaredDefault, efforts) as Effort
+        : defaultEffortForCapabilities(efforts);
   return { efforts: [...efforts], defaultEffort };
 }
 
@@ -154,6 +219,34 @@ function registryEffortMetadata(
   return consensusRegistryEffortMetadata(fallbackMatches, agent);
 }
 
+/**
+ * Fast mode is a Codex service-tier capability, so a user provider may inherit it only when the
+ * configured model id exactly matches a Registry route for Codex. Prefix fallback is intentionally
+ * excluded: aliases can point at gateways with different billing or service-tier behavior.
+ */
+function registrySupportsFastMode(
+  registry: ModelRegistry | null | undefined,
+  modelId: string,
+  agent: AgentKind,
+): boolean {
+  if (agent !== "codex" || !registry) return false;
+
+  const matches = registry.models.filter((entry) =>
+    entry.routes.some(
+      (route) =>
+        route.agents.includes(agent) && route.modelId === modelId,
+    ),
+  );
+  return (
+    matches.length > 0 &&
+    matches.every(
+      (entry) =>
+        (entry.perAgent?.[agent]?.supportsFastMode ??
+          entry.supportsFastMode) === true,
+    )
+  );
+}
+
 /** 固定 agent 顺序：保证派生出的 provider.agents / routing / models 顺序稳定。 */
 const AGENT_ORDER: readonly AgentKind[] = ["claude-code", "codex", "pi"];
 
@@ -178,16 +271,19 @@ function toCatalogModel(
     m.reasoning !== undefined
       ? undefined
       : registryEffortMetadata(modelRegistry, m.id, agent);
+  const supportsFastMode = registrySupportsFastMode(
+    modelRegistry,
+    m.id,
+    agent,
+  );
   const effectiveEfforts = registryEfforts?.efforts ?? efforts;
   const defaultEffort =
-    registryEfforts?.defaultEffort ??
+    registryEfforts !== undefined ? registryEfforts.defaultEffort :
     (m.reasoning === true &&
     m.reasoningDefaultEffort &&
     effectiveEfforts.includes(m.reasoningDefaultEffort)
       ? m.reasoningDefaultEffort
-      : effectiveEfforts.includes(DEFAULT_CUSTOM_EFFORT)
-        ? DEFAULT_CUSTOM_EFFORT
-        : (effectiveEfforts[0] ?? null));
+      : defaultEffortForCapabilities(effectiveEfforts));
   return {
     id: m.id,
     name: m.name,
@@ -209,6 +305,7 @@ function toCatalogModel(
     // 图片能力必须由用户/预设明确确认；缺省不猜，防止 Pi 静默把截图降级成占位文本。
     ...(m.supportsImageInput === true ? { supportsImageInput: true } : {}),
     ...(m.thinkingToggle === true ? { thinkingToggle: true } : {}),
+    ...(supportsFastMode ? { supportsFastMode: true } : {}),
   };
 }
 
@@ -232,6 +329,7 @@ function toRouting(
   modelsUrl?: string,
   wireProtocol?: "anthropic-messages" | "openai-responses" | "openai-chat",
   piCatalogProviderId?: string,
+  supportsImageGeneration?: boolean,
 ): RoutingDescriptor {
   const r: RoutingDescriptor = {
     upstream: baseUrl,
@@ -239,6 +337,9 @@ function toRouting(
     ...(agent === 'codex'
       && (wireProtocol ?? defaultWireProtocol(agent)) === 'openai-responses'
       ? { supportsResponsesCustomTools: false }
+      : {}),
+    ...(agent === 'codex' && supportsImageGeneration === true
+      ? { supportsImageGeneration: true }
       : {}),
     ...(strategy === "none" &&
     (!isLoopbackProviderUrl(baseUrl) ||
@@ -298,6 +399,7 @@ export function buildUserProvider(
       rt.modelsUrl,
       rt.wireProtocol,
       rt.piCatalogProviderId,
+      rt.supportsImageGeneration,
     );
     models[agent] = rt.models.map((m) =>
       toCatalogModel(m, config.id, agent, options.modelRegistry),

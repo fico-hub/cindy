@@ -1,6 +1,8 @@
 import type { MobileSessionAgentSwitchIntent } from '@cindy/maker-shared/device-link-contract';
 import type { AgentInputReference } from '@cindy/maker-shared/agent-input-projection';
 import type { RemoteMoney } from '@/session/remoteMoney';
+import type { MobileToolLoopErrorDetails } from '@/session/toolLoopErrorI18n';
+import type { MobileToolInputProjection } from '@/session/messageToolPayloadProjection';
 
 export type RemoteSessionStatus = 'active' | 'archived' | 'deleted';
 export type RemoteMessageRole =
@@ -113,8 +115,10 @@ export interface RemoteMessage {
   toolUseId: string | null;
   agentMeta: Record<string, unknown> | null;
   createdAt: string;
+  /** Large settled tool input released from the transcript mirror and recoverable by message id. */
+  mobileToolInputProjection?: MobileToolInputProjection;
   systemCardData?: Record<string, unknown>;
-  systemCardType?: 'help' | 'context' | 'cost' | 'pwd' | 'status' | 'compact' | 'cmd' | 'goal-complete' | 'goal-resumed' | 'auto-resume' | 'learn' | 'agent-switch';
+  systemCardType?: 'help' | 'context' | 'cost' | 'pwd' | 'status' | 'compact' | 'cmd' | 'goal-complete' | 'goal-resumed' | 'context-rebuild' | 'auto-resume' | 'learn' | 'agent-switch';
 }
 
 export type RemoteAttachmentCategory = 'image' | 'pdf' | 'text' | 'office';
@@ -239,6 +243,10 @@ export interface InputProjection {
   queueEditLocks: string[];
   queueAbortPending: boolean;
   error: string | null;
+  /** Stable error reason for live projections; older controlled hosts may omit it. */
+  errorReason?: string | null;
+  /** Bounded details for tool-loop errors; older projections may omit them. */
+  toolLoop?: MobileToolLoopErrorDetails | null;
   recovery?: unknown;
   errorRetryText: string | null;
   autoResumePending?: Record<string, unknown> | null;

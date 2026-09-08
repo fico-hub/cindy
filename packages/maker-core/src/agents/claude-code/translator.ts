@@ -36,9 +36,11 @@ import {
   isContextOverflowErrorMessage,
 } from '../shared/context-overflow-error.js';
 import type { UsageTracker } from '../shared/usage-tracker.js';
-import { attachLiveGeneration } from '../shared/live-generation-snapshot.js';
+import { isModelAccessDenied } from './model-access-error.js';
+import { attachLiveGeneration, sampleGenerationDuration } from '../shared/live-generation-snapshot.js';
 import {
   beginClaudeGeneration,
+  beginClaudeGenerationAtRequestStart,
   finalizeClaudeGeneration,
   markClaudeGenerationUnreliable,
   newClaudeGenerationState,
@@ -88,6 +90,8 @@ export interface TurnState {
     agentMeta?: Record<string, unknown>;
     errorStatus?: number | null;
     usageLimit?: boolean;
+    /** Extracted before redaction, which can make an upstream JSON envelope unparsable. */
+    modelAccessDenied?: boolean;
     retryAttempt?: number;
     maxRetries?: number;
   } | null;
@@ -142,6 +146,14 @@ export interface RuntimeState {
   /** tool_use.id → tool_use.name。用于在 tool_result echo 时区分命令输出和内容结果。 */
   toolUseIdToName: Map<string, string>;
   /**
+   * 主(parent)流当前请求 streamed 出来的 tool_use id;message_start 清空,
+   * message_delta 停表后清空。生成时钟只允许停在这批 id 上 —— toolUseIdToName
+   * 是跨请求、跨 turn 的命名表,里面可能留着 echo 永远不会来的旧 id(ToolSearch
+   * 等 SDK 内部工具、错误中断的 turn),按它扫全量停表会让 pendingToolIds 永不
+   * 排空、时钟冻死,而 output 还在涨,live tok/s 无限膨胀。
+   */
+  mainRequestToolUseIds: Set<string>;
+  /**
    * SDK child assistant 消息按 parent_tool_use_id 隔离的真实模型。
    * 并发 subagent 的完整消息与 stream_event 都会交错，不能用会话级元数据推断。
    */
@@ -188,6 +200,8 @@ export interface RuntimeState {
   activeUsagePriceVariantByParent: Map<string, 'standard' | 'priority'>;
   /** Price variant captured for the next request before its message_start arrives. */
   pendingUsagePriceVariantByParent: Map<string, 'standard' | 'priority'>;
+  /** Monotonic ids for user messages carrying tool_result blocks, used to keep one assistant batch together. */
+  toolResultBatchSeq: number;
   usageSegmentSeq: number;
   generation: ClaudeGenerationState;
 }
@@ -196,6 +210,7 @@ export function newRuntimeState(): RuntimeState {
   return {
     currentThinking: null,
     toolUseIdToName: new Map(),
+    mainRequestToolUseIds: new Set(),
     streamModelByParentToolUseId: new Map(),
     resolvedSubagentModelByParentToolUseId: new Map(),
     publishedSubagentModelByParentToolUseId: new Map(),
@@ -210,6 +225,7 @@ export function newRuntimeState(): RuntimeState {
     activeUsageSegmentByParent: new Map(),
     activeUsagePriceVariantByParent: new Map(),
     pendingUsagePriceVariantByParent: new Map(),
+    toolResultBatchSeq: 0,
     usageSegmentSeq: 0,
     generation: newClaudeGenerationState(),
   };
@@ -250,18 +266,6 @@ function applySubagentLiveReliability(ctx: TranslateContext): void {
   }
 }
 
-/**
- * Snapshot-only: the current parent generation interval has no streamed output
- * yet. Hide this status without sticky-failing `generation.reliable`, so a
- * later parent `message_delta` can restore tok/s.
- */
-function currentParentStreamedOutputPending(ctx: TranslateContext): boolean {
-  if (!ctx.rt.generation.sawSubagent) return false;
-  if (mainActiveSegmentHasOutput(ctx)) return false;
-  if (ctx.rt.generation.startedAt !== null) return true;
-  return Boolean(ctx.rt.activeUsageSegmentByParent.get(CLAUDE_MAIN_USAGE_PARENT));
-}
-
 function liveParentOutputTokens(
   ctx: TranslateContext,
   resultOutput?: number,
@@ -278,6 +282,9 @@ function liveParentOutputTokens(
     return mainOutput;
   }
   if (typeof resultOutput === 'number' && Number.isFinite(resultOutput)) {
+    // A first aggregate after resume may include historical output. Keep the
+    // accounting total, but never divide it by this turn's generation time.
+    if (!streamedOutputMatchesResult) markClaudeGenerationUnreliable(ctx.rt.generation);
     return Math.max(0, resultOutput);
   }
   return mainOutput;
@@ -293,9 +300,9 @@ function ccLiveStatus(
     status,
     ...attachLiveGeneration(ctx.tracker.snapshot(), {
       outputTokens: mainTurnOutputTokens(ctx.tracker),
-      closedDurationMs: ctx.rt.generation.durationMs,
+      durationMs: ctx.rt.generation.outputDurationMs,
       openStartedAt: ctx.rt.generation.startedAt,
-      reliable: ctx.rt.generation.reliable && !currentParentStreamedOutputPending(ctx),
+      reliable: ctx.rt.generation.reliable,
     }),
     isRunning,
   };
@@ -428,25 +435,32 @@ export function extractAssistantMeta(rawMsg: unknown): Record<string, unknown> {
 // TaskOutput 读取的是任务/agent 输出，不等同于终端工具结果。
 const TERMINAL_OUTPUT_TOOL_NAMES = new Set(['Bash', 'PowerShell']);
 
+interface ToolResultPair {
+  toolUseId: string;
+  fullText: string;
+  isError: boolean;
+}
+
 function normalizeToolResultFullText(
-  pair: { toolUseId: string; fullText: string },
+  pair: ToolResultPair,
   rt: RuntimeState,
-): { toolUseId: string; fullText: string } {
+): ToolResultPair {
   const toolName = rt.toolUseIdToName.get(pair.toolUseId);
   if (!toolName || !TERMINAL_OUTPUT_TOOL_NAMES.has(toolName)) return pair;
   return {
     toolUseId: pair.toolUseId,
     fullText: stripTerminalControlSequences(pair.fullText),
+    isError: pair.isError,
   };
 }
 
 function extractToolResultFullText(
   message: { content?: unknown } | undefined,
   rt: RuntimeState,
-): Array<{ toolUseId: string; fullText: string }> {
+): ToolResultPair[] {
   if (!message?.content || typeof message.content === 'string') return [];
   if (!Array.isArray(message.content)) return [];
-  const out: Array<{ toolUseId: string; fullText: string }> = [];
+  const out: ToolResultPair[] = [];
   for (const block of message.content as unknown[]) {
     const pair = readToolResultFullText(block);
     if (pair) {
@@ -457,9 +471,9 @@ function extractToolResultFullText(
   return out;
 }
 
-function readToolResultFullText(blockRaw: unknown): { toolUseId: string; fullText: string } | null {
+function readToolResultFullText(blockRaw: unknown): ToolResultPair | null {
   if (!blockRaw || typeof blockRaw !== 'object') return null;
-  const b = blockRaw as { type?: unknown; tool_use_id?: unknown; content?: unknown };
+  const b = blockRaw as { type?: unknown; tool_use_id?: unknown; content?: unknown; is_error?: unknown };
   if (b.type !== 'tool_result') return null;
   if (typeof b.tool_use_id !== 'string' || b.tool_use_id.length === 0) return null;
   const inner = b.content;
@@ -476,7 +490,7 @@ function readToolResultFullText(blockRaw: unknown): { toolUseId: string; fullTex
     }
     fullText = parts.join('\n');
   }
-  return { toolUseId: b.tool_use_id, fullText };
+  return { toolUseId: b.tool_use_id, fullText, isError: b.is_error === true };
 }
 
 /**
@@ -655,9 +669,18 @@ interface TranslateContext {
    * upstream-response-idle watchdog: user 含 tool_result 时出队, 配对 onToolUseStart。
    * 不要复用 extractToolResultFullText — 那里 fullText.length>0 过滤会漏空内容 result
    * (Bash 无 stdout / Write 成功 / MCP return null), 导致 pendingToolIds 永远漏减,
-   * watchdog 整 turn 失效。parentToolUseId 与 tool_use 同源，用于隔离并发 subagent。
+   * watchdog 整 turn 失效。isError 来自 SDK tool_result.is_error；只有明确失败的结果
+   * 才能进入契约错误熔断。toolResultBatchId 标识同一 user tool-result 消息，使并行
+   * 工具调用不会在模型看到错误前被当成多轮重试。parentToolUseId 与 tool_use 同源，
+   * 用于隔离并发 subagent。
    */
-  onToolResultDone?: (toolUseId: string, output: string, parentToolUseId?: string) => void;
+  onToolResultDone?: (
+    toolUseId: string,
+    output: string,
+    parentToolUseId?: string,
+    isError?: boolean,
+    toolResultBatchId?: string,
+  ) => void;
   onSubagentTaskLaunched?: (task: {
     taskId: string;
     parentToolUseId: string;
@@ -731,6 +754,12 @@ export function translateSdkMessage(
       const parentToolUseId = typeof msg.parent_tool_use_id === 'string' && msg.parent_tool_use_id
         ? msg.parent_tool_use_id
         : undefined;
+      const content = msg.message?.content;
+      const hasToolResult = Array.isArray(content)
+        && content.some((blockRaw) => readToolResultFullText(blockRaw) !== null);
+      const toolResultBatchId = hasToolResult
+        ? `tool-result-batch-${++ctx.rt.toolResultBatchSeq}`
+        : undefined;
       const fullPairs = extractToolResultFullText(msg.message, ctx.rt);
       for (const pair of fullPairs) {
         queue.push({
@@ -791,7 +820,6 @@ export function translateSdkMessage(
       }
       // 单独遍历: 不能复用 extractToolResultFullText, 见 onToolResultDone JSDoc。
       const completedToolUseIds = new Set(fullPairs.map((pair) => pair.toolUseId));
-      const content = msg.message?.content;
       if (ctx.onToolResultDone) {
         if (Array.isArray(content)) {
           for (const blockRaw of content as unknown[]) {
@@ -799,7 +827,13 @@ export function translateSdkMessage(
             const pair = rawPair ? normalizeToolResultFullText(rawPair, ctx.rt) : null;
             if (!pair) continue;
             completedToolUseIds.add(pair.toolUseId);
-            ctx.onToolResultDone(pair.toolUseId, pair.fullText, parentToolUseId);
+            ctx.onToolResultDone(
+              pair.toolUseId,
+              pair.fullText,
+              parentToolUseId,
+              pair.isError,
+              toolResultBatchId,
+            );
           }
         }
       } else if (Array.isArray(content)) {
@@ -809,7 +843,7 @@ export function translateSdkMessage(
         }
       }
       for (const toolUseId of completedToolUseIds) {
-        resumeClaudeGeneration(ctx.rt.generation, toolUseId);
+        if (!parentToolUseId) resumeClaudeGeneration(ctx.rt.generation, toolUseId);
         ctx.rt.toolUseIdToName.delete(toolUseId);
       }
       if (completedToolUseIds.size > 0) {
@@ -986,6 +1020,9 @@ function handleSystem(
         : `SDK API request failed: ${sdkError} (${statusLabel}${retryLabel})`,
       sdkError,
       ...(hasAssistantEnvelope ? { agentMeta: previous.agentMeta } : {}),
+      modelAccessDenied: hasAssistantEnvelope
+        ? previous.modelAccessDenied
+        : isModelAccessDenied(msg.error ?? '', msg.error_status ?? undefined),
       errorStatus: msg.error_status,
       retryAttempt: msg.attempt,
       maxRetries: msg.max_retries,
@@ -1346,6 +1383,7 @@ function handleAssistant(
       message: redactSensitiveText(errorMessage),
       sdkError: redactSensitiveText(msg.error),
       agentMeta: assistantMeta,
+      modelAccessDenied: isModelAccessDenied(errorMessage, errorSignals.errorStatus),
       ...(errorSignals.errorStatus !== undefined
         ? { errorStatus: errorSignals.errorStatus }
         : {}),
@@ -1468,7 +1506,7 @@ function handleAssistant(
       const toolUseId = rememberClaudeToolUseId(ctx, block.id, block.name);
       if (toolUseId) {
         // 完整 assistant 消息已带工具参数,即使没有 stream_event 也可在此停表。
-        pauseClaudeGenerationForToolUse(ctx, toolUseId);
+        if (!parentToolUseId) pauseClaudeGenerationForToolUse(ctx, toolUseId);
         ctx.onToolUseStart?.(toolUseId, block.name, block.input, parentToolUseId);
       }
       queue.push({
@@ -1528,10 +1566,12 @@ function pauseClaudeGenerationForToolUse(
   pauseClaudeGeneration(ctx.rt.generation, toolUseId);
 }
 
-function pauseClaudeGenerationForKnownTools(ctx: TranslateContext): void {
-  for (const toolUseId of ctx.rt.toolUseIdToName.keys()) {
+/** 只停本次主流请求 streamed 出来的 tool_use;见 mainRequestToolUseIds 字段注释。 */
+function pauseClaudeGenerationForCurrentRequestTools(ctx: TranslateContext): void {
+  for (const toolUseId of ctx.rt.mainRequestToolUseIds) {
     pauseClaudeGenerationForToolUse(ctx, toolUseId);
   }
+  ctx.rt.mainRequestToolUseIds.clear();
 }
 
 /**
@@ -1596,6 +1636,7 @@ function handleStreamEvent(
         // message_delta 或完整 assistant tool_use: content_block_start
         // 早于参数 input_json_delta,这里停表会把参数生成时间从分母抠掉,
         // 而后续 message_delta 仍把这些 token 加进 outputTokens。
+        if (!parentToolUseId) ctx.rt.mainRequestToolUseIds.add(toolUseId);
         ctx.onToolUseStart?.(toolUseId, cb.name, cb.input, parentToolUseId);
       }
     }
@@ -1688,8 +1729,9 @@ function handleStreamEvent(
   if (event.type === 'message_delta') {
     // message_delta 是整条 assistant 消息(含工具参数 token)生成完毕后的
     // 第一个事件。在此停表,才能排除工具执行/审批等待,又不把参数生成
-    // 区间从 tok/s 分母里抠掉。
-    pauseClaudeGenerationForKnownTools(ctx);
+    // 区间从 tok/s 分母里抠掉。只有主流自己的 message_delta 才停主时钟:
+    // 子代理 delta 到达时父级可能正在并行生成(后台 Agent),不许提前切断。
+    if (!parentToolUseId) pauseClaudeGenerationForCurrentRequestTools(ctx);
     const usage = event.usage;
     if (usage) {
       const dIn = usage.input_tokens ?? 0;
@@ -1713,6 +1755,7 @@ function handleStreamEvent(
         'cache_read_input_tokens',
         'cache_creation_input_tokens',
       ].every((field) => Object.prototype.hasOwnProperty.call(usage, field));
+      const previousOutput = ctx.tracker.getTurnUsage().output;
       ctx.tracker.upsertApiCallUsage(segmentId, {
         id: segmentId,
         model: streamModel ?? ctx.getModel(),
@@ -1724,6 +1767,14 @@ function handleStreamEvent(
         complete: hasCompleteUsageSnapshot,
       });
       if (parentToolUseId) noteClaudeSubagent(ctx.rt.generation);
+      else if (ctx.tracker.getTurnUsage().output > previousOutput) {
+        // Upserts retain the largest output count. Input-only, duplicate, and
+        // older usage must not advance the paired denominator on their own.
+        ctx.rt.generation.outputDurationMs = sampleGenerationDuration(
+          ctx.rt.generation.durationMs,
+          ctx.rt.generation.startedAt,
+        );
+      }
       // 每次 API 回合的 token 增量打一行 —— 一个 turn 可能多个 message_delta(工具循环),
       // 让人看日志能直观看到 token 是怎么涨上去的, 而不是只在 turn end 看到一个总数。
       ctx.log.debug('SDK ▷ token usage (message_delta)', {
@@ -1788,7 +1839,13 @@ function handleStreamEvent(
     // 子代理 stream 不占用父级生成时钟。若对应 Agent 工具尚未停表，在此用
     // parent_tool_use_id 补上既有 pause 边界，避免分母吞进子代理时间。
     if (parentToolUseId) observeClaudeSubagentStream(ctx, parentToolUseId);
-    else beginClaudeGeneration(ctx.rt.generation);
+    else {
+      // 新主流请求边界: 上一请求残留的 tool id 已过期(失败重试的请求不会再有
+      // message_delta);还挂着的 pending 视作已在 SDK 内部收口(echo 不会来了),
+      // 由 beginClaudeGenerationAtRequestStart 结清并重启时钟。
+      ctx.rt.mainRequestToolUseIds.clear();
+      beginClaudeGenerationAtRequestStart(ctx.rt.generation);
+    }
     queue.push({
       type: 'status',
       data: ccLiveStatus(ctx, 'Generating...', true),
@@ -2229,6 +2286,7 @@ function handleResult(
     // 否则下一真实 turn 会从 0 起算、把整段历史 token 全算到那一轮(Codex P2)。
     ctx.rt.lastResultUsageAggregate = aggregateBeforeThisResult;
     resetTurnState(ctx.turn);
+    ctx.rt.mainRequestToolUseIds.clear();
     resetClaudeGenerationTiming(ctx.rt.generation);
     ctx.onTurnEnd?.();
     return;
@@ -2249,6 +2307,7 @@ function handleResult(
   // interruptRequested(用户 stop / watchdog 主动 interrupt)也跳过: SDK 被 interrupt
   // 后 drain 出的 error_during_execution result 不是上游失败, 补 error 会把"用户点
   // 停止"误报成"执行失败"、并让 watchdog 场景双发 banner(见 TurnState 字段注释)。
+  let modelAccessMessage: string | undefined;
   if (msg.is_error && !ctx.turn.interruptRequested) {
     const pendingApiError = ctx.turn.pendingApiError;
     const rawResult = typeof msg.result === 'string' ? msg.result.trim() : '';
@@ -2259,6 +2318,17 @@ function handleResult(
     const errorMessage = pendingApiError?.agentMeta
       ? pendingApiError.message
       : errDetail || pendingApiError?.message;
+    const modelAccessDenied = pendingApiError?.modelAccessDenied === true
+      || isModelAccessDenied(rawResult, errorStatus ?? undefined);
+    // Keep the terminal/usage event order, but omit the SDK's misleading
+    // authentication advice and the upstream model list from terminal events.
+    const modelAccessError = modelAccessDenied ? {
+      reason: 'user_model_access_denied',
+      sdkError: 'user_model_access_denied',
+      errorStatus: 403,
+      message: 'The upstream account cannot access this model. Select another model or check its access with the provider.',
+    } : {};
+    modelAccessMessage = modelAccessError.message;
     // 上下文超限带稳定 reason key(判定在上方 endTurn 前已算好): renderer 靠它
     // 隐藏必败的 Retry(原样重发必然再撞同一个 4xx)并给出压缩 / 新开会话入口;
     // 文案匹配仅作历史持久化错误行的兜底(overload reason 同款分层)。
@@ -2286,6 +2356,7 @@ function handleResult(
             ...(pendingApiError.maxRetries !== undefined
               ? { maxRetries: pendingApiError.maxRetries }
               : {}),
+            ...modelAccessError,
           }
         : errDetail
         ? {
@@ -2294,6 +2365,7 @@ function handleResult(
             ...classifiedReason,
             ...(errorStatus !== undefined ? { errorStatus } : {}),
             ...(usageLimit ? { usageLimit: true } : {}),
+            ...modelAccessError,
           }
         // reason 是稳定 key, renderer 按它走 i18n(规则 18); message 仅作非
         // renderer 消费方(IM/orca)的兜底文案。
@@ -2309,7 +2381,7 @@ function handleResult(
       status: 'Done',
       ...attachLiveGeneration(endSnapshot, {
         outputTokens: liveTurnOutput,
-        closedDurationMs: liveGeneration.durationMs,
+        durationMs: liveGeneration.outputDurationMs,
         openStartedAt: null,
         reliable: liveGeneration.reliable,
       }),
@@ -2325,7 +2397,7 @@ function handleResult(
       ? {
           ...msg,
           result: msg.is_error
-            ? redactSensitiveText(msg.result)
+            ? modelAccessMessage ?? redactSensitiveText(msg.result)
             : stripInternalWebCitations(msg.result),
         }
       : msg;
@@ -2349,6 +2421,7 @@ function handleResult(
   // reset turn 累积 (tracker 内部已经在 endTurn 里 reset 了 currentTurn,这里只清非 usage 状态)
   resetTurnState(ctx.turn);
   ctx.rt.activeUsageSegmentByParent.clear();
+  ctx.rt.mainRequestToolUseIds.clear();
   resetClaudeGenerationTiming(ctx.rt.generation);
   // turn 结束钩子 — agent 用来清 turnInFlight 标记 (rewind preview/commit 前置守卫读它)
   ctx.onTurnEnd?.();

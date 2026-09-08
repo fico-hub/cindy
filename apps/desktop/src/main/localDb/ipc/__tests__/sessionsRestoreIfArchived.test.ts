@@ -103,6 +103,7 @@ function createDb(): void {
       feishu_bot_app_id TEXT,
       used_project_context INTEGER NOT NULL DEFAULT 0,
       extra_dirs TEXT NOT NULL DEFAULT '[]',
+      writable_dirs TEXT NOT NULL DEFAULT '[]',
       one_m INTEGER NOT NULL DEFAULT 0,
       workspace_kind TEXT NOT NULL DEFAULT 'project',
       orca_role TEXT,
@@ -228,5 +229,13 @@ describe('local-db:sessions:restore-if-archived', () => {
 
   it('throws NOT_FOUND when the session no longer exists', async () => {
     await expect(restore('missing')).rejects.toThrow('[NOT_FOUND]');
+  });
+
+  it('does not restore Bot history through the ordinary task lifecycle', async () => {
+    h.sqlite!.prepare("UPDATE sessions SET source = 'bot' WHERE id = 'target'").run();
+
+    await expect(restore()).rejects.toThrow(/Bot task lifecycle/);
+    expect(readStatus()).toBe('archived');
+    expect(h.tapWindowBroadcast).not.toHaveBeenCalled();
   });
 });

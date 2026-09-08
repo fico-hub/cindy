@@ -5,6 +5,7 @@ import type { RegionalMoney } from '../../shared/regionalMoney';
 import type { AutoResumeInfo, RecoveryCheckpoint } from '../../shared/agentInputQueue';
 import type { ReviewRunMeta } from '../../shared/reviewRun';
 import type { AgentTaskTerminalStatus } from '@cindy/maker-shared/agent-task';
+import type { ToolLoopErrorDetails } from '@cindy/maker-core';
 
 export type SessionStatus = 'active' | 'archived' | 'deleted';
 export type WorkspaceKind = 'project' | 'dialogue';
@@ -18,6 +19,14 @@ export type DeviceLinkConnectionStatus = 'connected' | 'disconnected';
 export type AgentKind = 'cc' | 'codex' | 'pi';
 export type MakerVendor = AgentKind | 'orca';
 export type OrcaRole = 'lead' | 'worker';
+
+/** Provider-native fork boundary. Extend this union when another Agent adopts it. */
+export type NativeForkAnchor = {
+  agentKind: 'codex';
+  sdkSessionId: string;
+  kind: 'turn';
+  id: string;
+};
 
 /**
  * Host-side 消息来源标记：标识一条 user 消息是自动化任务注入的，
@@ -47,6 +56,8 @@ export interface CcMeta {
   /** Claude transcript chain parent. Do not confuse with parentUuid, which is parent_tool_use_id. */
   transcriptParentUuid?: string;
   sdkSessionId?: string;
+  /** Exact provider boundary used by message-level fork when available. */
+  nativeForkAnchor?: NativeForkAnchor;
 
   // assistant 专属
   model?: string;
@@ -171,6 +182,35 @@ export interface CcMeta {
 
   /** /review 创建的独立只读审查任务及其来源卡状态。 */
   reviewRun?: ReviewRunMeta;
+
+  /**
+   * Host-side marker: 后台 Session 任务的持久卡片锚点或后续消息留痕。
+   * renderer 只用它呈现和打开对应任务，不进 prompt。历史角色仍由
+   * shared/botCollaboration.ts 严格解析，但新数据不再创建伙伴客座镜像。
+   */
+  botCollaboration?: import('../../shared/botCollaboration').BotCollaborationMeta;
+
+  /**
+   * Host-side marker for the read-only entrance to a hidden Bot pair conversation.
+   * The actual messages live in the dedicated Bot DM tables and never enter the
+   * normal task transcript through this metadata field.
+   */
+  /** Automatic reply to a private Bot message; retained without unread attention. */
+  botPrivateReply?: boolean;
+  botDirectMessage?: import('../../shared/botDirectMessage').BotDirectMessageMeta;
+
+  /**
+   * Host-side marker for a Hermes-style Bot group room message. The text still
+   * lives in Cindy's normal messages table; this metadata only identifies who
+   * spoke so the room renderer can label it without parsing display text.
+   */
+  botGroup?: {
+    roomId: string;
+    threadId: string;
+    senderKind: 'user' | 'bot';
+    botId?: string;
+    name: string;
+  };
 
   /**
    * Host-side marker:这条 user 消息是一个 /goal 目标的设定 / 更新(goal-host 在新建或
@@ -314,6 +354,25 @@ export interface Session {
   summary?: string | null;
 }
 
+/**
+ * 用量历史任务榜单的最小 wire DTO。
+ *
+ * 该查询会覆盖整个本地 sessions 表，因此不能把完整 Session 行送进
+ * Renderer；榜单只需要这些统计与展示字段。
+ */
+export type UsageHistorySession = Pick<
+  Session,
+  | 'id'
+  | 'title'
+  | 'model'
+  | 'providerId'
+  | 'totalTokenUsage'
+  | 'contextTokens'
+  | 'contextWindow'
+  | 'userSendAt'
+  | 'updatedAt'
+>;
+
 export interface SessionRuntimeProfileProjection {
   agentKind: 'claude-code' | 'codex' | 'pi';
   model: string;
@@ -345,6 +404,9 @@ export interface AgentSwitchContent {
   toAgentKind: 'cc' | 'codex' | 'pi';
   fromModel: string | null;
   toModel: string | null;
+  /** Agent 切换时的来源快照；缺失表示旧版边界数据。 */
+  fromProviderId?: string | null;
+  toProviderId?: string | null;
   handoff: string;
   /** Phase 2:true = 目标引擎续接(resume)了自己的停泊原生会话,交接为增量模式。 */
   resumed?: boolean;
@@ -373,5 +435,7 @@ export interface Message {
    * null = 切换功能上线前的老消息(回落 session.agentKind)。
    */
   agentKind?: 'cc' | 'codex' | 'pi' | null;
+  /** Structured guard details for a persisted tool-loop terminal error. */
+  toolLoop?: ToolLoopErrorDetails;
   createdAt: string; // ISO 8601
 }

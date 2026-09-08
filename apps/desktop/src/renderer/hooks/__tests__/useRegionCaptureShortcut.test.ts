@@ -107,9 +107,9 @@ describe('capture pending editor save', () => {
     const cache = new Promise<{ url: string }>((resolve) => { resolveCache = resolve; });
     vi.stubGlobal('window', { electronAPI: { cacheImageFromBuffer: () => cache } });
     const scheduler = createComposerDraftSaveScheduler({ setTimer: () => 1, clearTimer: () => {} });
-    const release = registerComposerCaptureDraftFlusher(key, scheduler.flush);
+    const release = registerComposerCaptureDraftFlusher(key, scheduler.flush, () => true);
     const unrelated = vi.fn();
-    const releaseOther = registerComposerCaptureDraftFlusher('other-capture-draft', unrelated);
+    const releaseOther = registerComposerCaptureDraftFlusher('other-capture-draft', unrelated, () => false);
     try {
       const pending = appendRegionCaptureToDraft({ sessionId: key, draftKey: key }, new Uint8Array([1]), () => true);
       scheduler.schedule(() => saveDraft(key, { ...getDraft(key)!, text: liveText }, { silent: true }));
@@ -132,12 +132,35 @@ it('does not append after a flush invalidates the target', async () => {
   const key = 'capture-invalidated';
   let valid = true;
   vi.stubGlobal('window', { electronAPI: { cacheImageFromBuffer: async () => ({ url: 'xdt-image://capture.png' }) } });
-  const release = registerComposerCaptureDraftFlusher(key, () => { valid = false; });
+  const release = registerComposerCaptureDraftFlusher(key, () => { valid = false; }, () => true);
   try {
     await appendRegionCaptureToDraft({ sessionId: key, draftKey: key }, new Uint8Array([1]), () => valid);
     expect(getDraft(key)).toBeUndefined();
   } finally {
     release();
+    vi.unstubAllGlobals();
+  }
+});
+
+
+it.each([false, true])('does not flush a stale same-key composer (menu=%s)', async (menu) => {
+  const key = `multi-capture-${menu}`;
+  const targetId = Symbol('target');
+  const liveText = plainTextToTiptapDoc('latest target text');
+  const staleText = plainTextToTiptapDoc('stale hidden text');
+  const target = vi.fn(() => saveDraft(key, { text: liveText, attachments: [], quotes: [] }, { silent: true }));
+  const stale = vi.fn(() => saveDraft(key, { text: staleText, attachments: [], quotes: [] }, { silent: true }));
+  const releaseTarget = registerComposerCaptureDraftFlusher(key, target, () => !menu, targetId);
+  const releaseStale = registerComposerCaptureDraftFlusher(key, stale, () => menu);
+  vi.stubGlobal('window', { electronAPI: { cacheImageFromBuffer: async () => ({ url: 'xdt-image://capture.png' }) } });
+  try {
+    await appendRegionCaptureToDraft({ sessionId: key, draftKey: key, ...(menu ? { composerId: targetId } : {}) }, new Uint8Array([1]), () => true);
+    expect(target).toHaveBeenCalledOnce();
+    expect(stale).not.toHaveBeenCalled();
+    expect(getDraft(key)?.text).toEqual(liveText);
+  } finally {
+    releaseTarget();
+    releaseStale();
     vi.unstubAllGlobals();
   }
 });

@@ -22,7 +22,12 @@ export const MODEL_ACCESS_AGENTS = ['claude-code', 'codex', 'pi'] as const;
 export type ModelAgent = (typeof MODEL_ACCESS_AGENTS)[number];
 export type ModelAccessV2Agent = (typeof MODEL_ACCESS_V2_AGENTS)[number];
 
-export const MODEL_ACCESS_WIRE_PROTOCOLS = ['anthropic-messages', 'openai-responses'] as const;
+export const MODEL_ACCESS_WIRE_PROTOCOLS = [
+  'anthropic-messages',
+  'openai-responses',
+  'openai-completions',
+  'google-generative-ai',
+] as const;
 export type ModelAccessWireProtocol = (typeof MODEL_ACCESS_WIRE_PROTOCOLS)[number];
 
 export const MODEL_ACCESS_MEDIA_CAPABILITIES = [
@@ -46,6 +51,14 @@ export type ModelEffort = (typeof MODEL_ACCESS_EFFORTS)[number];
 
 export const MODEL_REGISTRY_LEGACY_SCHEMA_VERSION = 1 as const;
 export const MODEL_REGISTRY_SCHEMA_VERSION = 2 as const;
+export const MODEL_REGISTRY_V3_SCHEMA_VERSION = 3 as const;
+export const MODEL_NATIVE_APIS = [
+  'anthropic-messages',
+  'openai-responses',
+  'openai-completions',
+  'google-generative-ai',
+] as const;
+export type ModelNativeApi = (typeof MODEL_NATIVE_APIS)[number];
 export const MODEL_REGISTRY_STATUSES = ['preview', 'active', 'deprecated', 'retired'] as const;
 export type ModelRegistryStatus = (typeof MODEL_REGISTRY_STATUSES)[number];
 
@@ -112,6 +125,14 @@ export interface ModelRegistryEntryV1 extends ModelRegistryEntryBase {
 
 export interface ModelRegistryEntry extends ModelRegistryEntryBase {
   newSessionDefault?: ModelAccessV2Agent[];
+  /** V3: model's canonical API, independent of any harness. Null explicitly means unverified. */
+  nativeApi?: ModelNativeApi | null;
+}
+
+export interface ModelNativeApiRule {
+  providerId: string;
+  modelIdPrefix: string;
+  nativeApi: ModelNativeApi;
 }
 
 interface ModelRegistryBase {
@@ -119,8 +140,13 @@ interface ModelRegistryBase {
 }
 
 export interface ModelRegistry extends ModelRegistryBase {
-  schemaVersion: typeof MODEL_REGISTRY_LEGACY_SCHEMA_VERSION | typeof MODEL_REGISTRY_SCHEMA_VERSION;
+  schemaVersion:
+    | typeof MODEL_REGISTRY_LEGACY_SCHEMA_VERSION
+    | typeof MODEL_REGISTRY_SCHEMA_VERSION
+    | typeof MODEL_REGISTRY_V3_SCHEMA_VERSION;
   models: ModelRegistryEntry[];
+  /** V3: route-scoped rules for new members of established model families. */
+  nativeApiRules?: ModelNativeApiRule[];
 }
 
 export interface ModelRegistryV1 extends ModelRegistryBase {

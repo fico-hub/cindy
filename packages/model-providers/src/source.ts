@@ -21,7 +21,7 @@ import {
 import type { AgentKind, Catalog, Provider, ProviderPreset } from './types.js';
 
 /** 公共模型目录 API 路径。发布版由 model-access-server 匿名提供完整 Catalog。 */
-export const CATALOG_API_PATH = '/api/model-catalog/catalog';
+export const CATALOG_API_PATH = '/api/model-catalog/catalog?registrySchemaVersion=3';
 /** 旧客户端目录的 OSS 相对路径。迁移期作为公共 API 失败后的兼容回退。 */
 export const CATALOG_CFG_PATH = '/cfg/providers.json';
 
@@ -76,6 +76,12 @@ const ALL_XD_MEDIA_KINDS: readonly CatalogXdMediaKind[] = [
 
 export interface CatalogLoadResult {
   catalog: Catalog;
+  /**
+   * Exact validated source snapshot before bundled compatibility backfill. `null` means no Cindy
+   * Server/local/LKG snapshot was accepted. Consumers must use this field, never `catalog`, when
+   * they need to distinguish an explicit source declaration from a bundled supplement.
+   */
+  authorityCatalog: Catalog | null;
   source: CatalogLoadSource;
   /**
    * `current` means this exact snapshot came from the configured current catalog source
@@ -106,7 +112,19 @@ function trimTrailingSlashes(s: string): string {
 
 /** 解析主 catalog URL：显式 url 优先，否则 `${baseUrl}${CATALOG_API_PATH}`。 */
 export function resolveCatalogUrl(cfg: CatalogSourceConfig): string | null {
-  if (cfg.url && cfg.url.trim()) return cfg.url.trim();
+  if (cfg.url && cfg.url.trim()) {
+    const explicit = cfg.url.trim();
+    try {
+      const url = new URL(explicit);
+      if (url.pathname.endsWith('/api/model-catalog/catalog')) {
+        url.searchParams.set('registrySchemaVersion', '3');
+        return url.toString();
+      }
+    } catch {
+      /* Existing fetch/error path reports malformed custom URLs. */
+    }
+    return explicit;
+  }
   if (cfg.baseUrl && cfg.baseUrl.trim()) {
     return trimTrailingSlashes(cfg.baseUrl.trim()) + CATALOG_API_PATH;
   }
@@ -521,6 +539,7 @@ export async function loadCatalogWithSource(
         log(io, 'info', 'loaded catalog from local path', { path: cfg.localPath });
         return {
           catalog: mergeWithBundled(parsed),
+          authorityCatalog: parsed,
           source: 'local',
           capabilityEvidence: 'current',
           unverifiedXdMediaKinds: unverifiedXdMediaKindsForPrimary(parsed),
@@ -617,6 +636,8 @@ export async function loadCatalogWithSource(
           log(io, 'info', 'loaded catalog from remote', { url: logUrl });
           return {
             catalog: mergeWithBundled(parsed),
+            // The migration OSS fallback is compatibility data, not the daily Cindy Server source.
+            authorityCatalog: allowLegacyModelMeta ? null : parsed,
             source: 'remote',
             capabilityEvidence,
             unverifiedXdMediaKinds:
@@ -643,6 +664,8 @@ export async function loadCatalogWithSource(
             log(io, 'info', 'loaded last-known-good catalog snapshot', { url: logUrl });
             return {
               catalog: mergeWithBundled(parsed),
+              // A cached legacy OSS snapshot stays below the local Pi protocol authorities.
+              authorityCatalog: allowLegacyModelMeta ? null : parsed,
               source: 'cache',
               capabilityEvidence: 'fallback',
               unverifiedXdMediaKinds: ALL_XD_MEDIA_KINDS,
@@ -662,6 +685,7 @@ export async function loadCatalogWithSource(
   log(io, 'info', 'using bundled catalog');
   return {
     catalog: BUNDLED_CATALOG,
+    authorityCatalog: null,
     source: 'bundled',
     capabilityEvidence: 'fallback',
     unverifiedXdMediaKinds: ALL_XD_MEDIA_KINDS,

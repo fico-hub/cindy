@@ -11,6 +11,7 @@ import { and, asc, eq, inArray, lt, lte, gt, gte, desc, isNull, or, sql, type SQ
 import { createId } from '@paralleldrive/cuid2';
 
 import { getDbClient } from '../client/current';
+import type { ContextRebuildArgs } from '../client/tx/types';
 import { latestVisiblePreviewRow } from '../latestMessageText';
 import { messages, sessions } from '../schema';
 import { persistSessionListPreview } from '../sessionListProjection';
@@ -50,6 +51,7 @@ import {
 import { capReferenceMessageRows } from './history.js';
 import { maybeUpgradeCodexHistoryOversizedError } from '../codexHistoryOversizedUpgrade';
 import type { Message, MessageRole, AgentMeta } from '../../../renderer/lib/ccAgent.types';
+import { scheduleBotRemoteResourceChangedForSession } from '../../maker-ipc/botRemoteResourceInvalidation';
 
 const log = createLogger('localDb/messages');
 
@@ -621,6 +623,10 @@ export function registerMessageIpc(): void {
     async (_e, sessionId: unknown, clientId: unknown) => {
       const sid = requireString(sessionId, 'sessionId');
       const cid = requireString(clientId, 'clientId');
+      // 动态 import:messagePersistBroadcaster 已静态依赖本模块 createMessage,
+      // 静态反向 import 会成环。落库前点关闭/重试时先等同一 persistId 写完。
+      const { whenTurnErrorPersisted } = await import('../../messagePersistBroadcaster.js');
+      await whenTurnErrorPersisted(sid, cid);
       const msg = await dismissErrorMessage(sid, cid);
       if (!msg) throwIpcError('NOT_FOUND', 'Error message 不存在');
       return msg;
@@ -702,6 +708,9 @@ export function broadcastMessageRow(
   ownerScope?: DataOwnerBroadcastScope | null,
 ): void {
   broadcastOwnedPayload('local-db:messages:created', { sessionId, message: msg }, ownerScope);
+  if (msg.role === 'user' || msg.role === 'assistant') {
+    scheduleBotRemoteResourceChangedForSession(sessionId, ownerScope?.ownerScopeKey);
+  }
 }
 
 export interface MessageDeletedPayload {
@@ -999,12 +1008,13 @@ export async function commitContextRebuild(
   sessionId: string,
   handoff: string,
   meta: {
-    reason: 'context-overflow' | 'pi-prompt-timeout';
+    reason: 'context-overflow' | 'model-window-switch' | 'pi-prompt-timeout' | 'native-session-recovery';
     sourceUserClientId: string | null;
     sourceAgentKind?: 'cc' | 'codex' | 'pi';
     sourceModel?: string | null;
     sourceProviderId?: string | null;
     expectedClearedAt?: number | null;
+    replacementRoute?: ContextRebuildArgs['replacementRoute'];
   },
 ): Promise<{ updatedAt: number }> {
   const now = Date.now();
@@ -1017,6 +1027,7 @@ export async function commitContextRebuild(
       consumed: false,
       reason: meta.reason,
       sourceUserClientId: meta.sourceUserClientId,
+      ...(meta.replacementRoute ? { sourceSdkSessionId: meta.replacementRoute.expectedSdkSessionId } : {}),
       ...(meta.sourceAgentKind ? { sourceAgentKind: meta.sourceAgentKind } : {}),
       ...(meta.sourceModel !== undefined ? { sourceModel: meta.sourceModel } : {}),
       ...(meta.sourceProviderId !== undefined ? { sourceProviderId: meta.sourceProviderId } : {}),
@@ -1024,6 +1035,7 @@ export async function commitContextRebuild(
     markerCreatedAt: now,
     updatedAt: now,
     expectedClearedAt: meta.expectedClearedAt ?? null,
+    ...(meta.replacementRoute ? { replacementRoute: meta.replacementRoute } : {}),
   });
   return { updatedAt: now };
 }
@@ -1074,6 +1086,7 @@ export function broadcastMessageDeleted(
   payload: MessageDeletedPayload,
   ownerScope?: DataOwnerBroadcastScope | null,
 ): void {
+  scheduleBotRemoteResourceChangedForSession(payload.sessionId, ownerScope?.ownerScopeKey);
   const ownerStamp = ownerStampForBroadcast(ownerScope);
   if (ownerStamp === null) return;
   if (ownerScope !== undefined && ownerScope !== null) {

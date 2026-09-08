@@ -16,6 +16,9 @@
 import { useCallback, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { BotAvatar } from '@/features/bots/BotAvatar';
+import type { BotChatIdentity } from '@/features/bots/BotSessionContentHeader';
+
 import { cn } from '@/lib/utils';
 import { Tip } from '@/components/ui/tooltip';
 import type { PendingPermission } from '@/lib/makerChatStore';
@@ -27,6 +30,7 @@ import { describeSessionPermissionScope } from '@/lib/permissionSuggestionScope'
 
 interface PermissionPromptProps {
   permission: PendingPermission;
+  companion?: BotChatIdentity | null;
   onRespond: (result: CCAgentPermissionResult) => void;
 }
 
@@ -46,11 +50,12 @@ function firstString(input: Record<string, unknown>, keys: string[]): string | u
 // 按语义分组(命令 / 文件 / 模式)归一化,任一命名命中就抽出清爽正文,否则回退 JSON。
 export function formatToolInput(toolName: string, input: Record<string, unknown>): string {
   const name = toolName.toLowerCase();
+  if (name === 'cindy.media.download' && typeof input.source === 'string') return input.source;
   const fallback = () => {
     const text = JSON.stringify(input, null, 2);
     return text.length > 500 ? text.slice(0, 500) + '...' : text;
   };
-  if (name === 'bash') {
+  if (name === 'bash' || name === 'powershell') {
     return firstString(input, ['command']) ?? fallback();
   }
   if (name === 'read' || name === 'edit' || name === 'write') {
@@ -76,9 +81,10 @@ function filterSessionScopedSuggestions(suggestions?: unknown[]): unknown[] {
 // Component
 // ---------------------------------------------------------------------------
 
-export function PermissionPrompt({ permission, onRespond }: PermissionPromptProps) {
+export function PermissionPrompt({ permission, onRespond, companion }: PermissionPromptProps) {
   const { t } = useTranslation();
   const { toolName, input, title, displayName, description, suggestions, autoReviewUnavailable } = permission;
+  const isMediaDownload = toolName === 'cindy.media.download';
   const promptDescription = autoReviewUnavailable
     ? t('newChat.permissionPrompt.autoReviewUnavailable')
     : description;
@@ -162,10 +168,18 @@ export function PermissionPrompt({ permission, onRespond }: PermissionPromptProp
         'border-[var(--chat-input-border)] bg-[var(--chat-input-bg)]',
       )}
     >
-      {/* Title */}
-      <p className="text-15 font-semibold leading-tight text-[var(--chat-input-text)]">
-        {displayTitle}
-      </p>
+      {/* Keep the request in the conversation, with the exact operation below. */}
+      <div className="flex items-center gap-2.5">
+        {companion ? <BotAvatar bot={companion} size="sm" /> : null}
+        <div className="min-w-0">
+          <p className="text-15 font-semibold leading-tight text-[var(--chat-input-text)]">
+            {companion ? t('bots.permissionRequest', { name: companion.name }) : displayTitle}
+          </p>
+          {companion ? (
+            <p className="mt-1 text-12 text-[var(--status-bar-meta)]">{displayTitle}</p>
+          ) : null}
+        </div>
+      </div>
 
       {/* Description */}
       {promptDescription && (
@@ -200,7 +214,7 @@ export function PermissionPrompt({ permission, onRespond }: PermissionPromptProp
             'transition-colors hover:bg-[var(--perm-code-bg)]',
           )}
         >
-          <span>{t('agentIsland.native.deny')}</span>
+          <span>{t(isMediaDownload ? 'newChat.mediaDownload.defer' : 'agentIsland.native.deny')}</span>
           <kbd className="rounded-[4px] border border-[var(--chat-input-border)] bg-[var(--perm-code-bg)] px-1.5 py-[1px] text-11 font-normal text-[var(--status-bar-meta)]">
             Esc
           </kbd>
@@ -259,7 +273,7 @@ export function PermissionPrompt({ permission, onRespond }: PermissionPromptProp
             'transition-colors hover:opacity-90',
           )}
         >
-          <span>{t('agentIsland.native.allowOnce')}</span>
+          <span>{t(isMediaDownload ? 'newChat.mediaDownload.allow' : 'agentIsland.native.allowOnce')}</span>
           <kbd className="rounded-[4px] border border-[var(--perm-allow-kbd-border)] bg-[var(--perm-allow-kbd-bg)] px-1.5 py-[1px] text-11 font-normal text-[var(--perm-allow-btn-text)] opacity-70">
             Enter
           </kbd>

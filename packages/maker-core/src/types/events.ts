@@ -11,7 +11,17 @@
 
 import type { WorkflowProgressEntry } from '@cindy/maker-shared/agent-task';
 import type { SubagentObservation } from '@cindy/maker-shared/subagent-observation';
+import {
+  parseToolLoopErrorDetails,
+  type ToolLoopErrorDetails,
+} from '@cindy/maker-shared/tool-loop-error';
 import type { PiRuntimeCapabilityManifest } from './pi-runtime-capabilities.js';
+
+export {
+  parseToolLoopErrorDetails,
+  type ToolLoopErrorDetails,
+  type ToolLoopErrorKind,
+} from '@cindy/maker-shared/tool-loop-error';
 
 export type AgentEventType =
   | 'text'                  // 流式文本输出（增量或完整）
@@ -59,6 +69,8 @@ export interface AgentErrorEventData {
   willRetry?: boolean;
   sdkError?: string;
   reason?: string;
+  /** Structured details for reason='tool_use_loop_detected'. */
+  toolLoop?: ToolLoopErrorDetails;
   [key: string]: unknown;
 }
 
@@ -436,6 +448,11 @@ export interface ForkSdkSessionOptions {
    * Codex 精确 fork 使用 thread/rollback 实现；Claude 路径不消费此字段。
    */
   tailTurnsToDrop?: number;
+  /**
+   * Codex only: provider-native turn boundary for a direct thread/fork.
+   * Old messages omit it and keep using tailTurnsToDrop + rollback.
+   */
+  lastTurnId?: string;
   /** 新 session title (可选, 仅给 SDK 写入 jsonl 头)。 */
   title?: string;
   /** workingDir — 用于定位 Claude SDK project JSONL 并修复 fork 后的 uuid 引用。 */
@@ -464,6 +481,8 @@ export interface ForkSdkSessionResult {
    * upToMessageId 锚点能在新 jsonl 里查到。
    */
   uuidMap: Map<string, string>;
+  /** Codex only: copied native turn ids remain valid in the returned child thread. */
+  usedNativeForkAnchor?: boolean;
   /** Pi-only runtime command catalog captured from the forked runtime, if available. */
   runtimeCapabilities?: PiRuntimeCapabilityManifest;
 }

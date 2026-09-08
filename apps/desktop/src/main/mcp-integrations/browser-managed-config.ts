@@ -1,13 +1,12 @@
 import type { BrowserRuntimeConfig } from '@cindy/browser-control-runtime';
 
 /**
- * Managed profile identity. The profile key doubles as (a) the Chrome profile
- * display name rendered in the launched browser's top-right profile button and (b)
- * the user-data-dir folder name — so it's branded "Cindy" to make the automation
- * browser obviously distinct from the user's everyday Chrome at a glance. The runtime
- * seeds the name + color into the profile's Local State / Preferences before launch
- * (decoration re-checks the desired name every launch, so a profile dir carried over
- * with an old display name self-heals to "Cindy" on first run).
+ * Managed profile identity. The profile key is the on-disk folder
+ * `browser/<key>/user-data`. Chrome's top-right chip follows `displayName` when
+ * set, otherwise the key. Isolated and snapshot profiles both pass
+ * `displayName: "Cindy"` so the chip never shows the disk identifier. The runtime
+ * seeds name + color into Local State / Preferences before launch (decoration
+ * re-checks every launch, so an old chip label self-heals on first run).
  * (Same Chrome binary as the user's, so the dock/taskbar icon is unchanged.)
  *
  * ⚠️ 磁盘标识符:这是 2026-07 品牌翻转时钉死的目录名,之后【不要】再跟随
@@ -19,6 +18,15 @@ import type { BrowserRuntimeConfig } from '@cindy/browser-control-runtime';
  *    就地改名自愈处理。两处的 'XDMaker'/'Cindy' 字面量与本常量保持一致。
  */
 export const MANAGED_PROFILE = 'Cindy';
+
+/**
+ * Snapshot profile for consented "use my browser logins". Disk name is pinned
+ * like `Cindy` — do not rename, or leftover cookie copies become unreachable
+ * and cleanup will miss them. Never overlay onto `MANAGED_PROFILE`. The Chrome
+ * chip still shows `MANAGED_PROFILE` via `displayName`; this string is not
+ * user-facing.
+ */
+export const REAL_MANAGED_PROFILE = 'Cindy-real';
 
 /**
  * Fixed brand tint for the managed profile. This intentionally stays on the vivid
@@ -45,7 +53,7 @@ const MANAGED_DRIVER = 'openclaw' as const;
  * profile MUST define its own `cdpPort` or the runtime rejects it with "must define
  * cdpPort or cdpUrl". 18800 is the vendored default CDP port-range start.
  */
-const MANAGED_CDP_PORT = 18800;
+export const MANAGED_CDP_PORT = 18800;
 
 /**
  * Default ("managed") config: a single playwright-launched Chrome profile, headed,
@@ -55,32 +63,40 @@ const MANAGED_CDP_PORT = 18800;
  * so this config is what a user who never touched the toggle gets.)
  *
  * SECURITY POSTURE:
- *  - Only the fake-IP ranges used by system proxies are exempted from the SSRF
- *    guard. This prevents Surge/Clash/sing-box DNS answers (198.18.0.0/15 or
- *    IPv6 ULA) from making ordinary public sites look like SSRF attempts while
- *    localhost, RFC1918, metadata, link-local, and other special-use addresses
- *    remain blocked.
- *  - Page-context `evaluate` (and recipe `evaluate` steps) run author/agent JS in
- *    Chromium, whose network stack is NOT subject to the Node SSRF guard — a
- *    same-origin `fetch` there can reach any host the browser can. This residual
- *    surface is accepted as inherent to browser automation (it's the same
- *    capability the `act:evaluate` tool already exposes), not a regression.
+ *  - The desktop agent may navigate to every host reachable from this machine,
+ *    including private, loopback, link-local and metadata addresses. A browser-
+ *    only network restriction is not an agent-wide boundary: terminal tools and
+ *    page-context JS do not share this Node guard. This is a deliberate product
+ *    policy for browser automation, not the default for other network consumers.
+ *  - Navigation protocol validation, Chromium sandboxing and website permissions
+ *    remain in force. The dedicated profile and consented login-copy rules stay
+ *    independent of network reachability.
  */
-export function buildManagedConfig(): BrowserRuntimeConfig {
+export function buildManagedConfig(options?: {
+  useRealProfile?: boolean;
+  executablePath?: string;
+  cdpPort?: number;
+}): BrowserRuntimeConfig {
+  const useRealProfile = options?.useRealProfile === true;
+  const defaultProfile = useRealProfile ? REAL_MANAGED_PROFILE : MANAGED_PROFILE;
+  const executablePath = options?.executablePath;
+  const cdpPort = options?.cdpPort ?? MANAGED_CDP_PORT;
   return {
     browser: {
       enabled: true,
-      defaultProfile: MANAGED_PROFILE,
+      defaultProfile,
       headless: false, // headed so the user can see + log into sites
+      ...(executablePath ? { executablePath } : {}),
       ssrfPolicy: {
-        allowRfc2544BenchmarkRange: true,
-        allowIpv6UniqueLocalRange: true,
+        dangerouslyAllowPrivateNetwork: true,
       },
       profiles: {
-        [MANAGED_PROFILE]: {
+        [defaultProfile]: {
           driver: MANAGED_DRIVER,
           color: DEFAULT_PROFILE_COLOR,
-          cdpPort: MANAGED_CDP_PORT,
+          cdpPort,
+          displayName: MANAGED_PROFILE,
+          ...(executablePath ? { executablePath } : {}),
         },
       },
     },

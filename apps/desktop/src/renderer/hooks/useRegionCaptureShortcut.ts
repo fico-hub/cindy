@@ -45,14 +45,25 @@ let activeTrigger: ((explicitTarget?: RegionCaptureTarget) => boolean) | null = 
  * 输入"二次发送), 禁用态(review/worktree 准备中)composer 也不该被塞入
  * 无法移除的附件。同一 draftKey 可能多实例挂载(分屏同会话), 用 token 集合。
  */
-const composerCaptureDraftFlushers = new Map<string, Set<() => void>>();
+interface CaptureDraftFlusher {
+  instanceId: symbol;
+  flush: () => void;
+  isFocused: () => boolean;
+}
+const composerCaptureDraftFlushers = new Map<string, Set<CaptureDraftFlusher>>();
 
-export function registerComposerCaptureDraftFlusher(draftKey: string, flush: () => void): () => void {
-  const flushers = composerCaptureDraftFlushers.get(draftKey) ?? new Set<() => void>();
-  flushers.add(flush);
+export function registerComposerCaptureDraftFlusher(
+  draftKey: string,
+  flush: () => void,
+  isFocused: () => boolean,
+  instanceId: symbol = Symbol('capture-composer'),
+): () => void {
+  const entry = { instanceId, flush, isFocused };
+  const flushers = composerCaptureDraftFlushers.get(draftKey) ?? new Set<CaptureDraftFlusher>();
+  flushers.add(entry);
   composerCaptureDraftFlushers.set(draftKey, flushers);
   return () => {
-    flushers.delete(flush);
+    flushers.delete(entry);
     if (flushers.size === 0) composerCaptureDraftFlushers.delete(draftKey);
   };
 }
@@ -157,6 +168,8 @@ export interface RegionCaptureTarget {
   sessionId: string | null;
   /** composerDraftStore 的 scope key(会话 id 或 NEW_MAKER_DRAFT_KEY)。 */
   draftKey: string;
+  /** Menu ownership stays bound to the invoking mounted composer. */
+  composerId?: symbol;
 }
 
 /**
@@ -249,7 +262,11 @@ export async function appendRegionCaptureToDraft(
   if (!isTargetStillValid()) return;
   // Cache/base64 preparation may outlast the editor's pending keystroke save.
   // Flush only the target's mounted editors before reading the merge snapshot.
-  for (const flush of composerCaptureDraftFlushers.get(target.draftKey) ?? []) flush();
+  const flushers = [...(composerCaptureDraftFlushers.get(target.draftKey) ?? [])];
+  const owner = target.composerId
+    ? flushers.find((entry) => entry.instanceId === target.composerId)
+    : flushers.find((entry) => entry.isFocused());
+  owner?.flush();
   if (!isTargetStillValid()) return;
   const existing = getDraft(target.draftKey);
   saveDraft(

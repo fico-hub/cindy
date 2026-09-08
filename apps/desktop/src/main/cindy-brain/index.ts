@@ -1,8 +1,10 @@
 import {
   app,
   BrowserWindow,
+  clipboard,
   dialog,
   ipcMain,
+  nativeImage,
   safeStorage,
   shell,
   type WebContents,
@@ -13,6 +15,14 @@ import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 
 import { supportsCindyVersion } from '@cindy/plugin-protocol';
+import { buildGhostRecommendationSnapshot } from './ghostRecommendationSnapshot.js';
+import {
+  readGhostRecommendationEntries,
+  replaceGhostRecommendations,
+  markGhostRecommendationInstalled,
+  consumeGhostRecommendationPriority,
+  forgetGhostRecommendations,
+} from './ghostRecommendationStore.js';
 
 import { createLogger } from '../logger.js';
 import { throwIpcError } from '../utils/ipcValidate.js';
@@ -351,6 +361,7 @@ import {
   readGhostSecret,
   readGhostSecretStrict,
   getProviderSecretStore,
+  readCustomProviderKey,
   readGhostSecretTail,
   removeGhostSecret,
   removeGhostSecrets,
@@ -368,13 +379,18 @@ import {
   isModelDisabledWithUniqueLegacyBasename,
   isProviderDisabled,
   type MediaCapability,
+  xaiApiOfficialRuntimeAgents,
+  XAI_API_CUSTOM_PROVIDER_ID,
 } from '@cindy/model-providers';
 import { readModelDisableOverrides } from '../maker-host/model-disable-store.js';
 import { readProviderOrder } from '../maker-host/provider-order-store.js';
 import { guardedOutboundFetch, outboundFetch } from '../maker-host/outbound-fetch.js';
 import { getSharedGhCliTokenSource } from '../git-context/ghCliTokenSource.js';
 import { hasCodexOAuthLoginReadOnly } from '../maker-host/codex-oauth-readiness.js';
-import { getUtilityModelChainProfiles } from '../utility-model/UtilityModelSelection.js';
+import {
+  formatAuxiliaryModelRefLabel,
+  getEffectiveAuxiliaryModelChain,
+} from '../utility-model/resolveAuxiliaryModelChain.js';
 import { utilityModelPinOptions } from '../../shared/utilityModelProfiles.js';
 import { isKnownEmbeddingModel } from '@cindy/embedding-client';
 import {
@@ -1001,6 +1017,13 @@ export async function interruptGhostCallsForAccountBoundary(): Promise<void> {
   // Library 会话一并作废:关 db worker + 作废 handle——在途写入已在串行链上
   // 归属原 owner 完成或随 vault.invalidate 作废,新 owner 解析到全新根。
   await getGhostLibrarySlot().disposeAll();
+  if (libraryExtraDirSync) {
+    await libraryExtraDirSync(null).catch((error) => {
+      log.warn('library extraDirs owner-boundary sync failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }
   await getGhostSetupCoordinator()?.waitForActionsIdle();
 }
 
@@ -2417,6 +2440,12 @@ export function noteGhostSessionFocused(sessionId: string | null): void {
   // 负责 Worker → Lead 归一、异步乱序和失败后的重试。
   ghostPrimarySessionFocusTracker.note(sessionId);
   ghostSessionFocusTracker.note(sessionId);
+  void refreshMivoLibraryExtraDirGrant().catch((error) => {
+    log.warn('library extraDirs focus sync failed', {
+      sessionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
 }
 
 const ghostSessionFocusByWebContents = new Map<number, string | null>();
@@ -3149,6 +3178,82 @@ export function getGhostWorkspaceSlot(): GhostWorkspaceSlot {
 /** maker-ipc 完成初始化后注入判重/创建/聚焦服务;保持 cindy-brain 不反向依赖它。 */
 export function setGhostWorkspaceSessionService(service: WorkspaceSessionService | null): void {
   getGhostWorkspaceSlot().setSessionService(service);
+}
+
+export type LibraryExtraDirSyncResult = 'granted' | 'not-granted' | 'superseded';
+type LibraryExtraDirSyncFn = (root: string | null) => Promise<LibraryExtraDirSyncResult>;
+let libraryExtraDirSync: LibraryExtraDirSyncFn | null = null;
+/** 最近一次成功把库根写入 extraDirs 的插件;焦点刷新只复用它,不抓清单第一个。 */
+let libraryExtraDirOwnerGhostId: string | null = null;
+
+/** maker-ipc 注入:把 library 根同步进当前 Mivo 会话 extraDirs。cindy-brain 不反向依赖 register。 */
+export function setGhostLibraryExtraDirSync(
+  sync: LibraryExtraDirSyncFn | null,
+): void {
+  libraryExtraDirSync = sync;
+}
+
+export function getFocusedGhostSessionId(): string | null {
+  return ghostSessionFocusTracker.current();
+}
+
+/** 已启用且声明 library 能力。不得用写死的 xd-mivo/cindy-mivo 白名单顶替。 */
+function isLibraryCapableGhost(ghost: InstalledGhost | null | undefined): ghost is InstalledGhost {
+  return Boolean(ghost && ghost.enabled !== false && ghost.manifest.library === true);
+}
+
+async function resolveLibraryCapableRoot(ghostId: string): Promise<string | null> {
+  if (!isLibraryCapableGhost(findAvailableGhost(ghostId))) return null;
+  const resolution = await getGhostLibraryBindingStore().resolveLibraryRoot(ghostId);
+  if (resolution.kind === 'custom' && resolution.root === null) return null;
+  return resolution.kind === 'custom' && resolution.root !== null
+    ? resolution.root
+    : ownerScopedUserDataPath('libraries', ghostId);
+}
+
+async function refreshMivoLibraryExtraDirGrant(): Promise<void> {
+  if (!libraryExtraDirSync) return;
+  const focused = ghostSessionFocusTracker.current();
+  if (!focused) {
+    await libraryExtraDirSync(null);
+    return;
+  }
+  const ownerId = libraryExtraDirOwnerGhostId;
+  const root = ownerId ? await resolveLibraryCapableRoot(ownerId) : null;
+  if (!root) {
+    libraryExtraDirOwnerGhostId = null;
+    await libraryExtraDirSync(null);
+    return;
+  }
+  await libraryExtraDirSync(root);
+}
+
+/**
+ * 槽侧同步:认发起 open 的那个 ghost,不抓清单里第一个 library 插件。
+ * root 非空时必须 library 资格审过,否则不得 no-op 成功。
+ * 撤槽(root=null)只允许当前 owner;别人撤槽不得把唯一槽拆了。
+ * granted = 已把该库根写入 extraDirs;not-granted = 确定没挂上;
+ * superseded = 被更新一轮取代,不等于把已挂上的槽拆了。
+ */
+async function syncMivoLibraryExtraDirFromSlot(
+  ghostId: string,
+  root: string | null,
+): Promise<LibraryExtraDirSyncResult> {
+  if (!libraryExtraDirSync) return 'not-granted';
+  if (root !== null && !isLibraryCapableGhost(findAvailableGhost(ghostId))) {
+    return 'not-granted';
+  }
+  if (root === null) {
+    if (libraryExtraDirOwnerGhostId !== null && libraryExtraDirOwnerGhostId !== ghostId) {
+      return 'not-granted';
+    }
+    const result = await libraryExtraDirSync(null);
+    if (result !== 'superseded') libraryExtraDirOwnerGhostId = null;
+    return result === 'superseded' ? 'superseded' : 'not-granted';
+  }
+  const result = await libraryExtraDirSync(root);
+  if (result === 'granted') libraryExtraDirOwnerGhostId = ghostId;
+  return result;
 }
 
 let previewSlotSingleton: GhostPreviewSlot | null = null;
@@ -3974,6 +4079,35 @@ function getImageChannelRegistry(): ImageChannelRegistry {
           ...(aspectRatio ? { size: GHOST_ASPECT_TO_GATEWAY_SIZE[aspectRatio] } : {}),
         }),
     });
+    const readXaiApiImageKey = (): string | null => {
+      // 图片凭证只取路由命中官方 api.x.ai 端点的 runtime:代理 runtime 的密钥
+      // 不得发往官方图片端点(避免 401/403 与凭证披露,见 PR #3875 review)。
+      const provider = getActiveCatalog().providers.find(
+        (candidate) => candidate.id === XAI_API_CUSTOM_PROVIDER_ID,
+      );
+      for (const agent of xaiApiOfficialRuntimeAgents(provider)) {
+        const value = readCustomProviderKey(XAI_API_CUSTOM_PROVIDER_ID, agent)?.trim();
+        if (value) return value;
+      }
+      return null;
+    };
+    const hasXaiApiImageKey = (): boolean =>
+      getActiveCatalog().providers.some(
+        (provider) => provider.id === XAI_API_CUSTOM_PROVIDER_ID,
+      ) && readXaiApiImageKey() !== null;
+    registry.register(
+      'xai-api',
+      createXaiImageChannel({
+        hasApiKey: hasXaiApiImageKey,
+        getApiKey: readXaiApiImageKey,
+        hasOAuthLogin: () => false,
+        getCredentialGeneration: () => 0,
+        getOwnerScopeKey: () => activeOwnerScopeKey(),
+        isOwnerBoundaryPending: () => isGhostBoundaryPending(),
+        fetchImplementation: ((url, init) => outboundFetch(url as string, init)) as typeof fetch,
+        beforeDispatch: (model) => assertMediaModelStillEnabled('image', model, 'xai-api'),
+      }),
+    );
     registry.register(
       'xai',
       createXaiImageChannel({
@@ -4190,6 +4324,7 @@ function listLocalProviderVideoModels() {
 
 configureProviderMediaRuntime({
   listModels: listLocalProviderMediaModels,
+  listVideoModels: listLocalProviderVideoModels,
   invoke: async (request) => {
     if (request.capability !== 'image.generate' && request.capability !== 'image.edit') {
       throw new Error('当前第三方 Provider 执行通道不支持该媒体能力');
@@ -5142,6 +5277,57 @@ export function getGhostLibrarySlot(): GhostLibrarySlot {
       workerScriptPath: defaultLibraryDbWorkerPath,
       betterSqliteModulePath: () => resolveBetterSqliteModuleEntry() ?? 'better-sqlite3',
       log,
+      syncAgentReadonlyExtraDir: syncMivoLibraryExtraDirFromSlot,
+      showItemInFolder: (absPath) => {
+        shell.showItemInFolder(absPath);
+      },
+      showSaveDialog: async (opts) => {
+        // 另存为由插件自主发起,必须挂可见主壳窗。不能 `getAllWindows()[0]`:
+        // 语音 overlay 是 hidden + focusable:false 的 prewarm 窗,经常排在 [0]
+        // (bootstrap-electron.ts / authManager.ts 已踩过);macOS sheet 挂上去
+        // 用户看不见,saveAsDialogInFlight 却一直占着。无主壳窗 = 失败关闭。
+        const candidates = mainShellWindows().filter(
+          (window) => window.isVisible() && !window.isMinimized(),
+        );
+        const focused = BrowserWindow.getFocusedWindow();
+        const win =
+          focused && !focused.isDestroyed() && candidates.includes(focused)
+            ? focused
+            : candidates[0];
+        if (!win) throw new Error('没有可挂靠的宿主窗口');
+        // main 侧 t() 只插值 {{appName}},插件名在调用点替换(与 pick 槽同做法)。
+        // Electron SaveDialogOptions.message 仅 macOS;Windows 只看 title,
+        // 已核验插件名必须进跨平台标题,否则用户看不到是谁在另存为。
+        const title = t('settings.ghosts.saveAs.dialogTitle').replaceAll(
+          '{{name}}',
+          opts.ghostName,
+        );
+        const message = t('settings.ghosts.saveAs.dialogMessage').replaceAll(
+          '{{name}}',
+          opts.ghostName,
+        );
+        const picked = await dialog.showSaveDialog(win, {
+          title,
+          message,
+          defaultPath: opts.defaultPath,
+        });
+        return { canceled: picked.canceled, filePath: picked.filePath };
+      },
+      writeClipboardPng: async (pngBytes) => {
+        // 插件要的是外部应用能粘的图像位图,不是 Finder 文件列表。
+        // 禁止复用 media:copy-to-clipboard 的 Set-Clipboard / osascript POSIX file 通道。
+        const candidates = mainShellWindows().filter(
+          (window) => window.isVisible() && !window.isMinimized(),
+        );
+        if (candidates.length === 0) {
+          throw new Error('没有可挂靠的宿主窗口');
+        }
+        const image = nativeImage.createFromBuffer(pngBytes);
+        if (image.isEmpty()) {
+          throw new Error('无法把 PNG 字节写成剪贴板位图');
+        }
+        clipboard.writeImage(image);
+      },
     });
     // 面板只读投影(cindy-ghost://<id>/library/<relPath>)的解析器:与电子脑
     // read 同源校验(binding 根 + vault 路径纪律),失败折叠 404。
@@ -5183,6 +5369,7 @@ async function relocateGhostLibraryTo(
         allowInsideManagedRoot: opts?.allowInsideManagedRoot,
       });
       await slot.disposeGhost(id);
+      await refreshMivoLibraryExtraDirGrant();
       return set.ok ? { ok: true } : { ok: false, message: set.message };
     }
     const result = await migrateGhostLibrary({
@@ -5223,6 +5410,7 @@ async function relocateGhostLibraryTo(
       allowInsideManagedRoot: opts?.allowInsideManagedRoot,
     });
     await slot.disposeGhost(id);
+    await refreshMivoLibraryExtraDirGrant();
     return result.ok ? { ok: true } : { ok: false, message: result.message };
   } finally {
     slot.setRelocating(id, false);
@@ -5313,7 +5501,15 @@ export async function deleteGhostLibraryForActiveOwner(ghostId: string): Promise
     },
     log,
   });
-  if (result.ok) return { ok: true };
+  if (result.ok) {
+    await refreshMivoLibraryExtraDirGrant().catch((error) => {
+      log.warn('library extraDirs delete sync failed', {
+        ghostId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+    return { ok: true };
+  }
   return { ok: false, message: result.message };
 }
 
@@ -5692,6 +5888,13 @@ export async function installOrUpdateLocalGhostPackageFromForge(
           enable: true,
           expectedPackageSha256: expected.packageSha256,
           ...(installOrigin ? { installOrigin } : {}),
+        }).then((ghost) => {
+          try {
+            markGhostRecommendationInstalled(ghost.manifest.id);
+          } catch {
+            log.warn('ghost recommendation install history unavailable');
+          }
+          return ghost;
         }),
         action: 'installed',
       };
@@ -6036,6 +6239,7 @@ async function uninstallGhostAndCleanupLocked(
     // warn,不把卸载报成失败(与上面清账同纪律)。
     try {
       await getGhostLibrarySlot().disposeGhost(id);
+      await refreshMivoLibraryExtraDirGrant();
       const vault = new LibraryVault({
         rootDir: () => ownerScopedUserDataPath('libraries', id),
         ghostId: id,
@@ -6075,6 +6279,11 @@ async function uninstallGhostAndCleanupLocked(
         id,
         error: error instanceof Error ? error.message : String(error),
       });
+    }
+    try {
+      forgetGhostRecommendations(id);
+    } catch {
+      log.warn('ghost recommendation cleanup unavailable', { id });
     }
     // 未读随意识一起走:包都没了还留一颗点,用户既点不开也清不掉。
     // 限速记账一并抹掉,重装后的第一条不该被上一世的时刻挡住。
@@ -6640,6 +6849,11 @@ export function registerGhostIpc(): void {
     if (!id) throwIpcError('PERMISSION_DENIED', '非意识电子脑上下文');
     requireGhostAvailableForActiveSession(id);
     const type = (payload as { type?: unknown } | null)?.type;
+    if (type === 'recommendations-update') {
+      const ghost = findAvailableGhost(id);
+      if (!ghost || !ghost.enabled) return { ok: false, errorCode: 'GHOST_ASLEEP' };
+      return replaceGhostRecommendations(id, (payload as { items?: unknown }).items);
+    }
     if (type === 'tool-result') {
       // 交卷结果不回传细节(accepted=false 的原因只进日志,不给沙箱探测面)。
       const outcome = getGhostPipeDispatcher().handleToolResult(id, payload);
@@ -6876,6 +7090,25 @@ export function registerGhostIpc(): void {
   ipcMain.on('ghosts:list', (event) => {
     event.returnValue = { ghosts: availableGhosts().map(projectGhostForRenderer) };
   });
+  // Author tasks may contain private context: local trusted application UI only.
+  ipcMain.on('ghosts:recommendations', (event) => {
+    const empty = { ownerId: null, sources: [], recentIds: [], newlyInstalledId: null };
+    if (!isTrustedAppRendererEvent(event)) {
+      event.returnValue = empty;
+      return;
+    }
+    try {
+      event.returnValue = buildGhostRecommendationSnapshot(
+        getActiveAppSession().dataOwnerId,
+        availableGhosts(),
+        readGhostRecommendationEntries(),
+        loadGhostRecentIds(),
+      );
+    } catch {
+      log.warn('ghost recommendation snapshot unavailable');
+      event.returnValue = empty;
+    }
+  });
 
   // Plugin 页的已安装快捷行按最近成功使用排序。历史是主机 UI 状态，不写入
   // publisher-owned manifest；同步读保证列表首帧不先按扫描序再跳成最近序。
@@ -6891,12 +7124,18 @@ export function registerGhostIpc(): void {
       event.returnValue = { ids: [] };
     }
   });
-  ipcMain.handle('ghosts:mark-used', (_event, id: unknown) => {
+  ipcMain.handle('ghosts:mark-used', (event, id: unknown) => {
+    assertTrustedAppRendererEvent(event);
     if (typeof id !== 'string' || !isValidGhostId(id)) {
       throwIpcError('INVALID_PARAMS', 'id must be a valid Ghost id');
     }
     if (!findAvailableGhost(id)) {
       throwIpcError('NOT_FOUND', `意识 ${id} 未安装`);
+    }
+    try {
+      consumeGhostRecommendationPriority(id);
+    } catch {
+      log.warn('ghost recommendation priority cleanup unavailable', { id });
     }
     try {
       const ids = markGhostRecentlyUsed(id);
@@ -7045,14 +7284,14 @@ export function registerGhostIpc(): void {
     };
     // 文本类(快问快答)的可选项 = 当前供应商目录里的全部文本模型(2026-08-05
     // 与刘佳黎定稿:安装插件即承担其成本,主机如实展示可选面)。每一项精确钉
-    // 一组 供应商×agent×模型(cat: 编码)。defaultModel = 系统默认链链首(轻量
-    // 档位),declaredModel = 身份卡声明的偏好(解析得到才给)——让"跟随默认"
+    // 一组 供应商×agent×模型(cat: 编码)。defaultModel = 当前辅助模型链链首,
+    // declaredModel = 身份卡声明的偏好(解析得到才给)——让"跟随默认"
     // 行如实说出当前实际跟的是谁。
-    const textChain = getUtilityModelChainProfiles();
-    const textDefaultId = textChain[0]?.id ?? null;
+    const textChain = getEffectiveAuxiliaryModelChain();
+    const textDefaultId = textChain.refs[0] ?? null;
     const textDefaultLabel = textDefaultId === null
       ? null
-      : (utilityModelPinOptions().find((o) => o.id === textDefaultId)?.label ?? textDefaultId);
+      : formatAuxiliaryModelRefLabel(textDefaultId);
     const textOptions = buildTextOneshotPinOptions(
       getActiveCatalog(),
       readModelDisableOverrides(),
@@ -7085,12 +7324,17 @@ export function registerGhostIpc(): void {
           textDefaultId === null || textDefaultLabel === null
             ? null
             : { id: textDefaultId, label: textDefaultLabel },
-        declaredModel: declaredResolved && declaredRaw
-          ? {
-              id: encodeCatalogPin(declaredResolved.providerId, declaredResolved.agentKind, declaredResolved.model),
-              label: declaredRaw,
-            }
-          : null,
+        declaredModel:
+          declaredResolved && declaredRaw
+            ? {
+                id: encodeCatalogPin(
+                  declaredResolved.providerId,
+                  declaredResolved.agentKind,
+                  declaredResolved.model,
+                ),
+                label: declaredRaw,
+              }
+            : null,
         // 存量轻量档位钉(目录扩展前钉下的合法值)的展示名表:渲染层据此给
         // 老钉值回显友好名,而不是把合法档位钉当 stale 原样露出 id。
         utilityProfiles: utilityModelPinOptions(),
@@ -7247,6 +7491,13 @@ export function registerGhostIpc(): void {
           ghostId: probe.manifest.id,
           enable,
           expectedPackageSha256,
+        }).then((ghost) => {
+          try {
+            markGhostRecommendationInstalled(ghost.manifest.id);
+          } catch {
+            log.warn('ghost recommendation install history unavailable');
+          }
+          return ghost;
         }),
       };
     } finally {
@@ -7279,10 +7530,7 @@ export function registerGhostIpc(): void {
       throwIpcError('INVALID_PARAMS', 'expectedPackageSha256 must come from ghosts:inspect');
     }
     if (!isGhostInstallApprovalToken(expectedInstalledApproval)) {
-      throwIpcError(
-        'INVALID_PARAMS',
-        'expectedInstalledApproval must come from ghosts:list',
-      );
+      throwIpcError('INVALID_PARAMS', 'expectedInstalledApproval must come from ghosts:list');
     }
     const inspected = await manager.inspect(lizFilePath);
     if ('rejection' in inspected) throwInstallError(inspected.rejection);
@@ -7524,6 +7772,12 @@ export function registerGhostIpc(): void {
         const ghost = findAvailableGhost(id);
         if (ghost) spawnIfResident(ghost); // 常驻意识:唤醒即启动
         resumeGhostUnreadProjection(id); // 沉睡期间保留的那颗点回来(#1421)
+        await refreshMivoLibraryExtraDirGrant().catch((error) => {
+          log.warn('library extraDirs enable sync failed', {
+            id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
       } else {
         // 未读停止投影(记录保留):沉睡的意识没法把面板里的内容给你看,留一颗点
         // 只是噪声;但用户是"先别烦我"不是"这条我读过了",唤醒要能找回来。
@@ -7533,6 +7787,12 @@ export function registerGhostIpc(): void {
         // (要等插件再次上报或重启)。熄灯类操作(runtime/node/订阅)放在前面是既有
         // 行为且幂等,唯独这条会留下用户可见的错状态(copilot + codex review)。
         suspendGhostUnreadProjection(id);
+        await refreshMivoLibraryExtraDirGrant().catch((error) => {
+          log.warn('library extraDirs disable sync failed', {
+            id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
       }
       return { ok: true };
     } finally {
@@ -7584,9 +7844,12 @@ export function registerGhostIpc(): void {
     }
     const releaseMutation = beginGhostMutation();
     try {
-      const set = await getGhostLibraryBindingStore().setBinding(id, candidate, (root) => statfsFreeBytes(root));
+      const set = await getGhostLibraryBindingStore().setBinding(id, candidate, (root) =>
+        statfsFreeBytes(root),
+      );
       if (!set.ok) return { ok: false as const, message: set.message };
       await getGhostLibrarySlot().disposeGhost(id); // 作废会话,下一请求用新根
+      await refreshMivoLibraryExtraDirGrant();
       return { ok: true as const, warnings: set.warnings };
     } finally {
       releaseMutation();
@@ -7615,6 +7878,7 @@ export function registerGhostIpc(): void {
     if (!res.ok) return res;
     await getGhostLibraryBindingStore().removeBinding(id);
     await getGhostLibrarySlot().disposeGhost(id);
+    await refreshMivoLibraryExtraDirGrant();
     return { ok: true as const };
   });
   // 漂移恢复(位置失效):解除 binding 回默认(原自定义目录数据原样保留,
@@ -7626,6 +7890,7 @@ export function registerGhostIpc(): void {
     try {
       await getGhostLibraryBindingStore().removeBinding(id);
       await getGhostLibrarySlot().disposeGhost(id);
+      await refreshMivoLibraryExtraDirGrant();
       return { ok: true as const };
     } finally {
       releaseMutation();

@@ -25,6 +25,7 @@ const storeMock = vi.hoisted(() => ({
   listeners: new Set<() => void>(),
   terminalErrorSessions: new Set<string>(),
   sideTaskStopSessions: new Set<string>(),
+  privateReplySessions: new Set<string>(),
 }));
 
 vi.mock('@/lib/makerChatStore', () => ({
@@ -37,6 +38,7 @@ vi.mock('@/lib/makerChatStore', () => ({
     },
     getRunningSnapshot: () => storeMock.snapshot,
     hasSessionTerminalError: (sessionId: string) => storeMock.terminalErrorSessions.has(sessionId),
+    wasLastStopPrivateReply: (sessionId: string) => storeMock.privateReplySessions.has(sessionId),
     wasLastStopSideTask: (sessionId: string) => storeMock.sideTaskStopSessions.has(sessionId),
   },
 }));
@@ -78,11 +80,29 @@ describe('useSessionRunningStatus silenced completion handling', () => {
     storeMock.listeners.clear();
     storeMock.terminalErrorSessions.clear();
     storeMock.sideTaskStopSessions.clear();
+    storeMock.privateReplySessions.clear();
     resetSilencedSessionDoneStoreForTests();
     resetSessionStartingStoreForTests();
     vi.clearAllMocks();
     vi.restoreAllMocks();
     vi.useRealTimers();
+  });
+
+  it('keeps private replies quiet even when the final attribution arrives during debounce', async () => {
+    vi.useFakeTimers();
+    const onSessionDone = vi.fn();
+    renderHook(() => useSessionRunningStatus(undefined, { onSessionDone }));
+    await emitSnapshot(new Map([['private', status(true)]]));
+    await emitSnapshot(new Map([['private', status(false)]]));
+    storeMock.privateReplySessions.add('private');
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(onSessionDone).not.toHaveBeenCalled();
+    expect(addSessionAttention).not.toHaveBeenCalled();
+    storeMock.privateReplySessions.clear();
+    await emitSnapshot(new Map([['private', status(true)]]));
+    await emitSnapshot(new Map([['private', status(false)]]));
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(onSessionDone).toHaveBeenCalledWith('private');
   });
 
   it('does not mute a normal follow-up that starts during silenced completion linger', async () => {
@@ -118,7 +138,7 @@ describe('useSessionRunningStatus silenced completion handling', () => {
     expect(onSessionError).toHaveBeenCalledWith('session-err');
   });
 
-  it('keeps done attention but suppresses a scheduler-owned completion callback', async () => {
+  it('suppresses scheduler-owned success attention and completion callback', async () => {
     vi.useFakeTimers();
     const onSessionDone = vi.fn();
     markNextSessionTerminalNotificationOwnedByScheduler('run-owned', 'session-owned');
@@ -131,7 +151,23 @@ describe('useSessionRunningStatus silenced completion handling', () => {
       await vi.advanceTimersByTimeAsync(500);
     });
 
-    expect(vi.mocked(addSessionAttention)).toHaveBeenCalledWith('session-owned', 'done');
+    expect(vi.mocked(addSessionAttention)).not.toHaveBeenCalledWith('session-owned', 'done');
+    expect(onSessionDone).not.toHaveBeenCalled();
+  });
+
+  it('rereads silence when it arrives during the done debounce window', async () => {
+    vi.useFakeTimers();
+    const onSessionDone = vi.fn();
+    renderHook(() => useSessionRunningStatus(undefined, { onSessionDone }));
+
+    await emitSnapshot(new Map([['session-late', status(true)]]));
+    await emitSnapshot(new Map([['session-late', status(false)]]));
+    markNextSessionDoneSilenced('run-late', 'session-late');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+
+    expect(vi.mocked(addSessionAttention)).not.toHaveBeenCalledWith('session-late', 'done');
     expect(onSessionDone).not.toHaveBeenCalled();
   });
 
@@ -561,8 +597,7 @@ describe('useSessionRunningStatus silenced completion handling', () => {
       await vi.advanceTimersByTimeAsync(600);
     });
 
-    // attention 仍照常挂(schedulerOwned 只抑制外发通知,不抑制角标)。
-    expect(vi.mocked(addSessionAttention)).toHaveBeenCalledWith('session-owned-multi', 'done');
+    expect(vi.mocked(addSessionAttention)).not.toHaveBeenCalledWith('session-owned-multi', 'done');
     expect(onSessionDone).not.toHaveBeenCalled();
     vi.useRealTimers();
   });

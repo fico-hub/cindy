@@ -1,3 +1,5 @@
+import { readBotCollaborationMeta, type BotCollaborationMeta } from '@cindy/maker-shared/botCollaboration';
+import { readBotDirectMessageMeta, type BotDirectMessageMeta } from '@cindy/maker-shared/botDirectMessage';
 import type { RemoteMessage, RemoteMessageRole } from '@/session/types';
 import type { MobileSystemCardType } from '@/session/systemCard';
 import { contentToPreview } from '@/utils/contentPreview';
@@ -47,6 +49,11 @@ import {
   normalizeRemoteMoney,
   type RemoteMoney,
 } from '@/session/remoteMoney';
+import {
+  localizeToolLoopError,
+  parseMobileToolLoopErrorDetails,
+} from '@/session/toolLoopErrorI18n';
+import type { MobileToolInputProjection } from '@/session/messageToolPayloadProjection';
 
 export type NormalizedRemoteMessageKind =
   | 'user'
@@ -102,8 +109,11 @@ export interface NormalizedRemoteMessage {
   modelMismatch?: { selected: string; actual: string };
   /** Orca 协同卡片(Lead 派活 / worker 回报);存在时由 MessageRenderer 渲染成专属卡片而非普通气泡。 */
   orcaCard?: OrcaCollabCard;
+  companion?: { kind: 'task'; meta: BotCollaborationMeta } | { kind: 'direct'; meta: BotDirectMessageMeta };
   /** tool 消息专用:tool_result 是否已到达(含被隐藏的 orca 空结果),驱动工具行 running/done 状态。 */
   toolSettled?: boolean;
+  /** Large settled tool input is fetched only when the user asks to view it. */
+  toolInputProjection?: MobileToolInputProjection;
   /** Durable Agent/Task terminal lifecycle restored from tool_use metadata. */
   agentTaskStatus?: AgentTaskTerminalStatus;
   /** assistant 专用:是否本轮收尾正文(操作行只挂在收尾正文上,对齐桌面 #456);由 messageRenderModel 标注。 */
@@ -176,6 +186,9 @@ interface ToolUsePayload extends MessageNormalizeToolUse {
   diff?: NormalizedToolDiff;
 }
 
+const toolResultPreviewByContent = new WeakMap<object, { language: string; preview: string }>();
+const toolUsePayloadByMessage = new WeakMap<RemoteMessage, ToolUsePayload>();
+
 export function normalizeRemoteMessages(messages: readonly RemoteMessage[]): NormalizedRemoteMessage[] {
   const sorted = sortMessagesByCreatedAt(messages);
   const toolResultPairing = buildMessageToolResultPairing(sorted, {
@@ -185,9 +198,24 @@ export function normalizeRemoteMessages(messages: readonly RemoteMessage[]): Nor
   const result: NormalizedRemoteMessage[] = [];
   for (const message of sorted) {
     if (message.role === 'tool_result') continue;
+    if (message.role === 'assistant') {
+      const task = readBotCollaborationMeta(message.agentMeta?.botCollaboration);
+      const direct = readBotDirectMessageMeta(message.agentMeta?.botDirectMessage);
+      if (task?.role === 'delegation-request' || task?.role === 'interjection' || direct) {
+        result.push({
+          key: messageNormalizeKey(message), source: message, kind: 'system', role: message.role,
+          label: 'companion', body: typeof message.content === 'string' ? message.content : '',
+          align: 'agent', createdAt: message.createdAt,
+          companion: task && (task.role === 'delegation-request' || task.role === 'interjection')
+            ? { kind: 'task', meta: task } : { kind: 'direct', meta: direct! },
+        });
+        continue;
+      }
+    }
 
     if (message.role === 'tool_use') {
       const tool = parseToolUse(message);
+      const toolInputProjection = message.mobileToolInputProjection;
       const agentTaskStatus = normalizeAgentTaskTerminalStatus(
         message.agentMeta?.agentTaskStatus,
       );
@@ -225,6 +253,7 @@ export function normalizeRemoteMessages(messages: readonly RemoteMessage[]): Nor
         // 结束时刻(配对 tool_result 落库时间)驱动渲染层的历史空洞判定,详见共享类型上的说明。
         settledAt: toolResultPairing.resultCreatedAtFor(message, tool),
         toolSettled: toolResultPairing.hasResultFor(message, tool),
+        ...(toolInputProjection ? { toolInputProjection } : {}),
         ...(agentTaskStatus ? { agentTaskStatus } : {}),
       });
       continue;
@@ -249,12 +278,14 @@ export function normalizeRemoteMessages(messages: readonly RemoteMessage[]): Nor
 
     // turn 失败终态的持久化行(desktop main 落库):content = { message, reason? },
     // 提取 message 文案按 system 样式展示 —— 不加分支会 fall through 到通用兜底,
-    // body 变成整段生 JSON。agent 未鉴权错误换成带引导的中文提示(describeAgentAuthError),
-    // 其余 reason 的本地化 / 红色错误卡样式留待手机版专项跟进。
+    // body 变成整段生 JSON。稳定的 tool-loop reason/toolLoop 走本地化，agent 未鉴权错误
+    // 换成带引导的中文提示(describeAgentAuthError)，其余未知错误保留原始 message。
     if (message.role === 'error') {
       const c = parseMaybeJsonObject(message.content);
       const rawText = typeof c?.message === 'string' ? c.message : contentToPreview(message.content);
-      const errText = describeAgentAuthError(rawText) ?? rawText;
+      const toolLoop = parseMobileToolLoopErrorDetails(c?.toolLoop);
+      const errText =
+        describeAgentAuthError(rawText) ?? localizeToolLoopError(c?.reason, toolLoop) ?? rawText;
       result.push({
         key: messageNormalizeKey(message),
         source: message,
@@ -266,6 +297,29 @@ export function normalizeRemoteMessages(messages: readonly RemoteMessage[]): Nor
         createdAt: message.createdAt,
       });
       continue;
+    }
+
+    // Desktop persists context rebuilds as empty assistant rows with metadata.
+    if (message.role === 'assistant') {
+      const rebuild = readRecord(message.agentMeta?.contextRebuild);
+      if (rebuild) {
+        result.push({
+          key: messageNormalizeKey(message),
+          source: message,
+          kind: 'system',
+          role: message.role,
+          label: 'system:context-rebuild',
+          body: '',
+          systemCardType: 'context-rebuild',
+          systemCardData: {
+            reason: typeof rebuild.reason === 'string' ? rebuild.reason : 'context-overflow',
+            handoff: typeof rebuild.handoff === 'string' ? rebuild.handoff : '',
+          },
+          align: 'agent',
+          createdAt: message.createdAt,
+        });
+        continue;
+      }
     }
 
     // /goal 持久记录(桌面 goal-host 落库:role 'assistant' + 空 content + agentMeta 标记)
@@ -402,12 +456,7 @@ export function normalizeRemoteMessages(messages: readonly RemoteMessage[]): Nor
       align: message.role === 'user' && hookSource === undefined ? 'user' : 'agent',
       createdAt: message.createdAt,
       isStreaming: readMessageStreaming(message) || undefined,
-      ...(message.role === 'assistant' && (
-        message.agentMeta?.turnCompleted === true ||
-        (turnCost.turnMoney?.amount ?? 0) > 0 ||
-        // 无报价轮只落 turnUsageDetails,它同样只在 turn 结束时写入,等价收尾信号。
-        turnCost.turnTotalTokens !== undefined
-      )
+      ...(remoteMessageCompletesTurn(message, turnCost)
         ? { turnCompleted: true }
         : {}),
       ...turnCost,
@@ -460,6 +509,18 @@ function dedupeToolImagesAgainstAssistantMarkdown(
 }
 
 function toolResultContentToPreview(content: unknown): string {
+  if (content !== null && typeof content === 'object') {
+    const language = i18n.resolvedLanguage ?? i18n.language;
+    const cached = toolResultPreviewByContent.get(content);
+    if (cached?.language === language) return cached.preview;
+    const preview = uncachedToolResultContentToPreview(content);
+    toolResultPreviewByContent.set(content, { language, preview });
+    return preview;
+  }
+  return uncachedToolResultContentToPreview(content);
+}
+
+function uncachedToolResultContentToPreview(content: unknown): string {
   const compacted = parseToolResultCompactionMarker(content);
   if (!compacted) return contentToPreview(content);
   return i18n.t('message.renderer.toolResultCompacted', {
@@ -476,11 +537,25 @@ function toolResultContentFor(
 }
 
 function parseToolUse(message: RemoteMessage): ToolUsePayload {
+  const cached = toolUsePayloadByMessage.get(message);
+  if (cached) return cached;
   const sharedTool = parseMessageToolUse(message);
+  const projection = message.mobileToolInputProjection;
+  if (projection) {
+    const payload = {
+      ...sharedTool,
+      toolName: projection.toolName,
+      summary: projection.summary,
+    };
+    toolUsePayloadByMessage.set(message, payload);
+    return payload;
+  }
   const { toolName, input } = sharedTool;
   const summary = toolName ? formatToolUseSummary(toolName, input) : contentToPreview(message.content);
   const diff = buildToolDiff(toolName, input);
-  return { ...sharedTool, summary, diff };
+  const payload = { ...sharedTool, summary, diff };
+  toolUsePayloadByMessage.set(message, payload);
+  return payload;
 }
 
 function parseUserContent(content: unknown): {
@@ -751,6 +826,7 @@ function normalizeSystemCardType(value: unknown): MobileSystemCardType | null {
     || value === 'pwd'
     || value === 'status'
     || value === 'compact'
+    || value === 'context-rebuild'
     || value === 'cmd'
     || value === 'learn'
     ? value
@@ -802,6 +878,19 @@ function projectTurnMoney(
     },
     turnCostUsd: cost,
   };
+}
+
+/** Same completion boundary for normalization and streaming-prefix invalidation. */
+export function remoteMessageCompletesTurn(
+  message: RemoteMessage,
+  turnCost = readTurnCost(message),
+): boolean {
+  return message.role === 'assistant' && (
+    message.agentMeta?.turnCompleted === true
+    || (turnCost.turnMoney?.amount ?? 0) > 0
+    // Usage without a price is also written only when the turn ends.
+    || turnCost.turnTotalTokens !== undefined
+  );
 }
 
 function readTurnCost(
