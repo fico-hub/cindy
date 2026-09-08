@@ -1,3 +1,8 @@
+import {
+  getMobileAuthOwner,
+  isMobileAuthOwnerCurrent,
+  type MobileAuthOwnerGeneration,
+} from '@/auth/authOwnerGeneration';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   normalizeNewSessionAgentKind,
@@ -21,31 +26,51 @@ export interface NewSessionPreferencePatch {
 
 export async function readNewSessionPreferences(): Promise<NewSessionStoredPreferences> {
   // 刚选完就重新打开新建页时，也要看到已提交但尚未落盘的选择。
+  const owner = getMobileAuthOwner();
   await writeChain;
-  return loadNewSessionPreferences();
+  const preferences = await loadNewSessionPreferences(owner.accountId);
+  return isMobileAuthOwnerCurrent(owner) ? preferences : { ...preferences, workingDirByDevice: {} };
 }
 
-async function loadNewSessionPreferences(): Promise<NewSessionStoredPreferences> {
-  const raw = await AsyncStorage.getItem(STORAGE_KEY).catch(() => null);
-  if (!raw) return emptyPreferences();
+function workingDirStorageKey(accountId: string): string {
+  return `${STORAGE_KEY}.working-directories.${encodeURIComponent(accountId)}`;
+}
+
+async function loadNewSessionPreferences(accountId: string): Promise<NewSessionStoredPreferences> {
+  const [raw, directories] = await Promise.all([
+    AsyncStorage.getItem(STORAGE_KEY).catch(() => null),
+    accountId ? AsyncStorage.getItem(workingDirStorageKey(accountId)).catch(() => null) : null,
+  ]);
+  let preferences = emptyPreferences();
   try {
-    return normalizeStoredPreferences(JSON.parse(raw));
+    if (raw) preferences = normalizeStoredPreferences(JSON.parse(raw));
   } catch {
-    return emptyPreferences();
+    // Malformed preferences fall back to defaults.
   }
+  // The old global map has no provable owner; never assign it to the next account.
+  try {
+    if (directories) preferences.workingDirByDevice = normalizeWorkingDirByDevice(JSON.parse(directories));
+  } catch {
+    // A malformed directory map must not prevent loading the other preferences.
+  }
+  return preferences;
 }
 
 // 与首页偏好存储一致：连续选择不同字段时，读改写必须按操作顺序执行。
 let writeChain: Promise<void> = Promise.resolve();
 
 export function saveNewSessionPreferences(patch: NewSessionPreferencePatch): Promise<void> {
-  const next = writeChain.then(() => writeNewSessionPreferences(patch));
+  const owner = getMobileAuthOwner();
+  const next = writeChain.then(() => writeNewSessionPreferences(patch, owner));
   writeChain = next.catch(() => undefined);
   return next;
 }
 
-async function writeNewSessionPreferences(patch: NewSessionPreferencePatch): Promise<void> {
-  const current = await loadNewSessionPreferences();
+async function writeNewSessionPreferences(
+  patch: NewSessionPreferencePatch,
+  owner: MobileAuthOwnerGeneration,
+): Promise<void> {
+  const current = await loadNewSessionPreferences(owner.accountId);
   const permissionPatch = patch.permissionModeForAgent;
   const workingDirPatch = patch.workingDirForDevice;
   const workingDirDeviceId = workingDirPatch?.deviceId.trim() ?? '';
@@ -67,10 +92,17 @@ async function writeNewSessionPreferences(patch: NewSessionPreferencePatch): Pro
         : current.workingDirByDevice,
   };
   await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(serializePreferences(next))).catch(() => undefined);
+  if (workingDirDeviceId && workingDirValue && owner.accountId && isMobileAuthOwnerCurrent(owner)) {
+    await AsyncStorage.setItem(workingDirStorageKey(owner.accountId), JSON.stringify(next.workingDirByDevice)).catch(() => undefined);
+  }
 }
 
 export function clearNewSessionPreferences(): Promise<void> {
-  const next = writeChain.then(() => AsyncStorage.removeItem(STORAGE_KEY));
+  const owner = getMobileAuthOwner();
+  const next = writeChain.then(async () => {
+    await AsyncStorage.removeItem(STORAGE_KEY);
+    if (owner.accountId) await AsyncStorage.removeItem(workingDirStorageKey(owner.accountId));
+  });
   writeChain = next.catch(() => undefined);
   return writeChain;
 }
@@ -129,7 +161,7 @@ function normalizeStoredPreferences(value: unknown): NewSessionStoredPreferences
       ? { deviceId, name: deviceName || deviceId }
       : null,
     permissionModeByAgent: normalizePermissionModeByAgent(record.permissionModeByAgent),
-    workingDirByDevice: normalizeWorkingDirByDevice(record.workingDirByDevice),
+    workingDirByDevice: {},
   };
 }
 
@@ -160,9 +192,6 @@ function serializePreferences(
     ...(permissionEntries.length > 0
       ? { permissionModeByAgent: Object.fromEntries(permissionEntries) }
       : {}),
-    ...(Object.keys(preferences.workingDirByDevice).length > 0
-      ? { workingDirByDevice: { ...preferences.workingDirByDevice } }
-      : {}),
   };
 }
 
@@ -178,4 +207,5 @@ function readString(value: unknown): string | null {
 
 export const __testing = {
   storageKey: STORAGE_KEY,
+  workingDirStorageKey,
 };

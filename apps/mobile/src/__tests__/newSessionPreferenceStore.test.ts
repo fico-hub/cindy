@@ -1,3 +1,4 @@
+import { setMobileAuthOwner } from '@/auth/authOwnerGeneration';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const store = vi.hoisted(() => new Map<string, string>());
@@ -21,6 +22,39 @@ describe('newSessionPreferenceStore', () => {
     const { clearNewSessionPreferences } = await import('@/session/newSessionPreferenceStore');
     await clearNewSessionPreferences();
     store.clear();
+    setMobileAuthOwner('account-a');
+  });
+
+  it('isolates directories on the same device across accounts and signed-out reads', async () => {
+    const { readNewSessionPreferences, saveNewSessionPreferences } =
+      await import('@/session/newSessionPreferenceStore');
+    await saveNewSessionPreferences({ workingDirForDevice: { deviceId: 'shared-device', workingDir: '/account-a/private' } });
+    setMobileAuthOwner('account-b');
+    expect((await readNewSessionPreferences()).workingDirByDevice).toEqual({});
+    await saveNewSessionPreferences({ workingDirForDevice: { deviceId: 'shared-device', workingDir: '/account-b/private' } });
+    setMobileAuthOwner(null);
+    expect((await readNewSessionPreferences()).workingDirByDevice).toEqual({});
+    setMobileAuthOwner('account-a');
+    expect((await readNewSessionPreferences()).workingDirByDevice).toEqual({ 'shared-device': '/account-a/private' });
+    setMobileAuthOwner('account-b');
+    expect((await readNewSessionPreferences()).workingDirByDevice).toEqual({ 'shared-device': '/account-b/private' });
+  });
+
+  it('does not adopt the unowned legacy directory map into a logged-in account', async () => {
+    const { __testing, readNewSessionPreferences } = await import('@/session/newSessionPreferenceStore');
+    store.set(__testing.storageKey, JSON.stringify({ agentKind: 'codex', workingDirByDevice: { devA: '/previous-owner/private' } }));
+    expect(await readNewSessionPreferences()).toMatchObject({ agentKind: 'codex', workingDirByDevice: {} });
+  });
+
+  it('does not attribute a queued directory save or late read to the next account', async () => {
+    const { readNewSessionPreferences, saveNewSessionPreferences } =
+      await import('@/session/newSessionPreferenceStore');
+    const saving = saveNewSessionPreferences({ workingDirForDevice: { deviceId: 'shared-device', workingDir: '/account-a/private' } });
+    const reading = readNewSessionPreferences();
+    setMobileAuthOwner('account-b');
+    await saving;
+    expect((await reading).workingDirByDevice).toEqual({});
+    expect((await readNewSessionPreferences()).workingDirByDevice).toEqual({});
   });
 
   it('stores the last selected device and agent for new sessions', async () => {
@@ -155,17 +189,15 @@ describe('newSessionPreferenceStore', () => {
     });
     expect(JSON.parse(store.get(__testing.storageKey) ?? '{}')).toEqual({
       workspaceKind: 'dialogue',
-      workingDirByDevice: { devA: '/repo/fourth', devB: ' /other/app ' },
     });
+    expect(JSON.parse(store.get(__testing.workingDirStorageKey('account-a')) ?? '{}')).toEqual({ devA: '/repo/fourth', devB: ' /other/app ' });
 
     // 落盘里的非法条目(非字符串 / 空)在读取时被清洗,旧存储没有该字段也不报错。
-    store.set(__testing.storageKey, JSON.stringify({
-      workingDirByDevice: { devA: '/repo/ok', devB: 42, ' ': '/x', devC: '', devD: ' /keep me ' },
-    }));
+    store.set(__testing.workingDirStorageKey('account-a'), JSON.stringify({ devA: '/repo/ok', devB: 42, ' ': '/x', devC: '', devD: ' /keep me ' }));
     await expect(readNewSessionPreferences()).resolves.toMatchObject({
       workingDirByDevice: { devA: '/repo/ok', devD: ' /keep me ' },
     });
-    store.set(__testing.storageKey, JSON.stringify({ workingDirByDevice: 'bad' }));
+    store.set(__testing.workingDirStorageKey('account-a'), JSON.stringify('bad'));
     await expect(readNewSessionPreferences()).resolves.toMatchObject({ workingDirByDevice: {} });
   });
 
