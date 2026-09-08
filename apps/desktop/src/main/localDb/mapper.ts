@@ -20,6 +20,7 @@ import type {
 // 类型从 renderer 共享（仅 type-only import，运行时无 import 副作用）
 import type {
   Session,
+  UsageHistorySession,
   SessionStatus,
   Message,
   MessageRole,
@@ -42,6 +43,7 @@ import type {
   PreRunHookRunResult,
 } from '@cindy/maker-scheduler';
 import { normalizeSessionSource } from '../../shared/sessionSource.js';
+import type { SessionSource } from '../../shared/sessionSource.js';
 import { normalizeWorkingDirForStorage } from '../../shared/workingDir.js';
 import { isSyntheticTriggerText } from '../../shared/interruptedTurn.js';
 import {
@@ -54,6 +56,31 @@ import {
 
 type SessionRow = typeof sessions.$inferSelect;
 type SessionInsert = typeof sessions.$inferInsert;
+type SessionUsageRow = Pick<
+  SessionRow,
+  | 'id'
+  | 'title'
+  | 'model'
+  | 'providerId'
+  | 'totalTokenUsage'
+  | 'contextTokens'
+  | 'contextWindow'
+  | 'userSendAt'
+  | 'updatedAt'
+>;
+
+/**
+ * 运行时固定 effort 模型用 `null`；`sessions.effort` 是 NOT NULL 枚举。
+ * 空白 / null 表示不落库，UPDATE 保留该行已有的合法档位。
+ */
+export function persistableSessionEffort(
+  effort: unknown,
+): SessionInsert['effort'] | undefined {
+  if (typeof effort !== 'string') return undefined;
+  const trimmed = effort.trim();
+  return trimmed ? (trimmed as SessionInsert['effort']) : undefined;
+}
+
 type MessageRow = typeof messages.$inferSelect;
 type MessageInsert = typeof messages.$inferInsert;
 type ScheduleRow = typeof schedules.$inferSelect;
@@ -62,6 +89,13 @@ type ProjectAutomationConsentRow = typeof projectAutomationConsents.$inferSelect
 type ProjectAutomationConsentInsert = typeof projectAutomationConsents.$inferInsert;
 type ScheduleRunRow = typeof scheduleRuns.$inferSelect;
 type ScheduleRunInsert = typeof scheduleRuns.$inferInsert;
+
+type SessionRuntimeProjector = (session: Session) => Partial<Session>;
+let sessionRuntimeProjector: SessionRuntimeProjector | null = null;
+
+export function setSessionRuntimeProjector(projector: SessionRuntimeProjector | null): void {
+  sessionRuntimeProjector = projector;
+}
 
 /**
  * SessionRow + 同 session 下 messages 总条数。IPC handler 必须通过 LEFT JOIN + GROUP BY
@@ -79,6 +113,7 @@ type ScheduleRunInsert = typeof scheduleRuns.$inferInsert;
 export type SessionRowWithCount = SessionRow & {
   messageCount: number;
   latestMessageContent?: string | null;
+  latestMessageExtract?: string | null;
   latestMessageRole?: string | null;
 };
 
@@ -94,6 +129,22 @@ const PREVIEW_CONTENT_BOUND_CHARS = 4096;
  *  - 解析失败 / 空文本 → null（渲染端隐藏预览行）
  * 换行折叠成空格——卡片预览是流式 3 行 clamp，不保留消息内排版。
  */
+export function finalizePlainPreview(
+  text: string | null | undefined,
+  role: string | null | undefined,
+): string | null {
+  if (!text) return null;
+  let next = text;
+  // 合成 UI 指令行(隐藏续跑 / 图片按钮)不进 sidebar 预览(review P2):它是
+  // role='user' 的正常落库行,但对用户不可见 —— 预览显示隐藏英文指令会暴露
+  // 实现细节。返回 null 与"无预览"同渲染语义。
+  if (isSyntheticTriggerText(next)) return null;
+  if (role === 'assistant') next = stripInternalWebCitations(next);
+  const collapsed = next.replace(/\s+/g, ' ').trim();
+  if (!collapsed) return null;
+  return collapsed.length > PREVIEW_MAX_CHARS ? collapsed.slice(0, PREVIEW_MAX_CHARS) : collapsed;
+}
+
 export function extractMessagePreview(
   raw: string | null | undefined,
   role: string | null | undefined,
@@ -112,15 +163,7 @@ export function extractMessagePreview(
     // 极端情况 content 不是合法 JSON（旧手工写入）——按纯文本兜底
     text = raw;
   }
-  if (!text) return null;
-  // 合成 UI 指令行(隐藏续跑 / 图片按钮)不进 sidebar 预览(review P2):它是
-  // role='user' 的正常落库行,但对用户不可见 —— 预览显示隐藏英文指令会暴露
-  // 实现细节。返回 null 与"无预览"同渲染语义。
-  if (isSyntheticTriggerText(text)) return null;
-  if (role === 'assistant') text = stripInternalWebCitations(text);
-  const collapsed = text.replace(/\s+/g, ' ').trim();
-  if (!collapsed) return null;
-  return collapsed.length > PREVIEW_MAX_CHARS ? collapsed.slice(0, PREVIEW_MAX_CHARS) : collapsed;
+  return finalizePlainPreview(text, role);
 }
 
 /**
@@ -183,7 +226,7 @@ export function sessionToCamel(row: SessionRowWithCount): Session {
   const legacyUsdProjection =
     row.totalCostUsd +
     (row.totalCostCurrency === 'USD' ? row.totalCostAmount : 0);
-  return {
+  const base: Session = {
     id: row.id,
     userId: '', // 本地 db 已按 user 隔离，无需冗余存储
     title: row.title,
@@ -213,6 +256,7 @@ export function sessionToCamel(row: SessionRowWithCount): Session {
     worktreePath: row.worktreePath,
     usedProjectContext: !!row.usedProjectContext,
     extraDirs: safeParseStringArray(row.extraDirs),
+    writableDirs: safeParseStringArray(row.writableDirs),
     remoteHostId: row.remoteHostId ?? null,
     // interrupted-turn-resume:「疑似中断」判定的两个时间戳(unix ms 原样透出,
     // renderer 打开会话时比较 startedAt > endedAt,见 sessionActiveTurn.ts)。
@@ -221,12 +265,18 @@ export function sessionToCamel(row: SessionRowWithCount): Session {
     createdAt: new Date(row.createdAt).toISOString(),
     updatedAt: new Date(row.updatedAt).toISOString(),
     _count: { messages: row.messageCount },
-    preview: extractMessagePreview(
-      boundSerializedMessageContent(row.latestMessageContent),
-      row.latestMessageRole,
-    ),
+    preview:
+      row.listPreview != null
+        ? finalizePlainPreview(row.listPreview, row.listPreviewRole)
+        : row.latestMessageExtract != null
+          ? finalizePlainPreview(row.latestMessageExtract, row.latestMessageRole)
+          : extractMessagePreview(
+              boundSerializedMessageContent(row.latestMessageContent),
+              row.latestMessageRole,
+            ),
     summary: row.summary ?? null,
   };
+  return sessionRuntimeProjector ? { ...base, ...sessionRuntimeProjector(base) } : base;
 }
 
 export function messageToCamel(row: MessageRow): Message {
@@ -296,6 +346,7 @@ export function sessionCreateToRow(
         parentSessionId?: string | null;
         forkedAtMessageId?: string | null;
         extraDirs?: string[];
+        writableDirs?: string[];
         /** Remote codex (P2): 远端 SSH host alias; null/undefined = 本地。 */
         remoteHostId?: string | null;
         /**
@@ -304,6 +355,7 @@ export function sessionCreateToRow(
          * create 由 renderer 透传用户在草稿里选定的来源,使新会话首个请求就走对供应商。
          */
         providerId?: string | null;
+        source?: 'bot';
       }
     | undefined,
   now: number,
@@ -335,6 +387,7 @@ export function sessionCreateToRow(
     forkedAtMessageId: body?.forkedAtMessageId ?? null,
     worktreePath: null,
     extraDirs: safeStringify(body?.extraDirs ?? []),
+    writableDirs: safeStringify(body?.writableDirs ?? []),
     remoteHostId: normalizeRemoteHostId(body?.remoteHostId),
     // 显式来源:trim 后非空才入库,其余(undefined / null / 空串 / 纯空白)一律落 null,
     // 与 session-provider-store 的 null 语义对齐(null → 回落默认路由,字节级不变)。
@@ -342,6 +395,7 @@ export function sessionCreateToRow(
       typeof body?.providerId === 'string' && body.providerId.trim().length > 0
         ? body.providerId.trim()
         : null,
+    source: body?.source ?? 'desktop',
     createdAt: now,
     updatedAt: now,
   };
@@ -359,7 +413,7 @@ export function sessionPatchToRow(
     workingDir?: string;
     workspaceKind?: WorkspaceKind;
     model?: string;
-    effort?: string;
+    effort?: string | null;
     permissionMode?: string;
     providerId?: string | null;
     fastMode?: boolean;
@@ -374,6 +428,7 @@ export function sessionPatchToRow(
     status?: SessionStatus;
     orcaRole?: OrcaRole | null;
     extraDirs?: string[];
+    writableDirs?: string[];
   },
   opts?: { bumpUpdatedAt?: boolean },
 ): Partial<SessionInsert> {
@@ -383,7 +438,8 @@ export function sessionPatchToRow(
     out.workingDir = normalizeWorkingDirForStorage(patch.workingDir);
   if (patch.workspaceKind !== undefined) out.workspaceKind = patch.workspaceKind;
   if (patch.model !== undefined) out.model = patch.model;
-  if (patch.effort !== undefined) out.effort = patch.effort as SessionInsert['effort'];
+  const persistableEffort = persistableSessionEffort(patch.effort);
+  if (persistableEffort !== undefined) out.effort = persistableEffort;
   if (patch.permissionMode !== undefined)
     out.permissionMode = patch.permissionMode as SessionInsert['permissionMode'];
   if (patch.providerId !== undefined) out.providerId = patch.providerId;
@@ -399,6 +455,7 @@ export function sessionPatchToRow(
   if (patch.status !== undefined) out.status = patch.status;
   if (patch.orcaRole !== undefined) out.orcaRole = patch.orcaRole;
   if (patch.extraDirs !== undefined) out.extraDirs = safeStringify(patch.extraDirs);
+  if (patch.writableDirs !== undefined) out.writableDirs = safeStringify(patch.writableDirs);
   if (opts?.bumpUpdatedAt !== false) out.updatedAt = Date.now();
   return out;
 }
@@ -437,6 +494,26 @@ export function messageCreateToRow(
 function msToIso(ms: number | null | undefined): string | null {
   if (ms === null || ms === undefined) return null;
   return new Date(ms).toISOString();
+}
+
+/**
+ * 用量历史榜单的最小行映射。
+ *
+ * 与 sessionToCamel 分开，避免全量 usageHistory 查询把 workingDir、SDK
+ * 标识、远程主机等只属于会话管理的字段泄露到 Renderer。
+ */
+export function sessionUsageToCamel(row: SessionUsageRow): UsageHistorySession {
+  return {
+    id: row.id,
+    title: row.title,
+    model: row.model,
+    providerId: row.providerId,
+    totalTokenUsage: row.totalTokenUsage,
+    contextTokens: row.contextTokens,
+    contextWindow: row.contextWindow,
+    userSendAt: msToIso(row.userSendAt),
+    updatedAt: new Date(row.updatedAt).toISOString(),
+  };
 }
 
 function isoToMs(iso: string | null): number | null {
@@ -566,7 +643,7 @@ export function scheduleToCamel(row: ScheduleRow): Schedule {
     jobConfig: row.jobConfig ?? undefined,
     executionMode: row.executionMode === 'script' ? 'script' : 'agent',
     scriptConfig: parseScriptConfig(row.scriptConfig),
-    source: row.source === 'project' ? 'project' : 'user',
+    source: row.source === 'project' ? 'project' : row.source === 'bot' ? 'bot' : 'user',
     projectConfigId: row.projectConfigId ?? undefined,
     kind: row.kind,
     cronExpr: row.cronExpr,

@@ -31,7 +31,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-import { app, BrowserWindow } from 'electron';
+import { app } from 'electron';
 import { stripInternalWebCitations } from '@cindy/maker-shared/internal-citation';
 import { MAIN_OWNED_SEND_CONTEXT } from '@cindy/maker-core';
 
@@ -48,8 +48,9 @@ import {
   visibleModelUnion,
 } from '@cindy/model-providers';
 
-import { tapWindowBroadcast } from '../device-link/broadcast-tap.js';
+import { emitSessionCreated } from '../localDb/ipc/sessionCreatedBroadcast.js';
 import { getMaker } from '../maker-host/index.js';
+import { desktopSessionStorage } from '../maker-host/session-storage.js';
 import { resolveLenientRoute } from '../maker-host/model-route-guard.js';
 import { resolveLenientSessionRoute } from '../maker-host/model-route-guard-live.js';
 import {
@@ -97,6 +98,12 @@ import { ingestMedia, supportedMime as isCindyMediaMime } from '../cindy-media/i
 import { worktreeStore, WorktreeManager } from '../worktree/index.js';
 import { readImDefaultSettings } from '../im/defaultSettingsStore.js';
 import { getWorkspaceProviderSource } from './workspaceProviderSourceStore.js';
+import {
+  getWorkspacePref,
+  isWorkspacePrefsMigrated,
+  resolveWorkspacePrefOverrides,
+  type HookPrefsChannel,
+} from './workspacePrefsStore.js';
 import { getDesktopProviderService } from '../maker-host/createDesktopProviderService.js';
 import { beginHeadlessGhostSetupTurn } from '../mcp-integrations/ghostSetupInteractionSurface.js';
 import { observeHookTurn, type HookTurnObserver } from './turnObserver.js';
@@ -164,6 +171,19 @@ async function resolveNewSessionConfig(
     );
   }
 
+  const prefsChannel: HookPrefsChannel | null =
+    sourceIm === 'telegram' || sourceIm === 'x' || sourceIm === 'slack' ? sourceIm : null;
+  const workspaceAlias = workspaceCtx?.alias;
+  const localPref =
+    prefsChannel !== null && workspaceAlias
+      ? getWorkspacePref(prefsChannel, workspaceCtx.teamId, workspaceAlias)
+      : null;
+  const mergedOverrides = resolveWorkspacePrefOverrides(
+    localPref,
+    overrides,
+    prefsChannel !== null && workspaceAlias !== undefined && isWorkspacePrefsMigrated(prefsChannel),
+  );
+
   const resolved = resolveHookSessionConfig(
     {
       readDefaults: () =>
@@ -185,7 +205,7 @@ async function resolveNewSessionConfig(
           .permissionModes.map((pm) => pm.id),
       log,
     },
-    overrides,
+    mergedOverrides,
   );
 
   // 目录级来源偏好(纯本地, 用户在工作目录映射行显式选的来源)优先于草稿默认来源。
@@ -235,18 +255,9 @@ async function resolveNewSessionConfig(
 /**
  * 广播「新会话已建」给所有窗口 + device-link tap —— renderer sessionsStore
  * 收到即重拉列表, 新 hook 会话实时出现在侧边栏(不广播的话要等手动刷新)。
- * 与 fork.ts / cardActionHandler.ts / learn-host 同款(各模块本地副本是既有惯例)。
  */
 function broadcastSessionCreated(sessionId: string): void {
-  tapWindowBroadcast('local-db:sessions:created', { sessionId });
-  for (const win of BrowserWindow.getAllWindows()) {
-    if (win.isDestroyed()) continue;
-    try {
-      win.webContents.send('local-db:sessions:created', { sessionId });
-    } catch {
-      // best-effort UI refresh
-    }
-  }
+  emitSessionCreated(sessionId);
 }
 
 // ── turn 时长策略: hook 侧**不设任何**上限(2026-08-01 定) ────────────────────
@@ -636,6 +647,52 @@ export function createMakerHookSessionRunner(deps: {
           : {}),
         resumeSessionId,
       };
+      if (req.createOnly) {
+        if (!req.isNew) return fail('create-only requires a new task');
+        try {
+          // `/new` only needs a durable, sidebar-visible task boundary. Do not
+          // start an Agent process here: that turns a local metadata mutation
+          // into a slow websocket RPC and can leave server/client state split
+          // if the response times out. The first real message cold-opens this
+          // same row through the ordinary reuse path.
+          await desktopSessionStorage.create({
+            id: req.sessionId,
+            agentKind: effectiveAgentKind,
+            workDir: workingDir,
+            title: req.title ?? 'New task',
+            model: effectiveModel,
+            ...(req.workspaceKind !== undefined ? { workspaceKind: req.workspaceKind } : {}),
+            ...(effort !== undefined ? { effort } : {}),
+            permissionMode,
+          });
+          if (providerId) {
+            setSessionProvider(req.sessionId, providerId);
+            await setSessionProviderIdInDb(req.sessionId, providerId);
+          }
+          if (req.source?.im === 'telegram' || req.source?.im === 'x') {
+            await setSessionSourceInDb(req.sessionId, req.source.im);
+          }
+          await touchUserSendInDb(req.sessionId).catch((err) => {
+            log.warn(
+              `hook create-only touchUserSend failed: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          });
+          const wtMeta = worktreeStore.get(req.sessionId);
+          if (wtMeta) await setWorktreePathInDb(req.sessionId, wtMeta.path);
+          broadcastSessionCreated(req.sessionId);
+          return {
+            status: 'ok',
+            finalText: '',
+            errorMessage: '',
+            durationMs: Date.now() - startedAt,
+          };
+        } catch (err) {
+          if (worktreeStore.get(req.sessionId)) {
+            void WorktreeManager.removeWorktreeForSession(req.sessionId).catch(() => undefined);
+          }
+          return fail(err instanceof Error ? err.message : String(err));
+        }
+      }
       try {
         await prepareUnhealthySessionForSend(req.sessionId);
         session = await maker.createSession(createOpts);

@@ -31,8 +31,10 @@ import { ControlledBanner } from '@/features/remote-device/ControlledBanner';
 import { CredentialStoreBanner } from '@/components/layout/CredentialStoreBanner';
 import { useDeviceLinkRemoteProjects } from '@/features/device-link/useDeviceLinkRemoteProjects';
 import { pluginScheduleNavigationState } from '@/features/scheduler/lib/pluginScheduleCreateIntent';
+import { ScheduleSessionIndexOwner } from '@/features/scheduler/components/ScheduleSessionIndexOwner';
 import { FeatureSidebarSlotProvider } from '@/features/feature-context';
 import { useAppShortcut } from '@/hooks/useAppShortcut';
+import { isAppInteractionLocked } from '@/lib/appInteractionLock';
 import { useCloseShortcutShellOwner } from '@/hooks/useCloseWindowShortcut';
 import {
   addOrFocusSingletonTab,
@@ -79,7 +81,6 @@ import { useCorruptionRestoredToast } from '@/hooks/useCorruptionRestoredToast';
 import { useSchemaDriftWarningToast } from '@/hooks/useSchemaDriftWarningToast';
 import { useVoiceInputShortcutRecoveryToast } from '@/hooks/useVoiceInputShortcutRecoveryToast';
 import { usePluginRemovalNoticeToast } from '@/hooks/usePluginRemovalNoticeToast';
-import { usePluginUpgradeNoticeToast } from '@/hooks/usePluginUpgradeNoticeToast';
 import { requestProjectFocus } from '@/state/pendingProjectFocus';
 import { patchDraft } from '@/state/newMakerDraft';
 import { cn } from '@/lib/utils';
@@ -95,10 +96,14 @@ import {
 import { requestSessionSwitch } from '@/features/cc-agent/lib/sessionSwitchCommands';
 import { makeFolderPickerNewMakerRouteState } from '@/features/cc-agent/lib/newMakerRouteState';
 import { resolveSessionRoute } from '@/lib/orcaSessionIdentity';
+import { getBotProfiles } from '@/features/bots/botStore';
+import { botRouteForOwnedSession } from '@/features/bots/botSessionOwners';
 import { remoteProjectsStore } from '@/features/device-link/remoteProjectsStore';
 import {
   isAgentIslandVisibleSessionOwnedByWorkdirBrowseRoute,
+  isAgentIslandVisibleSessionOwnedByBotRoute,
   resolveAgentIslandVisibleSessionFromRouteTarget,
+  resolveAgentIslandVisibleSessionsFromPath,
   resolveAgentIslandVisibleSessionIdFromPath,
 } from '@/lib/agentIslandVisibleSessionRoute';
 
@@ -419,22 +424,23 @@ export function MainLayout() {
     }
   }, [sidebarPeek.peekState, isRailMode, handleRailModeChange]);
 
-  const routeSessionId = resolveAgentIslandVisibleSessionIdFromPath(location.pathname);
-  const splitVisibleSessionIds = useMemo(() => {
-    const splitSessionIds = getSplitSessionIds(splitGroup.root);
-    return routeSessionId && splitSessionIds.length >= 2
-      ? [...new Set([routeSessionId, ...splitSessionIds])]
-      : [];
-  }, [routeSessionId, splitGroup.root]);
+  const visibleSessions = useMemo(
+    () => resolveAgentIslandVisibleSessionsFromPath(
+      location.pathname,
+      getSplitSessionIds(splitGroup.root),
+    ),
+    [location.pathname, splitGroup.root],
+  );
 
   const syncAgentIslandVisibleSession = useCallback(() => {
     if (!isAgentIslandSupported()) return;
     if (!document.hasFocus()) return;
     if (isAgentIslandVisibleSessionOwnedByWorkdirBrowseRoute(location.pathname)) return;
+    if (isAgentIslandVisibleSessionOwnedByBotRoute(location.pathname)) return;
     void window.electronAPI.agentIsland?.setVisibleSession?.(
-      splitVisibleSessionIds.length >= 2 ? splitVisibleSessionIds : routeSessionId,
+      visibleSessions,
     );
-  }, [location.pathname, routeSessionId, splitVisibleSessionIds]);
+  }, [location.pathname, visibleSessions]);
 
   useEffect(() => {
     syncAgentIslandVisibleSession();
@@ -477,7 +483,6 @@ export function MainLayout() {
   useVoiceInputShortcutRecoveryToast();
   // 冷启动市场对账可能早于 Renderer 挂载；Main pending + 常驻 consume 保证清理不静默。
   usePluginRemovalNoticeToast();
-  usePluginUpgradeNoticeToast();
   // device-link 跨设备远程控制:同账号在线 + 开了被控的设备,其项目自动并入侧边栏
   useDeviceLinkRemoteProjects();
 
@@ -491,6 +496,12 @@ export function MainLayout() {
   currentPathRef.current = `${location.pathname}${location.search}`;
   const navigateToSession = useCallback(
     (sessionId: string, messageClientId?: string) => {
+      const botRoute = botRouteForOwnedSession(getBotProfiles(), sessionId);
+      if (botRoute) {
+        const target = botRoute;
+        if (currentPathRef.current !== target) navigate(target);
+        return;
+      }
       // device-link 远程会话本地无 row:resolveSessionRoute 内部的 sessionService.get
       // 会 miss → 远程 Orca lead/worker 被当普通会话路由,CCAgentSessionView 再
       // redirect 到 orca 路由时会丢 searchJump 锚点。传入远程镜像的 session 对象,
@@ -624,7 +635,7 @@ export function MainLayout() {
         return;
       }
       if (payload.type === 'new-session') {
-        patchDraft({ workingDir: payload.workingDir, extraDirs: [] });
+        patchDraft({ workingDir: payload.workingDir, extraDirs: [], writableDirs: [] });
         navigate('/cc-agent/new');
         return;
       }
@@ -1027,6 +1038,7 @@ export function MainLayout() {
 
   useEffect(() => {
     return window.electronAPI.onApplicationMenuCommand((command) => {
+      if (isAppInteractionLocked()) return;
       switch (command) {
         case 'open-about':
           navigate('/settings?tab=about');
@@ -1150,6 +1162,7 @@ export function MainLayout() {
 
   useEffect(() => {
     return subscribeWorkLouderCodexAction((action) => {
+      if (isAppInteractionLocked()) return true;
       if (action.type === 'keyboard') {
         const target =
           document.activeElement instanceof HTMLElement ? document.activeElement : document.body;
@@ -1168,7 +1181,7 @@ export function MainLayout() {
           navigate('/cc-agent/new');
           return true;
         case 'settings':
-          navigate('/settings?tab=shortcuts&workLouderCodex=1');
+          navigate('/settings?tab=shortcuts');
           return true;
         case 'manageTasks':
           navigate('/cc-agent/scheduled');
@@ -1187,6 +1200,9 @@ export function MainLayout() {
           return true;
         case 'navigateForward':
           navigate(1);
+          return true;
+        case 'toggleFullscreen':
+          void window.electronAPI?.toggleFullscreen?.();
           return true;
         case 'toggleSidebar':
           handleToggleSidebar();
@@ -1348,6 +1364,7 @@ export function MainLayout() {
     <FeatureSidebarSlotProvider
       isCollapsed={sidebarPeek.isPeekVisible ? false : isSidebarCollapsed || isRailMode}
     >
+      <ScheduleSessionIndexOwner />
       <div
         ref={rowRef}
         className={cn(

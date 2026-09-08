@@ -1,7 +1,7 @@
 /**
  * SidebarTopNav —— 侧栏顶部常驻动作/导航列表(取代原 HorizontalTabbar)。
  * ---------------------------------------------------------------------------
- * 一条同级、等权的列表行,按顺序:新建 / 自动任务 / Plugins /
+ * 一条同级、等权的列表行,按顺序:新建 / 自动任务 / Plugins / 伙伴 /
  * 最小化插件面板恢复入口(按需) / 搜索。
  *   - 新建 / 自动任务:项目(cc-agent)视图的动作 —— 在任意视图点击都跳回项目视图并执行。
  *   - Plugins:主视图切换(navigateToView),命中当前视图时高亮。
@@ -20,7 +20,7 @@
  */
 
 import { useCallback } from 'react';
-import { CirclePlus, Plug, Timer } from 'lucide-react';
+import { Bot, CirclePlus, Plug, Timer } from 'lucide-react';
 import { useNavigate, useMatch } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 
@@ -31,6 +31,7 @@ import { GhostPanelRestoreEntry } from '@/cindy-brain/GhostPanelRestoreEntry';
 import { useActiveMainView } from '@/hooks/useActiveMainView';
 import { SidebarInlineSearch } from '@/features/cc-agent/sidebar/SidebarInlineSearch';
 import { useConversationSearchContext } from '@/features/cc-agent/sidebar/conversationSearchContext';
+import { GhostMainViewNavEntries } from './GhostMainViewNavEntries';
 
 /** 列表行通用样式 —— 各行同款 pill 行。 */
 const ROW_CLASS =
@@ -126,6 +127,27 @@ export function SidebarTopNav({
       {hasGhostUnread && <AttentionDot size={6} className="ml-auto mr-0.5" />}
     </button>
   ) : null;
+  const botsRow = showScrollable ? (
+    <button
+      onClick={() => navigateToView('bots')}
+      className={cn(ROW_CLASS, activeKey === 'bots' && ROW_ACTIVE_CLASS)}
+      aria-label={t('sidebar.tabs.bots')}
+      aria-current={activeKey === 'bots' ? 'page' : undefined}
+    >
+      <Bot
+        size={15}
+        strokeWidth={1.8}
+        className={cn(
+          'shrink-0',
+          activeKey === 'bots'
+            ? 'text-sidebar-item-active-foreground'
+            : 'text-[var(--sidebar-nav-text)]',
+        )}
+      />
+      <span className="leading-none">{t('sidebar.tabs.bots')}</span>
+    </button>
+  ) : null;
+  const mainViewRows = showScrollable ? <GhostMainViewNavEntries variant="row" /> : null;
   const restoreRow = showScrollable ? (
     <GhostPanelRestoreEntry variant="row" className={ROW_CLASS} />
   ) : null;
@@ -146,6 +168,8 @@ export function SidebarTopNav({
         <div className="flex flex-col gap-0.5 pr-3 pl-3">
           {automationsRow}
           {pluginsRow}
+          {botsRow}
+          {mainViewRows}
           {restoreRow}
         </div>
         <div
@@ -186,6 +210,8 @@ export function SidebarTopNav({
       )}
       {automationsRow}
       {pluginsRow}
+      {botsRow}
+      {mainViewRows}
       {restoreRow}
       {searchRow}
     </div>

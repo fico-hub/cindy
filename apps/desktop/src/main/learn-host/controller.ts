@@ -19,6 +19,10 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 
 import { isTurnContinuationBoundaryEvent } from '@cindy/maker-shared/turn-continuation';
+import {
+  parseToolLoopErrorDetails,
+  type ToolLoopErrorDetails,
+} from '@cindy/maker-shared/tool-loop-error';
 
 import {
   LEARN_TERMINAL_STATUSES,
@@ -68,6 +72,13 @@ export class LearnError extends Error {
     super(message);
     this.name = 'LearnError';
   }
+}
+
+/** Terminal agent errors retain their stable projection while crossing the
+ * learn pipeline so persisted runs can be localized by the renderer. */
+interface LearnTerminalError extends Error {
+  reason?: string;
+  toolLoop?: ToolLoopErrorDetails;
 }
 
 /** 蒸馏 session 的窄化形态(maker Session 的子集,便于测试 fake)。 */
@@ -152,7 +163,7 @@ export interface LearnControllerDeps {
   /** 已装 skill 清单块("改 vs 加"决策依据;无 skill 返空串)。 */
   getInstalledSkillsIndex(): Promise<string>;
   /** hub 源:拉市场 skill 详情 + 全部已发布文件(PR3 注入;未注入时 hub 源报 INVALID_PARAMS)。 */
-  fetchHubSkill?: (slug: string) => Promise<{
+  fetchHubSkill?: (slug: string, catalogScope?: 'market' | 'team') => Promise<{
     name: string;
     description: string;
     content: string;
@@ -326,6 +337,9 @@ export class LearnController {
     if (req.sourceKind === 'hub' && req.hubSlug && !/^[a-z0-9][a-z0-9-]*$/.test(req.hubSlug)) {
       throw new LearnError('INVALID_PARAMS', `invalid hubSlug: ${req.hubSlug}`);
     }
+    if (req.sourceKind === 'hub' && req.hubCatalogScope && req.hubCatalogScope !== 'market' && req.hubCatalogScope !== 'team') {
+      throw new LearnError('INVALID_PARAMS', `invalid hubCatalogScope: ${String(req.hubCatalogScope)}`);
+    }
     if (req.sourceKind === 'hub' && !this.deps.fetchHubSkill) {
       throw new LearnError('INVALID_PARAMS', 'hub source is not available');
     }
@@ -350,6 +364,7 @@ export class LearnController {
       ...(dataOwnerId ? { dataOwnerId } : {}),
       input,
       ...(req.hubSlug ? { hubSlug: req.hubSlug } : {}),
+      ...(req.sourceKind === 'hub' ? { hubCatalogScope: req.hubCatalogScope ?? 'market' } : {}),
       ...(req.originSessionId ? { originSessionId: req.originSessionId } : {}),
       usedSessionEvidence: false,
       createdAt: this.now(),
@@ -363,7 +378,7 @@ export class LearnController {
       this.deps.logger.error('[learn] pipeline failed', { runId, error: String(err) });
       const current = this.deps.store.get(runId);
       if (current && current.status !== 'failed' && current.status !== 'cancelled') {
-        await this.fail(current, err instanceof Error ? err.message : String(err));
+        await this.fail(current, err instanceof Error ? err : String(err));
       }
     });
 
@@ -382,7 +397,7 @@ export class LearnController {
     let referenceFilesOmissions: Array<{ path: string; reason: string }> | undefined;
     let evidenceQuery = run.input;
     if (run.sourceKind === 'hub' && run.hubSlug && this.deps.fetchHubSkill) {
-      const hub = await this.deps.fetchHubSkill(run.hubSlug);
+      const hub = await this.deps.fetchHubSkill(run.hubSlug, run.hubCatalogScope ?? 'market');
       if (!hub) throw new LearnError('NOT_FOUND', `hub skill ${run.hubSlug} not found`);
       // fetch 的网络 await 期间可能被 cancel(cleanup 已删 staging):此处不设门
       // 的话 writeReferenceFiles 会把 _reference/ 整个重建成孤儿目录(自查)。
@@ -505,7 +520,7 @@ export class LearnController {
 
     const cleanMessage =
       run.sourceKind === 'hub'
-        ? `/learn hub:${run.hubSlug}`
+        ? `/learn hub:${run.hubCatalogScope ?? 'market'}:${run.hubSlug}`
         : run.sourceKind === 'session'
           ? '/learn (distill current conversation)'
           : `/learn ${run.input}`;
@@ -541,7 +556,7 @@ export class LearnController {
           resolve();
         } else if (this.deps.isTerminalErrorEvent(ev)) {
           off();
-          reject(new Error(extractErr(ev.data)));
+          reject(extractTerminalError(ev.data));
         }
       });
       this.active = { runId, session, stopListening: off, rejectTurn: reject };
@@ -949,7 +964,7 @@ export class LearnController {
       const provenance: LearnProvenance = {
         method: 'learn',
         sourceKind: run.sourceKind,
-        ...(run.hubSlug ? { sourceRef: run.hubSlug } : {}),
+        ...(run.hubSlug ? { sourceRef: `${run.hubCatalogScope ?? 'market'}:${run.hubSlug}` } : {}),
         usedSessionEvidence: run.usedSessionEvidence,
         personal: run.usedSessionEvidence, // 硬规则:含 session 证据 ⇒ personal,不可配置
         learnedAt: Math.floor(this.now() / 1000),
@@ -1115,11 +1130,14 @@ export class LearnController {
     this.active = null;
   }
 
-  private async fail(run: LearnRunPublic, error: string, assistantText?: string): Promise<void> {
+  private async fail(run: LearnRunPublic, error: string | Error, assistantText?: string): Promise<void> {
     await this.deps.staging.cleanup(run.runId);
+    const projection = error instanceof Error ? error as LearnTerminalError : undefined;
     await this.update(run, {
       status: 'failed',
-      error,
+      error: error instanceof Error ? error.message : error,
+      ...(projection?.reason ? { errorReason: projection.reason } : {}),
+      ...(projection?.toolLoop ? { toolLoop: projection.toolLoop } : {}),
       ...(assistantText ? { assistantText } : {}),
     });
   }
@@ -1158,11 +1176,19 @@ export class LearnController {
   }
 }
 
-function extractErr(data: unknown): string {
-  if (data && typeof data === 'object' && 'message' in data) {
-    return String((data as { message: unknown }).message);
-  }
-  return String(data);
+function extractTerminalError(data: unknown): LearnTerminalError {
+  const record = data && typeof data === 'object'
+    ? data as { message?: unknown; reason?: unknown; toolLoop?: unknown }
+    : undefined;
+  const error = new Error(
+    record?.message !== undefined && record.message !== null
+      ? String(record.message)
+      : String(data),
+  ) as LearnTerminalError;
+  if (typeof record?.reason === 'string') error.reason = record.reason;
+  const toolLoop = parseToolLoopErrorDetails(record?.toolLoop);
+  if (toolLoop) error.toolLoop = toolLoop;
+  return error;
 }
 
 function isRevisionTurnActivityEvent(ev: { type: string; data?: unknown }): boolean {

@@ -25,16 +25,13 @@
  * resolveEffectivePermissionMode 校准: 无显式偏好 → bypassPermissions(无人值守
  * 历史默认), 显式档不被当前 agent 支持 → 该 agent 最严档(绝不放宽)。
  *
- * 数据正本在 IM hook server 的 provider prefs 表：Slack 与 Telegram 按
- * provider 隔离；每个 provider 内与其 /model 卡使用同一份数据。hook 经
- * provider 对应的 IPC 走 WS 往返读写，命令卡改动经 provider 状态推送实时
- * 同步。写入的联动校准(换 agent 清模型、换模型校准 effort)仍走
- * hookWorkspacePrefsLogic.ts 的纯函数, 与 Slack /model 卡逐字段同语义。
+ * 数据正本在本机 hook-workspace-prefs.json。设置页离线可读可写；连上后
+ * 镜像到 hook server，只供 /model 卡展示和遥控。卡片在线改动经推送写回本机。
+ * 写入的联动校准仍走 hookWorkspacePrefsLogic.ts。
  *
  * 状态模型(禁用整体置灰而非增删行, 规则 7):
- *   - 连接未就绪 -> 禁用(提示行由宿主渲染一次, 不逐卡重复)
- *   - 已连接但未绑定 -> 禁用 + 「先完成绑定」
- *   - HOOK_PREFS_TIMEOUT -> 禁用 + 「服务器版本过旧」+ 重试
+ *   - 开关未开 / 未绑定 -> 禁用 + 对应提示
+ *   - 已绑定但 hook 掉线 -> 仍可编辑, 提示改动保存在本机
  * 颜色一律走主题 token(规则 16)。
  */
 
@@ -118,7 +115,7 @@ export interface HookWorkspacePrefsState {
     workspace: string,
     patch: HookPrefsPatch,
     alsoProviderSource?: string | null,
-  ) => void;
+  ) => Promise<boolean>;
   /** (multi-team)可用绑定清单(未 displaced); 单绑定/老 server 时 ≤1 条。 */
   teams: Array<{ teamId: string; teamName: string | null }>;
   /** 当前偏好归属 team(teams 非空时必有值; 选中项失效自动回落首个)。 */
@@ -178,18 +175,21 @@ export function useHookWorkspacePrefs(
   const neutralView = neutral && hook !== null ? hook[provider as NeutralPrefsProvider] : null;
   const neutralBindingId =
     neutralView?.binding?.state === 'confirmed' ? neutralView.binding.bindingId : null;
+  const enabled = neutral ? neutralView?.enabled === true : hook?.enabled === true;
   const connected = neutral
-    ? neutralView?.enabled === true && neutralView.available && neutralView.status === 'connected'
-    : hook?.enabled === true && hook.status === 'connected';
+    ? enabled && Boolean(neutralView?.available) && neutralView?.status === 'connected'
+    : enabled && hook?.status === 'connected';
   const providerBindingConfirmed = !neutral || neutralView?.binding?.state === 'confirmed';
-  const readyIdentity =
-    connected && providerBindingConfirmed
-      ? neutral
-        ? neutralBindingId === null
-          ? null
-          : `${provider}:${neutralBindingId}`
-        : 'slack'
-      : null;
+  // 本机正本不依赖 WS：已绑定即可拉本地快照。未绑定仍不发起（避免空身份）。
+  const readyIdentity = providerBindingConfirmed
+    ? neutral
+      ? neutralBindingId === null
+        ? null
+        : `${provider}:${neutralBindingId}`
+      : enabled
+        ? 'slack'
+        : null
+    : null;
   // Initialised to null (never a real identity) so the ready-edge effect below
   // is the single fetch trigger: it performs the first fetch on mount only when
   // the provider is actually reachable, and cannot double-fetch with a separate
@@ -222,9 +222,7 @@ export function useHookWorkspacePrefs(
     } catch (err) {
       if (revision !== fetchRevisionRef.current) return;
       const code = extractIpcError(err)?.code;
-      // HOOK_NOT_CONNECTED 静默(连接态提示由 requireConnected 分支呈现);
-      // 其余一律进 unavailable —— 绝不让下拉无解释地死着(超时 = server 太旧,
-      // 通道不存在 = 桌面端 main 未重启到新版, 都给同一句提示 + 重试)
+      // GET 已改走本机文件, 不应再出现 HOOK_NOT_CONNECTED; 仍静默以免旧桌面误报。
       if (code !== 'HOOK_NOT_CONNECTED') setLoadError('unavailable');
     }
   }, [provider]);
@@ -306,7 +304,12 @@ export function useHookWorkspacePrefs(
 
   // (multi-team)偏好归属 team: 可选清单 = 未 displaced 的绑定; 选中项失效
   // (解绑/被顶)时自动回落首个, 不留悬空选择
-  const multiTeam = provider === 'slack' && hook?.serverMultiTeam === true;
+  // 离线冷启动 welcome 还没回来时 serverMultiTeam 是 false，但 bindings
+  // 缓存已经能区分 multi-team。有未 displaced 行就按多绑定写 teamId，
+  // 避免离线改动落成 null 行、重连后无法镜像到对应 workspace。
+  const multiTeam =
+    provider === 'slack' &&
+    (hook?.serverMultiTeam === true || (hook?.bindings ?? []).some((b) => !b.displaced));
   const teams = useMemo(
     () =>
       (provider === 'slack' ? (hook?.bindings ?? []) : [])
@@ -395,7 +398,7 @@ export function useHookWorkspacePrefs(
             patch,
             multiTeam ? selectedTeamId : undefined,
           );
-      void request
+      return request
         .then((res) => {
           // 来源落地在快照守卫**之前**(codex review): invoke 成功 = 远端已确认
           // 本次 (model, effort) 写入 —— 这一事实不因「更新的快照先到」而失效;
@@ -404,7 +407,7 @@ export function useHookWorkspacePrefs(
           if (alsoProviderSource !== undefined) {
             applyProviderSource(workspace, alsoProviderSource);
           }
-          if (revision !== fetchRevisionRef.current) return;
+          if (revision !== fetchRevisionRef.current) return true;
           const nextPrefs: HookPrefsView | ProviderPrefsView = res.prefs;
           if (
             isNeutralPrefsProvider(provider) &&
@@ -412,19 +415,21 @@ export function useHookWorkspacePrefs(
               nextPrefs.provider !== provider ||
               nextPrefs.bindingId !== neutralBindingIdRef.current)
           ) {
-            return;
+            return true;
           }
-          if (provider === 'slack' && isProviderPrefsView(nextPrefs)) return;
+          if (provider === 'slack' && isProviderPrefsView(nextPrefs)) return true;
           fetchRevisionRef.current += 1;
           setPrefsView(nextPrefs);
           setLoadError(null);
+          return true;
         })
         .catch((err: unknown) => {
-          if (revision !== fetchRevisionRef.current) return;
+          if (revision !== fetchRevisionRef.current) return false;
           const ipcErr = extractIpcError(err);
           if (ipcErr?.code === 'HOOK_PREFS_TIMEOUT') setLoadError('unavailable');
           toast.error(ipcErr?.message ?? t('settings.tina.prefs.toast.saveFailed'));
           void fetchPrefs();
+          return false;
         })
         .finally(() => {
           if (mutationRevision === mutationRevisionRef.current) setPendingWs(null);
@@ -441,19 +446,19 @@ export function useHookWorkspacePrefs(
         ? 'settings.tina.prefs.providerX'
         : 'settings.tina.prefs.providerSlack',
   );
-  const hint = !connected
-    ? t('settings.tina.prefs.requireConnected', { provider: providerLabel })
-    : loadError === 'unavailable'
-      ? t('settings.tina.prefs.serverUnsupported')
-      : !providerBindingConfirmed || (activePrefsView !== null && !bound)
-        ? t('settings.tina.prefs.requireBinding', { provider: providerLabel })
+  const hint = loadError === 'unavailable'
+    ? t('settings.tina.prefs.serverUnsupported')
+    : !providerBindingConfirmed || (activePrefsView !== null && !bound)
+      ? t('settings.tina.prefs.requireBinding', { provider: providerLabel })
+      : !connected
+        ? t('settings.tina.prefs.offlineLocal', { provider: providerLabel })
         : null;
 
   return {
     prefsFor,
     providerSourceFor,
     applyProviderSource,
-    editable: connected && bound && loadError === null,
+    editable: Boolean(enabled) && bound && loadError === null,
     pendingWs,
     hint,
     retry: loadError === 'unavailable' ? () => void fetchPrefs() : null,
@@ -541,7 +546,7 @@ export function WorkspacePrefsEditor({
   /** 落一个模型选择(分段行与 flat 行共用): 随手写入 (agent, model) 配对并校准 effort。 */
   const applyModel = (next: string) => {
     if (next === prefs.model || eff.agentKind.id === null) return;
-    state.applyPatch(
+    return state.applyPatch(
       alias,
       patchForModelChange(eff.agentKind.id, next, prefs, toPrefsCaps(effAgentCaps)),
     );
@@ -632,7 +637,7 @@ export function WorkspacePrefsEditor({
           // 见 applyPatch 的 alsoProviderSource 注释)。目标行的 provider-specific
           // effort 由共享 ModelSelector 回传;旧调用方未提供时才回落本地记忆。
           onProviderChange={(providerId, modelId, reconciledEffort) => {
-            if (eff.agentKind.id === null) return;
+            if (eff.agentKind.id === null) return false;
             const caps = toPrefsCaps(effAgentCaps);
             if (modelId) {
               const patch = patchForModelChange(eff.agentKind.id, modelId, prefs, caps);
@@ -650,14 +655,14 @@ export function WorkspacePrefsEditor({
                   patch.effort = remembered;
                 }
               }
-              state.applyPatch(alias, patch, providerId);
+              return state.applyPatch(alias, patch, providerId);
             } else {
               state.applyProviderSource(alias, providerId);
             }
           }}
           onModelChange={applyModel}
           onEffortChange={(next) => {
-            if (next !== prefs.effort) state.applyPatch(alias, { effort: next });
+            if (next !== prefs.effort) return state.applyPatch(alias, { effort: next });
           }}
         />
       </PrefsField>

@@ -12,7 +12,17 @@
  * resume 路径、启动 RPC 也不会即时拒),控制流本身才是被测对象。
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -21,6 +31,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const knobs = vi.hoisted(() => ({
   ctorThrows: false,
   getStateRejects: false,
+  abortRejects: false,
   getStateGate: null as Promise<void> | null,
   closeRejects: false,
   closeFailuresRemaining: 0,
@@ -81,6 +92,9 @@ vi.mock('../rpc-client.js', () => ({
         if (knobs.getStateRejects) throw new Error('get_state rejected (mock)');
         return { success: true, data: { sessionFile: '/mock/session.jsonl', model: { contextWindow: 200000 } } };
       }
+      if (cmd.type === 'abort' && knobs.abortRejects) {
+        return { success: false, error: 'abort rejected (mock)' };
+      }
       // switch_session / set_thinking_level / set_auto_compaction / get_entries 等一律成功。
       return { success: true, data: { entries: [] } };
     }
@@ -127,6 +141,7 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
   beforeEach(() => {
     knobs.ctorThrows = false;
     knobs.getStateRejects = false;
+    knobs.abortRejects = false;
     knobs.getStateGate = null;
     knobs.closeRejects = false;
     knobs.closeFailuresRemaining = 0;
@@ -176,6 +191,18 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
       },
       resolvePiGatewayModelApi: () => 'openai-responses',
       resolvePiAgentHome: () => agentHome,
+      spawnPiSubagentRunner: () => {
+        const handle = {
+          pid: 4321,
+          killed: false,
+          once(event: 'spawn' | 'error' | 'exit' | 'close', listener: (...args: unknown[]) => void) {
+            if (event === 'spawn') queueMicrotask(listener);
+            return handle;
+          },
+          kill: () => true,
+        };
+        return handle as never;
+      },
       registerPiProxySession: () => () => {
         // Detached Subagent leases intentionally dispose after close. Ignore a previous
         // test's late lease callback instead of charging it to the next test's counters.
@@ -1059,6 +1086,68 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     expect(control).not.toHaveBeenCalled();
   });
 
+  it.each((['navigation', 'process-exit'] as const).flatMap((boundary) =>
+    (['allow', 'block', 'ask'] as const).flatMap((verdict) =>
+      (['confirm', 'input'] as const).map((method) => ({ boundary, verdict, method }))),
+  ))('parks a late Auto $verdict after $boundary ($method) until a current surface reviews it', async ({ boundary, verdict, method }) => {
+    let releaseReview!: (value: { verdict: typeof verdict }) => void;
+    const reviewGate = new Promise<{ verdict: typeof verdict }>((resolve) => { releaseReview = resolve; });
+    const run = pendingSubagentRun({ toolName: 'bash', input: { command: 'printf hi > /outside/report.txt' } }, {}, method);
+    const list = vi.spyOn(piSubagentRuns, 'listPiSubagentRuns').mockResolvedValue([run]);
+    vi.spyOn(piSubagentRuns, 'countPiSubagentRunDirectories').mockResolvedValue(1);
+    const control = vi.spyOn(piSubagentRuns, 'controlPiSubagentRuns').mockResolvedValue(1);
+    const review = vi.fn<NonNullable<AgentDeps['reviewAutoPermissionAction']>>(() => reviewGate);
+    const resolver = vi.fn(async () => ({ kind: 'permission', behavior: 'allow' }) as const);
+    const handle = await new PiAgent(buildDeps({ reviewAutoPermissionAction: review }))
+      .startSession({ ...opts(), permissionMode: 'auto' });
+    handle.setInteractionResolver(resolver);
+    await vi.waitFor(() => expect(review).toHaveBeenCalledOnce());
+    if (boundary === 'navigation') await handle.close({ reason: 'navigation' });
+    else knobs.onExit?.({ code: 1, signal: null });
+    releaseReview({ verdict });
+    // Several supervisor polls must not consume or repeatedly re-review the parked request.
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(control).not.toHaveBeenCalled();
+    expect(resolver).not.toHaveBeenCalled();
+    expect(review).toHaveBeenCalledOnce();
+
+    if (boundary === 'process-exit') await handle.close({ reason: 'navigation' });
+    let reopened: Awaited<ReturnType<PiAgent['startSession']>> | undefined;
+    if (method === 'confirm') {
+      const freshReview = vi.fn(async () => ({ verdict: 'block' as const }));
+      reopened = await new PiAgent(buildDeps({ reviewAutoPermissionAction: freshReview }))
+        .startSession({ ...opts(), sessionInstanceId: 'reopened-auto', permissionMode: 'auto' });
+      await vi.waitFor(() => expect(control).toHaveBeenCalledOnce(), { timeout: 3_000 });
+      expect(freshReview).toHaveBeenCalledOnce();
+    } else {
+      // Rewiring the existing detached handle must not reuse its cached pre-close allow.
+      review.mockResolvedValue({ verdict: 'block' });
+      handle.setInteractionResolver(resolver);
+      await vi.waitFor(() => expect(control).toHaveBeenCalledOnce(), { timeout: 3_000 });
+      expect(review).toHaveBeenCalledTimes(2);
+    }
+    expect(control).toHaveBeenCalledWith(expect.any(String), run.taskId, 'approval', expect.objectContaining(
+      method === 'input' ? { value: 'auto-review-deny' } : { confirmed: false },
+    ));
+    list.mockResolvedValue([]);
+    await reopened?.close({ reason: 'navigation' });
+  });
+
+  it('keeps Auto approvals that start after detaching under that lifecycle', async () => {
+    const list = vi.spyOn(piSubagentRuns, 'listPiSubagentRuns').mockResolvedValue([]);
+    vi.spyOn(piSubagentRuns, 'countPiSubagentRunDirectories').mockResolvedValue(1);
+    const control = vi.spyOn(piSubagentRuns, 'controlPiSubagentRuns').mockResolvedValue(1);
+    const review = vi.fn(async () => ({ verdict: 'allow' as const }));
+    const handle = await new PiAgent(buildDeps({ reviewAutoPermissionAction: review }))
+      .startSession({ ...opts(), permissionMode: 'auto' });
+    await handle.close({ reason: 'navigation' });
+    const run = pendingSubagentRun({ toolName: 'bash', input: { command: 'printf hi > /outside/report.txt' } });
+    list.mockResolvedValue([run]);
+    await vi.waitFor(() => expect(control).toHaveBeenCalledWith(expect.any(String), run.taskId, 'approval', expect.objectContaining({ confirmed: true })), { timeout: 3_000 });
+    expect(review).toHaveBeenCalledOnce();
+    list.mockResolvedValue([]);
+  });
+
   it('stays idempotent over a repeated account-boundary close', async () => {
     let approvalGeneration = 0;
     vi.spyOn(piSubagentRuns, 'listPiSubagentRuns').mockImplementation(async () => {
@@ -1483,6 +1572,31 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     },
   );
 
+
+  it.each(['before-review', 'during-review'] as const)('retains durable child authority when root settles %s', async (boundary) => {
+    const run = pendingSubagentRun({ toolName: 'unknown_sender', input: { action: 'send' } });
+    const list = vi.spyOn(piSubagentRuns, 'listPiSubagentRuns').mockResolvedValue([]);
+    const control = vi.spyOn(piSubagentRuns, 'controlPiSubagentRuns').mockResolvedValue(1);
+    let release!: (decision: { verdict: 'allow' }) => void;
+    const review = vi.fn<NonNullable<AgentDeps['reviewAutoPermissionAction']>>(() => new Promise((resolve) => { release = resolve; }));
+    const handle = await new PiAgent(buildDeps({ reviewAutoPermissionAction: review })).startSession({ ...opts(), permissionMode: 'auto' });
+    const resolver = vi.fn(async () => ({ kind: 'permission', behavior: 'deny' }) as const);
+    handle.setInteractionResolver(resolver);
+    await handle.send({ type: 'user', content: 'Continue the approved child work.' }, {
+      turnPermissionPolicy: { origin: { kind: 'im', channel: 'telegram' }, confirmationSurface: 'channel',
+        autoReviewContext: { requesterAuthority: 'guest', source: 'group' }, forceConfirmToolCall: () => true },
+    });
+    if (boundary === 'before-review') knobs.onEvent?.({ type: 'agent_settled' });
+    list.mockResolvedValue([run]);
+    await vi.waitFor(() => expect(review).toHaveBeenCalledOnce(), { timeout: 3_000 });
+    if (boundary === 'during-review') knobs.onEvent?.({ type: 'agent_settled' });
+    expect(review.mock.calls[0][0].authorizationContext).toEqual({ requesterAuthority: 'guest', source: 'group' });
+    release({ verdict: 'allow' });
+    await vi.waitFor(() => expect(control).toHaveBeenCalledWith(expect.any(String), run.taskId, 'approval', expect.objectContaining({ confirmed: true })), { timeout: 3_000 });
+    expect(resolver).not.toHaveBeenCalled();
+    await handle.close();
+  });
+
   it('preserves Auto-review denial for durable Subagent child tools', async () => {
     const run = pendingSubagentRun({
       toolName: 'bash',
@@ -1603,6 +1717,34 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     await handle.close({ reason: 'navigation' });
   });
 
+  it.each(['allow', 'block', 'ask'] as const)('reviews adopted approvals with current evidence: %s', async (verdict) => {
+    const input = { path: 'a.txt', content: 'PRIVATE_ADOPTED_FILE_BODY' };
+    const run = pendingSubagentRun({ toolName: 'write', input,
+      resolvedWritePath: path.join(cwd, 'a.txt'), resolvedWritableRoots: [cwd],
+    }, { runtimeOwnerId: ownerId('earlier-handle-instance'), parentSessionId: `auto-adopt-${verdict}` });
+    vi.spyOn(piSubagentRuns, 'listPiSubagentRuns').mockResolvedValue([run]);
+    const control = vi.spyOn(piSubagentRuns, 'controlPiSubagentRuns').mockResolvedValue(1);
+    const review = vi.fn<NonNullable<AgentDeps['reviewAutoPermissionAction']>>(async () => ({ verdict }));
+    const resolver = vi.fn(async () => ({ kind: 'permission', behavior: 'deny' }) as const);
+    const handle = await new PiAgent(buildDeps({ reviewAutoPermissionAction: review })).startSession({
+      ...opts(), sessionId: `auto-adopt-${verdict}`, sessionInstanceId: `new-${verdict}`, permissionMode: 'auto',
+    });
+    handle.setInteractionResolver(resolver);
+    await vi.waitFor(() => expect(control).toHaveBeenCalledWith(expect.any(String), run.taskId, 'approval', expect.objectContaining({ confirmed: verdict === 'allow' })), { timeout: 3_000 });
+    expect(review).toHaveBeenCalledOnce();
+    const request = review.mock.calls[0]?.[0];
+    expect(request?.userIntent).toBe(''); // Child text must never masquerade as human authorization.
+    expect(JSON.parse((request?.action as { description: string }).description)).toMatchObject({
+      toolName: 'write',
+      context: expect.stringContaining('Original user authorization and child cwd are unavailable'),
+      executionEvidence: { action: { path: 'a.txt', resolvedPath: path.join(cwd, 'a.txt'), resolvedWritableRoots: [cwd] } },
+    });
+    expect(JSON.stringify(request)).not.toContain('PRIVATE_ADOPTED_FILE_BODY');
+    expect(resolver).toHaveBeenCalledTimes(verdict === 'ask' ? 1 : 0);
+    if (verdict === 'ask') expect(resolver).toHaveBeenCalledWith(expect.objectContaining({ input }));
+    await handle.close();
+  });
+
   it('never lets a Full Access session auto-allow an adopted approval', async () => {
     // Delivery surface only: the child was spawned under an earlier session's
     // mode, so reopening under Full Access must not launder its pending
@@ -1640,6 +1782,8 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     const run = pendingSubagentRun({
       toolName: 'write',
       input: { path: 'tmp/auto-safe.txt', content: 'safe' },
+      resolvedWritePath: path.join(cwd, 'tmp', 'auto-safe.txt'),
+      resolvedWritableRoots: [cwd],
     });
     vi.spyOn(piSubagentRuns, 'listPiSubagentRuns').mockResolvedValue([run]);
     const control = vi.spyOn(piSubagentRuns, 'controlPiSubagentRuns').mockResolvedValue(1);
@@ -1658,6 +1802,115 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     ));
     expect(resolver).not.toHaveBeenCalled();
     await handle.close();
+  });
+
+  it('reviews older durable bridge calls with missing canonical evidence', async () => {
+    const run = pendingSubagentRun({
+      toolName: 'write',
+      input: { path: 'tmp/legacy-safe.txt', content: 'legacy' },
+      resolvedWritePath: path.join(cwd, 'tmp', 'legacy-safe.txt'),
+    });
+    vi.spyOn(piSubagentRuns, 'listPiSubagentRuns').mockResolvedValue([run]);
+    const control = vi.spyOn(piSubagentRuns, 'controlPiSubagentRuns').mockResolvedValue(1);
+    const review = vi.fn(async () => ({ verdict: 'allow' as const }));
+    const resolver = vi.fn(async () => ({ kind: 'permission', behavior: 'deny' }) as const);
+    const handle = await new PiAgent(buildDeps({ reviewAutoPermissionAction: review })).startSession({
+      ...opts(),
+      permissionMode: 'auto',
+    });
+    handle.setInteractionResolver(resolver);
+
+    await vi.waitFor(() => expect(control).toHaveBeenCalledWith(
+      expect.any(String),
+      run.taskId,
+      'approval',
+      expect.objectContaining({ confirmed: true }),
+    ));
+    expect(review).toHaveBeenCalledWith(expect.objectContaining({
+      action: { kind: 'file-write', path: 'tmp/legacy-safe.txt',
+        resolvedPath: path.join(cwd, 'tmp', 'legacy-safe.txt'), resolvedWritableRoots: null },
+    }));
+    expect(resolver).not.toHaveBeenCalled();
+    await handle.close();
+  });
+
+  it('passes durable Subagent canonical escapes to AI for rejection', async () => {
+    const writableDir = mkdtempSync(path.join(tmpdir(), 'pi-subagent-writable-'));
+    const outsideDir = mkdtempSync(path.join(tmpdir(), 'pi-subagent-outside-'));
+    const run = pendingSubagentRun({
+      toolName: 'write',
+      input: { path: path.join(writableDir, 'linked', 'result.txt'), content: 'unsafe' },
+      resolvedWritePath: path.join(outsideDir, 'result.txt'),
+      resolvedWritableRoots: [cwd, writableDir],
+    });
+    vi.spyOn(piSubagentRuns, 'listPiSubagentRuns').mockResolvedValue([run]);
+    const control = vi.spyOn(piSubagentRuns, 'controlPiSubagentRuns').mockResolvedValue(1);
+    const review = vi.fn(async () => ({ verdict: 'block' as const }));
+    const resolver = vi.fn(async () => ({ kind: 'permission', behavior: 'deny' }) as const);
+    const handle = await new PiAgent(buildDeps({ reviewAutoPermissionAction: review })).startSession({
+      ...opts(),
+      permissionMode: 'auto',
+      writableDirs: [writableDir],
+    });
+    handle.setInteractionResolver(resolver);
+
+    try {
+      await vi.waitFor(() => expect(control).toHaveBeenCalledWith(
+        expect.any(String),
+        run.taskId,
+        'approval',
+        expect.objectContaining({ confirmed: false }),
+      ));
+      expect(review).toHaveBeenCalledWith(expect.objectContaining({
+        action: { kind: 'file-write', path: path.join(writableDir, 'linked', 'result.txt'),
+          resolvedPath: path.join(outsideDir, 'result.txt'), resolvedWritableRoots: [cwd, writableDir] },
+      }));
+      expect(resolver).not.toHaveBeenCalled();
+    } finally {
+      await handle.close();
+      rmSync(writableDir, { recursive: true, force: true });
+      rmSync(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it('reuses Auto-review when a durable Subagent writable root is itself a link', async () => {
+    const realWritableDir = mkdtempSync(path.join(tmpdir(), 'pi-subagent-real-writable-'));
+    const linkParent = mkdtempSync(path.join(tmpdir(), 'pi-subagent-linked-writable-'));
+    const linkedWritableDir = path.join(linkParent, 'output');
+    symlinkSync(
+      realWritableDir,
+      linkedWritableDir,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    const run = pendingSubagentRun({
+      toolName: 'write',
+      input: { path: path.join(linkedWritableDir, 'result.txt'), content: 'safe' },
+      resolvedWritePath: path.join(realpathSync(realWritableDir), 'result.txt'),
+      resolvedWritableRoots: [cwd, realpathSync(realWritableDir)],
+    });
+    vi.spyOn(piSubagentRuns, 'listPiSubagentRuns').mockResolvedValue([run]);
+    const control = vi.spyOn(piSubagentRuns, 'controlPiSubagentRuns').mockResolvedValue(1);
+    const resolver = vi.fn(async () => ({ kind: 'permission', behavior: 'deny' }) as const);
+    const handle = await new PiAgent(buildDeps()).startSession({
+      ...opts(),
+      permissionMode: 'auto',
+      writableDirs: [linkedWritableDir],
+    });
+    handle.setInteractionResolver(resolver);
+
+    try {
+      await vi.waitFor(() => expect(control).toHaveBeenCalledWith(
+        expect.any(String),
+        run.taskId,
+        'approval',
+        expect.objectContaining({ confirmed: true }),
+      ));
+      expect(resolver).not.toHaveBeenCalled();
+    } finally {
+      await handle.close();
+      rmSync(linkParent, { recursive: true, force: true });
+      rmSync(realWritableDir, { recursive: true, force: true });
+    }
   });
 
   it('keeps risky durable Subagent Auto actions behind the real Cindy prompt', async () => {
@@ -1752,6 +2005,32 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     expect(proxyDisposed).toBe(2);
   });
 
+  /**
+   * Cindy Bot 会话的 Maker Memory scope key(`bot:<botId>`,由主进程
+   * botProfileRuntime 派生)必须随 MCP 桥 ctx 下发。prompt 段的记忆索引读的就是
+   * 这个 key;ctx 上丢掉它,cindy_memory 的 withStore 会回落到 workingDir 键,
+   * 于是「读伙伴记忆、写项目记忆」——伙伴记忆终验实测到的两张皮。
+   */
+  it('threads makerMemoryScopeKey into the MCP bridge session ctx', async () => {
+    const agent = new PiAgent(buildDeps());
+    const handle = await agent.startSession({
+      ...opts(),
+      makerMemoryScopeKey: 'bot:bot-release-helper',
+    });
+    expect(preparedMcpContext).toMatchObject({
+      workingDir: cwd,
+      memoryScopeKey: 'bot:bot-release-helper',
+    });
+    await handle.close();
+  });
+
+  it('omits memoryScopeKey for ordinary tasks (workdir memory keeps its own key rule)', async () => {
+    const agent = new PiAgent(buildDeps());
+    const handle = await agent.startSession(opts());
+    expect(preparedMcpContext).not.toHaveProperty('memoryScopeKey');
+    await handle.close();
+  });
+
   it('graceful stop uses only the Pi abort RPC and keeps the process alive', async () => {
     const handle = await new PiAgent(buildDeps()).startSession(opts());
     knobs.onEvent?.({ type: 'message_start' });
@@ -1760,6 +2039,67 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     await expect(handle.requestGracefulStop?.()).resolves.toBeUndefined();
     expect(knobs.requests).toEqual(['abort']);
     expect(knobs.closeCount).toBe(0);
+
+    await handle.close();
+  });
+
+  it('does not surface an aborted gateway error when Host stop beats agent_start', async () => {
+    const handle = await new PiAgent(buildDeps()).startSession(opts());
+    const events: Array<{ type: string; data?: unknown }> = [];
+    void (async () => {
+      for await (const event of handle.events()) events.push(event);
+    })();
+    const rawError = 'OpenAI Responses stream ended before a terminal response event';
+
+    await handle.send({ type: 'user', content: 'start a Pi turn' });
+    await handle.abort();
+    knobs.onEvent?.({ type: 'agent_start' });
+    knobs.onEvent?.({
+      type: 'message_end',
+      message: {
+        role: 'assistant',
+        content: [],
+        stopReason: 'aborted',
+        errorMessage: rawError,
+      },
+    });
+    knobs.onEvent?.({ type: 'agent_settled' });
+
+    await vi.waitFor(() => expect(events.some((event) => event.type === 'done')).toBe(true));
+    expect(events.filter((event) => event.type === 'error')).toHaveLength(0);
+
+    await handle.close();
+  });
+
+  it('keeps a real gateway disconnect resumable when the Pi abort RPC is rejected', async () => {
+    knobs.abortRejects = true;
+    const handle = await new PiAgent(buildDeps()).startSession(opts());
+    const events: Array<{ type: string; data?: unknown }> = [];
+    void (async () => {
+      for await (const event of handle.events()) events.push(event);
+    })();
+    const rawError = 'OpenAI Responses stream ended before a terminal response event';
+
+    await handle.send({ type: 'user', content: 'start a Pi turn' });
+    await handle.abort();
+    knobs.onEvent?.({ type: 'agent_start' });
+    knobs.onEvent?.({
+      type: 'message_end',
+      message: {
+        role: 'assistant',
+        content: [],
+        stopReason: 'aborted',
+        errorMessage: rawError,
+      },
+    });
+    knobs.onEvent?.({ type: 'agent_settled' });
+
+    await vi.waitFor(() => expect(events.some((event) => event.type === 'error')).toBe(true));
+    expect(events.filter((event) => event.type === 'error')).toEqual([
+      expect.objectContaining({
+        data: expect.objectContaining({ message: rawError, isTerminal: true }),
+      }),
+    ]);
 
     await handle.close();
   });
@@ -1802,8 +2142,8 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     expect(repeatedArgValues(args, '--extension')).toEqual([
       // 轮 40-w4-t15:argv 里的 extension 路径是 posix join(远端派生路径统一
       // POSIX),对比也用 posix —— 平台 path.join 在 Windows 拼反斜杠不匹配。
-      path.posix.join(configHome, 'extensions', 'cindy-bridge.ts'),
-      path.posix.join(configHome, 'extensions', 'cindy-subagent.ts'),
+      path.posix.join(configHome, 'internal-extensions', 'cindy-bridge.ts'),
+      path.posix.join(configHome, 'internal-extensions', 'cindy-subagent.ts'),
     ]);
     await vi.waitFor(() => {
       expect(handle.getRuntimeCapabilities?.()?.projectResources).toEqual({
@@ -2043,6 +2383,49 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     await waitFor(() => !existsSync(home2));
   });
 
+  it.each([
+    ['failure', 'pi list failed at /private/package-home'],
+    ['timeout', 'pi list timed out after 30000ms'],
+  ])('fails local startup explicitly when native package projection has a %s', async (_kind, detail) => {
+    let configHomeDuringProjection = '';
+    let runtimeFilesDuringProjection: string[] = [];
+    const resolvePiNativePackagePaths = vi.fn(async () => {
+      const runTmp = path.join(agentHome, 'run-tmp');
+      const configHomes = readdirSync(runTmp);
+      expect(configHomes).toHaveLength(1);
+      configHomeDuringProjection = path.join(runTmp, configHomes[0]!);
+      expect(existsSync(path.join(configHomeDuringProjection, 'models.json'))).toBe(true);
+      const runtimeDir = path.join(agentHome, 'runtime');
+      runtimeFilesDuringProjection = readdirSync(runtimeDir)
+        .filter((name) => name.startsWith('perm-') || name.startsWith('subagent-'))
+        .map((name) => path.join(runtimeDir, name));
+      expect(runtimeFilesDuringProjection).toHaveLength(2);
+      throw new Error(detail);
+    });
+    const agent = new PiAgent(buildDeps({ resolvePiNativePackagePaths }));
+
+    await expect(agent.startSession({
+      sessionId: 'native-package-projection-failed',
+      workingDir: cwd,
+      model: 'm',
+    })).rejects.toThrow(
+      'Package state is unavailable. Restart Cindy and try again.',
+    );
+    expect(resolvePiNativePackagePaths).toHaveBeenCalledOnce();
+    expect(knobs.spawnedArgs).toEqual([]);
+    expect(disposed).toBe(1);
+    await waitFor(() => !existsSync(configHomeDuringProjection));
+    await waitFor(() => runtimeFilesDuringProjection.every((file) => !existsSync(file)));
+    const reviewHandle = await agent.startSession({
+      sessionId: 'native-package-review',
+      workingDir: cwd,
+      model: 'm',
+      reviewMode: true,
+    });
+    expect(resolvePiNativePackagePaths).toHaveBeenCalledOnce();
+    await reviewHandle.close();
+  });
+
   it('keeps an approved session isolated from a concurrent Review session', async () => {
     const skillPath = path.join(cwd, '.pi', 'skills', 'approved-only');
     mkdirSync(skillPath, { recursive: true });
@@ -2056,15 +2439,18 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     const packageExtension = path.join(agentHome, 'managed-packages', 'extension.ts');
     const packageSkill = path.join(agentHome, 'managed-packages', 'skill-one');
     const packagePrompt = path.join(agentHome, 'managed-packages', 'prompt-one.md');
+    const packageRoot = path.dirname(packageExtension);
     const resolvePiManagedPackageResources = vi.fn(async () => ({
       extensions: [packageExtension],
       skills: [{ path: packageSkill, name: 'package-skill' }],
       promptTemplates: [packagePrompt],
-      packageRoots: [path.dirname(packageExtension)],
+      packageRoots: [packageRoot],
     }));
+    const resolvePiNativePackagePaths = vi.fn(async () => [packageRoot]);
     const agent = new PiAgent(buildDeps({
       resolvePiProjectTrustInput,
       resolvePiManagedPackageResources,
+      resolvePiNativePackagePaths,
     }));
     const [approvedHandle, reviewHandle] = await Promise.all([
       agent.startSession({ sessionId: 'approved', workingDir: cwd, model: 'm' }),
@@ -2089,29 +2475,26 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     );
     expect(repeatedArgValues(knobs.spawnedArgs[approvedIndex]!, '--skill')).toEqual([
       stagedSkillPath(approvedHome, 0, skillPath),
-      packageSkill,
     ]);
     expect(repeatedArgValues(knobs.spawnedArgs[reviewIndex]!, '--skill')).toEqual([]);
     expect(repeatedArgValues(knobs.spawnedArgs[approvedIndex]!, '--extension')).toEqual([
-      path.posix.join(approvedHome, 'extensions', 'cindy-bridge.ts'),
-      path.posix.join(approvedHome, 'extensions', 'cindy-subagent.ts'),
-      packageExtension,
+      path.posix.join(approvedHome, 'internal-extensions', 'cindy-bridge.ts'),
+      path.posix.join(approvedHome, 'internal-extensions', 'cindy-subagent.ts'),
     ]);
     expect(repeatedArgValues(knobs.spawnedArgs[reviewIndex]!, '--extension')).toEqual([
-      path.posix.join(reviewHome, 'extensions', 'cindy-bridge.ts'),
+      path.posix.join(reviewHome, 'internal-extensions', 'cindy-bridge.ts'),
     ]);
-    expect(repeatedArgValues(knobs.spawnedArgs[approvedIndex]!, '--prompt-template')).toEqual([
-      packagePrompt,
-    ]);
+    expect(repeatedArgValues(knobs.spawnedArgs[approvedIndex]!, '--prompt-template')).toEqual([]);
     expect(repeatedArgValues(knobs.spawnedArgs[reviewIndex]!, '--prompt-template')).toEqual([]);
     expect(resolvePiProjectTrustInput).toHaveBeenCalledOnce();
     expect(resolvePiProjectTrustInput).toHaveBeenCalledWith(expect.objectContaining({
       sessionId: 'approved',
     }));
     expect(resolvePiManagedPackageResources).toHaveBeenCalledOnce();
-    expect(resolvePiManagedPackageResources).toHaveBeenCalledWith({
-      snapshotRoot: path.join(approvedHome, 'managed-packages'),
-    });
+    expect(resolvePiManagedPackageResources).toHaveBeenCalledWith();
+    expect(resolvePiNativePackagePaths).toHaveBeenCalledOnce();
+    expect(JSON.parse(readFileSync(path.join(approvedHome, 'settings.json'), 'utf8')))
+      .toMatchObject({ packages: [packageRoot] });
     await vi.waitFor(() => {
       expect(approvedHandle.getRuntimeCapabilities?.()?.projectResources).toMatchObject({
         status: 'approved', approvalRevision: 'rev-approved-only', requestedSkillCount: 1,

@@ -14,7 +14,10 @@ import {
   buildUserProvider,
   DEFAULT_CUSTOM_CONTEXT_WINDOW,
   LEGACY_XAI_CUSTOM_PROVIDER_RUNTIME_ID,
+  projectXaiApiImageModels,
   storedCustomProviderId,
+  xaiApiOfficialRuntimeAgents,
+  XAI_API_CUSTOM_PROVIDER_ID,
 } from "../user-provider.js";
 import type { CustomProviderConfig } from "../types.js";
 import type { ModelRegistry } from "../modelAccessBean.js";
@@ -60,13 +63,114 @@ describe("buildUserProvider (per-runtime)", () => {
     expect(p.models["claude-code"]).toBeUndefined();
   });
 
+  it("projects official Imagine models onto the xAI API-key source", () => {
+    const source = BUNDLED_CATALOG.providers.find((provider) => provider.id === "xai")!;
+    const xaiApi = buildUserProvider({
+      id: XAI_API_CUSTOM_PROVIDER_ID,
+      name: "xAI API",
+      runtimes: {
+        codex: {
+          baseUrl: "https://api.x.ai/v1",
+          wireProtocol: "openai-chat",
+          models: [{ id: "grok-4.6", name: "Grok 4.6" }],
+        },
+      },
+    });
+
+    const projected = projectXaiApiImageModels([source, xaiApi]);
+    expect(projected.find((provider) => provider.id === XAI_API_CUSTOM_PROVIDER_ID)?.imageModels)
+      .toEqual(source.imageModels);
+  });
+
+  it("does not project Imagine models onto a non-official API-key endpoint", () => {
+    const source = BUNDLED_CATALOG.providers.find((provider) => provider.id === "xai")!;
+    const proxy = buildUserProvider({
+      id: XAI_API_CUSTOM_PROVIDER_ID,
+      name: "xAI-compatible proxy",
+      runtimes: {
+        codex: {
+          baseUrl: "https://proxy.example/v1",
+          models: [{ id: "grok-4.6", name: "Grok 4.6" }],
+        },
+      },
+    });
+
+    expect(projectXaiApiImageModels([source, proxy])).toEqual([source, proxy]);
+  });
+
+  it("binds image credentials to runtimes routed at the official endpoint", () => {
+    // 官方 codex 路由 + 代理 pi 路由:只有 codex 可作为凭证来源,防止把
+    // 代理密钥发往官方图片端点(PR #3875 review P1)。
+    const mixed = buildUserProvider({
+      id: XAI_API_CUSTOM_PROVIDER_ID,
+      name: "xAI API",
+      runtimes: {
+        codex: {
+          baseUrl: "https://api.x.ai/v1",
+          wireProtocol: "openai-chat",
+          models: [{ id: "grok-4.6", name: "Grok 4.6" }],
+        },
+        pi: {
+          baseUrl: "https://proxy.example/v1",
+          models: [{ id: "grok-4.6", name: "Grok 4.6" }],
+        },
+      },
+    });
+    expect(xaiApiOfficialRuntimeAgents(mixed)).toEqual(["codex"]);
+
+    // 只有 pi 命中官方端点:凭证来源是 pi,而不是固定顺序里的 codex 代理。
+    const piOfficial = buildUserProvider({
+      id: XAI_API_CUSTOM_PROVIDER_ID,
+      name: "xAI API",
+      runtimes: {
+        codex: {
+          baseUrl: "https://proxy.example/v1",
+          models: [{ id: "grok-4.6", name: "Grok 4.6" }],
+        },
+        pi: {
+          baseUrl: "https://api.x.ai/v1",
+          models: [{ id: "grok-4.6", name: "Grok 4.6" }],
+        },
+      },
+    });
+    expect(xaiApiOfficialRuntimeAgents(piOfficial)).toEqual(["pi"]);
+
+    // 无任何官方路由:没有可用凭证来源。
+    const proxyOnly = buildUserProvider({
+      id: XAI_API_CUSTOM_PROVIDER_ID,
+      name: "xAI-compatible proxy",
+      runtimes: {
+        codex: {
+          baseUrl: "https://proxy.example/v1",
+          models: [{ id: "grok-4.6", name: "Grok 4.6" }],
+        },
+      },
+    });
+    expect(xaiApiOfficialRuntimeAgents(proxyOnly)).toEqual([]);
+    expect(xaiApiOfficialRuntimeAgents(undefined)).toEqual([]);
+  });
+
   it("generates api-key-header routing with that runtime baseUrl, no key", () => {
     const p = buildUserProvider(codexOnly);
     expect(p.routing.codex).toEqual({
       upstream: "https://openrouter.ai/api/v1",
       authStrategy: "api-key-header",
+      supportsResponsesCustomTools: false,
     });
     expect(p.routing.codex?.headerOverride).toBeUndefined();
+  });
+
+  it("marks only a custom Codex Responses runtime as lacking native custom tools", () => {
+    const responses = buildUserProvider(codexOnly);
+    const chat = buildUserProvider({
+      ...codexOnly,
+      runtimes: {
+        codex: { ...codexOnly.runtimes.codex!, wireProtocol: "openai-chat" },
+      },
+    });
+
+    expect(responses.routing.codex?.supportsResponsesCustomTools).toBe(false);
+    expect(chat.routing.codex?.supportsResponsesCustomTools).toBeUndefined();
   });
 
   it("preserves an explicit Chat Completions protocol for Codex routing", () => {
@@ -124,9 +228,9 @@ describe("buildUserProvider (per-runtime)", () => {
       id: "meta/llama-4-405b",
       name: "Llama 4 405B",
       contextWindow: DEFAULT_CUSTOM_CONTEXT_WINDOW,
-      // codex runtime：参考内置默认 effort 档位（low/medium/high/xhigh/max，默认 high）。
+      // codex runtime：参考内置默认 effort 档位（low/medium/high/xhigh/max，默认 medium）。
       efforts: ["low", "medium", "high", "xhigh", "max"],
-      defaultEffort: "high",
+      defaultEffort: "medium",
       group: "custom:openrouter",
       defaultEnabled: true,
     });
@@ -189,24 +293,58 @@ describe("buildUserProvider (per-runtime)", () => {
       expect.objectContaining({
         id: "gpt-5.6-sol",
         efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
-        defaultEffort: "high",
+        defaultEffort: "medium",
       }),
       expect.objectContaining({
         id: "chatgpt/gpt-5.6-sol",
         efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
-        defaultEffort: "high",
+        defaultEffort: "medium",
       }),
       expect.objectContaining({
         id: "unregistered-model",
         efforts: ["low", "medium", "high", "xhigh", "max"],
-        defaultEffort: "high",
+        defaultEffort: "medium",
       }),
     ]);
     expect(provider.models["claude-code"]?.[0]).toMatchObject({
       id: "gpt-5.6-sol",
       efforts: ["low", "medium", "high", "xhigh", "max"],
-      defaultEffort: "high",
+      defaultEffort: "medium",
     });
+  });
+
+  it("inherits Registry Fast support only for an exact Codex route model id", () => {
+    const provider = buildUserProvider(
+      {
+        id: "fast-relay",
+        name: "Fast Relay",
+        runtimes: {
+          codex: {
+            baseUrl: "https://relay.example/v1",
+            models: [
+              { id: "gpt-5.6-sol", name: "GPT-5.6-Sol" },
+              { id: "openai/gpt-5.6-sol", name: "Prefixed GPT-5.6-Sol" },
+              { id: "unregistered-model", name: "Unregistered" },
+            ],
+          },
+          "claude-code": {
+            baseUrl: "https://relay.example/anthropic",
+            models: [{ id: "gpt-5.6-sol", name: "GPT-5.6-Sol" }],
+          },
+        },
+      },
+      { modelRegistry: BUNDLED_CATALOG.modelRegistry },
+    );
+
+    expect(provider.models.codex?.[0]).toMatchObject({
+      id: "gpt-5.6-sol",
+      supportsFastMode: true,
+    });
+    expect(provider.models.codex?.[1]?.supportsFastMode).toBeUndefined();
+    expect(provider.models.codex?.[2]?.supportsFastMode).toBeUndefined();
+    expect(
+      provider.models["claude-code"]?.[0]?.supportsFastMode,
+    ).toBeUndefined();
   });
 
 it('strips xd/ prefix to match registry effort metadata (entry.id ≠ custom id)', () => {
@@ -230,7 +368,7 @@ it('strips xd/ prefix to match registry effort metadata (entry.id ≠ custom id)
     expect(p.models.codex?.[0]).toMatchObject({
       id: 'xd/codex/gpt-5.6-sol',
       efforts: expect.arrayContaining(['ultra']),
-      defaultEffort: 'high',
+      defaultEffort: 'medium',
     });
   });
 
@@ -252,7 +390,7 @@ it('strips xd/ prefix to match registry effort metadata (entry.id ≠ custom id)
     expect(p.models.codex?.[0]).toMatchObject({
       id: 'xd/gpt-5.6-sol',
       efforts: expect.arrayContaining(['ultra']),
-      defaultEffort: 'high',
+      defaultEffort: 'medium',
     });
   });
 
@@ -275,7 +413,7 @@ it('strips xd/ prefix to match registry effort metadata (entry.id ≠ custom id)
     expect(p.models.codex?.[0]).toMatchObject({
       id: 'openai/gpt-5.6-sol',
       efforts: expect.arrayContaining(['ultra']),
-      defaultEffort: 'high',
+      defaultEffort: 'medium',
     });
   });
 
@@ -297,17 +435,132 @@ it('strips xd/ prefix to match registry effort metadata (entry.id ≠ custom id)
     expect(p.models.codex?.[0]).toMatchObject({
       id: 'custom/my-model',
       efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
-      defaultEffort: 'high',
+      defaultEffort: 'medium',
     });
   });
 
-    it('falls back safely for ambiguous matches, missing target routes and invalid defaults', () => {
+  it.each(["gpt-5.6-sol", "gpt-5.6-terra"])(
+    "inherits equivalent Registry effort metadata across matching entries for %s",
+    (modelId) => {
+      const registry = structuredClone(BUNDLED_CATALOG.modelRegistry);
+      if (!registry) throw new Error("missing bundled model registry");
+      const baseEntry = registry.models.find(
+        (entry) => entry.id === `openai/${modelId}`,
+      );
+      if (!baseEntry) throw new Error(`missing ${modelId} registry entry`);
+      registry.models.push({
+        ...structuredClone(baseEntry),
+        id: `alternate/${modelId}`,
+      });
+
+      const provider = buildUserProvider(
+        {
+          id: "relay",
+          name: "Relay",
+          runtimes: {
+            codex: {
+              baseUrl: "https://relay.example/v1",
+              models: [{ id: modelId, name: modelId }],
+            },
+          },
+        },
+        { modelRegistry: registry },
+      );
+
+      expect(provider.models.codex?.[0]).toMatchObject({
+        efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+        defaultEffort: "medium",
+      });
+    },
+  );
+
+  it.each(["xd/gpt-5.6-sol", "chatgpt/gpt-5.6-sol"])(
+    "inherits equivalent Registry effort metadata after stripping the prefix from %s",
+    (modelId) => {
+      const registry = structuredClone(BUNDLED_CATALOG.modelRegistry);
+      if (!registry) throw new Error("missing bundled model registry");
+      const baseEntry = registry.models.find(
+        (entry) => entry.id === "openai/gpt-5.6-sol",
+      );
+      if (!baseEntry) throw new Error("missing gpt-5.6-sol registry entry");
+      const first = structuredClone(baseEntry);
+      first.id = "first/gpt-5.6-sol";
+      first.routes = first.routes
+        .filter((route) => route.agents.includes("codex"))
+        .map((route) => ({ ...route, modelId: "gpt-5.6-sol" }));
+      const second = structuredClone(first);
+      second.id = "second/gpt-5.6-sol";
+      registry.models = [first, second];
+
+      const provider = buildUserProvider(
+        {
+          id: "prefixed-relay",
+          name: "Prefixed Relay",
+          runtimes: {
+            codex: {
+              baseUrl: "https://relay.example/v1",
+              models: [{ id: modelId, name: modelId }],
+            },
+          },
+        },
+        { modelRegistry: registry },
+      );
+
+      expect(provider.models.codex?.[0]).toMatchObject({
+        efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+        defaultEffort: "medium",
+      });
+    },
+  );
+
+  it("rejects conflicting Registry effort metadata after prefix stripping", () => {
     const registry = structuredClone(BUNDLED_CATALOG.modelRegistry);
     if (!registry) throw new Error("missing bundled model registry");
     const baseEntry = registry.models.find(
       (entry) => entry.id === "openai/gpt-5.6-sol",
     );
     if (!baseEntry) throw new Error("missing gpt-5.6-sol registry entry");
+    const first = structuredClone(baseEntry);
+    first.id = "first/gpt-5.6-sol";
+    first.routes = first.routes
+      .filter((route) => route.agents.includes("codex"))
+      .map((route) => ({ ...route, modelId: "gpt-5.6-sol" }));
+    const second = structuredClone(first);
+    second.id = "second/gpt-5.6-sol";
+    second.perAgent = {
+      ...second.perAgent,
+      codex: { efforts: ["low", "medium", "high"], defaultEffort: "high" },
+    };
+    registry.models = [first, second];
+
+    const provider = buildUserProvider(
+      {
+        id: "conflicting-prefixed-relay",
+        name: "Conflicting Prefixed Relay",
+        runtimes: {
+          codex: {
+            baseUrl: "https://relay.example/v1",
+            models: [{ id: "xd/gpt-5.6-sol", name: "GPT-5.6-Sol" }],
+          },
+        },
+      },
+      { modelRegistry: registry },
+    );
+
+    expect(provider.models.codex?.[0]).toMatchObject({
+      efforts: ["low", "medium", "high", "xhigh", "max"],
+      defaultEffort: "medium",
+    });
+  });
+
+    it('falls back safely for conflicting matches, missing target routes and invalid defaults', () => {
+    const registry = structuredClone(BUNDLED_CATALOG.modelRegistry);
+    if (!registry) throw new Error("missing bundled model registry");
+    const baseEntry = registry.models.find(
+      (entry) => entry.id === "openai/gpt-5.6-sol",
+    );
+    if (!baseEntry) throw new Error("missing gpt-5.6-sol registry entry");
+    registry.models = [baseEntry];
     baseEntry.perAgent = {
       ...baseEntry.perAgent,
       codex: { efforts: ["minimal", "max"], defaultEffort: "high" },
@@ -315,6 +568,10 @@ it('strips xd/ prefix to match registry effort metadata (entry.id ≠ custom id)
     registry.models.push({
       ...structuredClone(baseEntry),
       id: "alternate/gpt-5.6-sol",
+      perAgent: {
+        ...baseEntry.perAgent,
+        codex: { efforts: ["low", "medium", "high"], defaultEffort: "high" },
+      },
     });
 
     const ambiguous = buildUserProvider(
@@ -332,7 +589,7 @@ it('strips xd/ prefix to match registry effort metadata (entry.id ≠ custom id)
     );
     expect(ambiguous.models.codex?.[0]).toMatchObject({
       efforts: ["low", "medium", "high", "xhigh", "max"],
-      defaultEffort: "high",
+      defaultEffort: "medium",
     });
 
     registry.models.pop();
@@ -351,7 +608,7 @@ it('strips xd/ prefix to match registry effort metadata (entry.id ≠ custom id)
     );
     expect(invalidDefault.models.codex?.[0]).toMatchObject({
       efforts: ["minimal", "max"],
-      defaultEffort: "max",
+      defaultEffort: "minimal",
     });
 
     const noTargetRoute = buildUserProvider(
@@ -371,7 +628,7 @@ it('strips xd/ prefix to match registry effort metadata (entry.id ≠ custom id)
     );
     expect(noTargetRoute.models.codex?.[0]).toMatchObject({
       efforts: ["low", "medium", "high", "xhigh", "max"],
-      defaultEffort: "high",
+      defaultEffort: "medium",
     });
   });
 
@@ -596,6 +853,27 @@ it('strips xd/ prefix to match registry effort metadata (entry.id ≠ custom id)
     expect((p.models.pi ?? [])[0]?.group).toBe("custom:localollama");
     expect((p.models.pi ?? [])[0]?.supportsImageInput).toBe(true);
     expect(p.routing.pi?.wireProtocol).toBe('openai-chat');
+  });
+
+  it('projects image generation independently from image input', () => {
+    const p = buildUserProvider({
+      id: 'images',
+      name: 'Images',
+      runtimes: {
+        codex: {
+          baseUrl: 'https://images.example/v1',
+          wireProtocol: 'openai-responses',
+          supportsImageGeneration: true,
+          models: [
+            { id: 'generate', name: 'Generate' },
+            { id: 'input', name: 'Input', supportsImageInput: true },
+          ],
+        },
+      },
+    });
+    expect(p.routing.codex?.supportsImageGeneration).toBe(true);
+    expect(p.models.codex?.[0]?.supportsImageInput).toBeUndefined();
+    expect(p.models.codex?.[1]?.supportsImageInput).toBe(true);
   });
 
   it("does not export unverified CC/Codex efforts for managed Ollama", () => {
@@ -942,5 +1220,39 @@ it('strips xd/ prefix to match registry effort metadata (entry.id ≠ custom id)
       },
     });
     expect(p.agents).toEqual(["claude-code", "codex", "pi"]);
+  });
+});
+
+
+describe('custom model defaults with partial registry metadata', () => {
+  it.each([
+    [undefined, 'medium'],
+    [null, null],
+    ['max', 'high'],
+  ] as const)('keeps the route usable with declared default %s', (declared, expected) => {
+    const modelRegistry: ModelRegistry = {
+      schemaVersion: 2,
+      updatedAt: '2026-09-05T00:00:00Z',
+      models: [{
+        id: 'sparse-model', name: 'Sparse model',
+        efforts: ['low', 'medium', 'high'],
+        routes: [{ providerId: 'relay', modelId: 'sparse-model', agents: ['codex'] }],
+      }],
+    };
+    if (declared === null) {
+      // @ts-expect-error Exercise malformed registry metadata outside the wire contract.
+      modelRegistry.models[0].defaultEffort = declared;
+    } else if (declared !== undefined) {
+      modelRegistry.models[0].defaultEffort = declared;
+    }
+    const provider = buildUserProvider({
+      id: 'relay', name: 'Custom relay',
+      runtimes: { codex: { baseUrl: 'https://relay.example/v1', models: [{ id: 'sparse-model', name: 'My model' }] } },
+    }, { modelRegistry });
+    expect(provider.models.codex).toHaveLength(1);
+    expect(provider.models.codex?.[0]).toMatchObject({
+      id: 'sparse-model', name: 'My model', efforts: ['low', 'medium', 'high'], defaultEffort: expected,
+    });
+    expect(provider.routing.codex?.upstream).toBe('https://relay.example/v1');
   });
 });

@@ -164,6 +164,17 @@ export interface RoutingDescriptor {
    * Codex 的 openai-chat / anthropic-messages 会分别进入对应的本地 Responses bridge。
    */
   wireProtocol?: ProviderWireProtocol;
+  /**
+   * 此 Codex Responses 上游是否原生接受 `type: "custom"` 工具。
+   * `false` 时 Desktop 可把选定的 custom tool 对称转换为普通 function tool；
+   * 未声明表示没有足够能力信息，调用方不得按模型名猜测。
+   */
+  supportsResponsesCustomTools?: boolean;
+  /**
+   * 该自定义 Provider 的 Codex Responses runtime 是否支持原生图片生成与编辑。
+   * 缺省按 false 处理；它与模型图片输入能力独立，也不得从模型名推断。
+   */
+  supportsImageGeneration?: boolean;
   /** 真实上游 base URL（direct 时是供应商自家；gateway 时是 XD 网关 base）。 */
   upstream: string;
   /**
@@ -256,8 +267,12 @@ export interface ModelCost {
  * 跨 provider(如 gpt-5.5 同时由 openai 与 xd 提供)则必须元数据一致(见 catalog.ts 校验)。
  */
 export interface CatalogModel {
+  /** Canonical model API from the accepted Registry; null explicitly means unverified. */
+  nativeApi?: PiModelApi | null;
   /** 与 maker-core 现有 model id 一致（如 'claude-opus-4-8' / 'gpt-5.5' / 'codex/gpt-5.5'）。 */
   id: string;
+  /** Server entitlement state. Paid-locked models remain present for UI but are never routable. */
+  availability?: 'available' | 'requires_payment';
   /** Sparse PI protocol override; absence means use PI's bundled model catalog. */
   piApi?: PiModelApi;
   /** 同一 provider/runtime 内该模型的上游覆盖；缺省使用 provider 级路由。 */
@@ -289,6 +304,8 @@ export interface CatalogModel {
   sortOrder?: number;
   /** 上下文窗口（tokens）。该 agent 下的权威值(host 派生进 ModelDescriptor.contextWindow)。 */
   contextWindow: number;
+  /** Provider-declared maximum before a per-harness recommended window is applied. */
+  contextWindowMax?: number;
   /**
    * `contextWindow` 是否为**显式声明**的真实上限,而非派生时补的兜底值。
    *
@@ -320,6 +337,12 @@ export interface CatalogModel {
   maxOutput?: number;
   /** 支持的 effort 档；空数组 = 不支持切换（如 Haiku / 部分 provider-managed 模型）。 */
   efforts: Effort[];
+  /** Display-only known tiers. Runtime admission always uses efforts; absent tiers render disabled. */
+  displayEfforts?: Effort[];
+  /** 独立 Pi 远端目录的显式能力；缺席时保留旧目录兼容行为。 */
+  reasoning?: boolean;
+  reasoningEfforts?: PiReasoningEffort[];
+  reasoningDefaultEffort?: PiReasoningEffort;
   /**
    * Model-specific effort 显示名覆盖（= maker-core ModelDescriptor.effortDisplayNames）。
    * 缺省时回退统一档名词表(桌面 i18n `effortLevels.*` / 手机 MOBILE_EFFORT_LABELS)→
@@ -426,6 +449,7 @@ export interface CatalogModel {
 export interface ProviderMediaModel {
   id: string;
   name: string;
+  availability?: 'available' | 'requires_payment';
   modalities?: { input: string[]; output: string[] };
   officialDocs?: string;
   disabled?: boolean;
@@ -558,6 +582,8 @@ export interface ProviderPresetRuntime {
   baseUrl: string;
   /** 非标准推理端点的相对路径；缺省由 wire protocol 推导。 */
   requestPath?: string;
+  /** Codex Responses runtime 是否支持原生图片生成与编辑；缺省为 false。 */
+  supportsImageGeneration?: boolean;
   /** 推荐模型清单（预填进表单，用户可增删改）。 */
   models: ProviderRuntimeModelConfig[];
   /** 可选预填请求头。 */
@@ -652,6 +678,8 @@ export interface CustomProviderRuntimeConfig {
   baseUrl: string;
   /** 非标准推理端点的相对路径；缺省由 wire protocol 推导。 */
   requestPath?: string;
+  /** Codex Responses runtime 是否支持原生图片生成与编辑；缺省为 false。 */
+  supportsImageGeneration?: boolean;
   /** 用户模型；contextWindow 可由预设带入，缺省时由 `buildUserProvider` 补保守默认。 */
   models: ProviderRuntimeModelConfig[];
   /**

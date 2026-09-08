@@ -37,11 +37,13 @@ import {
   type SidebarSessionEntry,
 } from './automationSidebarGrouping';
 import { sessionActivityMs } from './dateSessionGrouping';
-import type { ProjectNode } from './projectGrouping';
+import type { BotGroupNode, ProjectNode } from './projectGrouping';
 
 export type MainListEntry =
   | { kind: 'project'; project: ProjectNode }
   | { kind: 'dialogue-group'; sessions: Session[] }
+  /** 一个伙伴名下的全部任务。与项目行并列 —— 项目是实体目录,伙伴名是用户起的。 */
+  | { kind: 'bot-group'; bot: BotGroupNode }
   | SidebarSessionEntry;
 
 /** 优先级排序的运行时上下文(组装层的运行中 / 需关注集合)。 */
@@ -106,10 +108,17 @@ export function sessionNaturalPriorityRank(
   return naturalPriorityRankForId(session.id, ctx);
 }
 
+function viewedPriorityRank(natural: number, held: number | undefined): number {
+  // 当前轮已经运行时,释放上一轮 unread / waiting 的 hold。否则看的过程中跑完后,
+  // 旧 hold 会再次把任务抬回高档位,直到点击离开才突然重排。
+  if (natural === LIVE_TASK_PRIORITY.running) return natural;
+  return held === undefined ? natural : Math.min(natural, held);
+}
+
 export function sessionPriorityRank(session: Session, ctx: MainListPriorityContext): number {
   const natural = sessionNaturalPriorityRank(session, ctx);
   const held = ctx.heldPriorityRanks?.get(session.id);
-  return held === undefined ? natural : Math.min(natural, held);
+  return viewedPriorityRank(natural, held);
 }
 
 export interface ViewedPriorityHoldState {
@@ -141,10 +150,7 @@ export function advanceViewedPriorityHold(
   if (viewedSessionId) {
     const natural = naturalPriorityRankForId(viewedSessionId, ctx);
     const held = state.heldPriorityRanks.get(viewedSessionId);
-    state.heldPriorityRanks.set(
-      viewedSessionId,
-      held === undefined ? natural : Math.min(held, natural),
-    );
+    state.heldPriorityRanks.set(viewedSessionId, viewedPriorityRank(natural, held));
   }
   state.prevViewedId = viewedSessionId;
   return state;
@@ -164,7 +170,7 @@ export function holdViewedPriorityRank(
 ): void {
   const natural = naturalPriorityRankForId(sessionId, ctx);
   const held = state.heldPriorityRanks.get(sessionId);
-  state.heldPriorityRanks.set(sessionId, held === undefined ? natural : Math.min(held, natural));
+  state.heldPriorityRanks.set(sessionId, viewedPriorityRank(natural, held));
 }
 
 export function sessionPriorityRecencyMs(session: Session, ctx: MainListPriorityContext): number {
@@ -178,6 +184,7 @@ export function sessionPriorityRecencyMs(session: Session, ctx: MainListPriority
 export function getMainListEntrySessions(entry: MainListEntry): readonly Session[] {
   if (entry.kind === 'project') return entry.project.sessions;
   if (entry.kind === 'dialogue-group') return entry.sessions;
+  if (entry.kind === 'bot-group') return entry.bot.sessions;
   if (entry.kind === 'automation-group') return entry.group.sessions;
   return [entry.session];
 }
@@ -242,6 +249,8 @@ export interface BuildMainListEntriesInput {
   projects: readonly ProjectNode[];
   /** 无项目归属(workspaceKind dialogue)的可见会话。 */
   dialogues: readonly Session[];
+  /** 按伙伴分的组。平铺模式下与项目内会话一样摊成顶层条目。 */
+  bots?: readonly BotGroupNode[];
   /** 未绑定目录的草稿。按设备分组时随条目进对应设备段。 */
   unclassified?: readonly Session[];
   /** 'project' = 项目行;'flat' = 项目内会话平铺为顶层条目。 */
@@ -273,6 +282,7 @@ function buildFlatSessionEntries(
 export function buildMainListEntries({
   projects,
   dialogues,
+  bots = [],
   unclassified = [],
   groupBy,
   groupDialogue,
@@ -288,7 +298,12 @@ export function buildMainListEntries({
 
   if (groupBy === 'flat') {
     const flatEntries = buildFlatSessionEntries(
-      [...projects.flatMap((project) => project.sessions), ...dialogues, ...unclassified],
+      [
+        ...projects.flatMap((project) => project.sessions),
+        ...bots.flatMap((bot) => bot.sessions),
+        ...dialogues,
+        ...unclassified,
+      ],
       sortBy,
       ctx,
       notifications,
@@ -321,6 +336,13 @@ export function buildMainListEntries({
     entries.push({
       kind: 'project',
       project: { ...project, sessions: sortSessionsForMainList(project.sessions, sortBy, ctx) },
+    });
+  }
+
+  for (const bot of bots) {
+    entries.push({
+      kind: 'bot-group',
+      bot: { ...bot, sessions: sortSessionsForMainList(bot.sessions, sortBy, ctx) },
     });
   }
 
@@ -409,6 +431,11 @@ function entryDeviceId(entry: MainListEntry): string | null {
   if (entry.kind === 'session') return entry.session.deviceLinkDeviceId ?? null;
   if (entry.kind === 'automation-group') {
     return entry.group.sessions[0]?.deviceLinkDeviceId ?? null;
+  }
+  // 伙伴组:同样按组内首条会话归属。伙伴本身不绑设备 —— 它的任务可以分布在
+  // 本机与远端,设备切段只看会话自己在哪。
+  if (entry.kind === 'bot-group') {
+    return entry.bot.sessions[0]?.deviceLinkDeviceId ?? null;
   }
   // 对话组条目:按组内首条会话归属(散排对话在设备分组下由调用方按设备切分后
   // 再分别成组,这里只是兜底)。

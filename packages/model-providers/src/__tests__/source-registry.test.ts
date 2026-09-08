@@ -85,7 +85,7 @@ describe('resolveCatalogUrl', () => {
   });
   it('builds from baseUrl + public catalog API path', () => {
     expect(resolveCatalogUrl({ baseUrl: 'https://model-access.example.com/' })).toBe(
-      'https://model-access.example.com/api/model-catalog/catalog',
+      'https://model-access.example.com/api/model-catalog/catalog?registrySchemaVersion=3',
     );
   });
   it('builds the migration OSS fallback URL', () => {
@@ -461,6 +461,61 @@ describe('mergeWithBundled', () => {
     ).toBeUndefined();
   });
 
+  it('旧目录在官方 Codex 路由未声明 custom tool 能力时继承 bundled 能力', () => {
+    const oldProviders = BUNDLED_CATALOG.providers.map((provider) => {
+      const oldProvider = structuredClone(provider);
+      if (oldProvider.routing.codex) {
+        delete oldProvider.routing.codex.supportsResponsesCustomTools;
+      }
+      return oldProvider;
+    });
+
+    const merged = mergeWithBundled({ version: '2', providers: oldProviders });
+
+    expect(merged.providers.find((provider) => provider.id === 'openai')
+      ?.routing.codex?.supportsResponsesCustomTools).toBe(true);
+    expect(merged.providers.find((provider) => provider.id === 'xai')
+      ?.routing.codex?.supportsResponsesCustomTools).toBe(false);
+    expect(merged.providers.find((provider) => provider.id === 'xd')
+      ?.routing.codex?.supportsResponsesCustomTools).toBe(false);
+
+    const explicitOpenai = structuredClone(
+      oldProviders.find((provider) => provider.id === 'openai')!,
+    );
+    explicitOpenai.routing.codex!.supportsResponsesCustomTools = false;
+    expect(mergeWithBundled({ version: '2', providers: [explicitOpenai] })
+      .providers.find((provider) => provider.id === 'openai')
+      ?.routing.codex?.supportsResponsesCustomTools).toBe(false);
+  });
+
+  it('不为改变鉴权或 upstream 的同名 Provider 猜测 custom tool 能力', () => {
+    const bundledOpenai = structuredClone(
+      BUNDLED_CATALOG.providers.find((provider) => provider.id === 'openai')!,
+    );
+    delete bundledOpenai.routing.codex!.supportsResponsesCustomTools;
+    const apiKeyOpenai: Provider = {
+      ...bundledOpenai,
+      auth: { method: 'apiKey' },
+    };
+    const reroutedOpenai: Provider = {
+      ...bundledOpenai,
+      routing: {
+        ...bundledOpenai.routing,
+        codex: {
+          ...bundledOpenai.routing.codex!,
+          upstream: 'https://responses.example.test/v1',
+        },
+      },
+    };
+
+    expect(mergeWithBundled({ version: '2', providers: [apiKeyOpenai] })
+      .providers.find((provider) => provider.id === 'openai')
+      ?.routing.codex?.supportsResponsesCustomTools).toBeUndefined();
+    expect(mergeWithBundled({ version: '2', providers: [reroutedOpenai] })
+      .providers.find((provider) => provider.id === 'openai')
+      ?.routing.codex?.supportsResponsesCustomTools).toBeUndefined();
+  });
+
   it('does not infer bundled billing when a same-id primary changes auth or upstream', () => {
     const apiKeyPrimary: Catalog = {
       ...MINIMAL,
@@ -515,18 +570,21 @@ describe('loadCatalog', () => {
       capabilityEvidence: 'current',
       unverifiedXdMediaKinds: ['image', 'video', 'embedding'],
       catalog: { version: 'test' },
+      authorityCatalog: { version: 'test' },
     });
     expect(remote).toMatchObject({
       source: 'remote',
       capabilityEvidence: 'current',
       unverifiedXdMediaKinds: ['image', 'video', 'embedding'],
       catalog: { version: 'test' },
+      authorityCatalog: { version: 'test' },
     });
     expect(bundled).toEqual({
       source: 'bundled',
       capabilityEvidence: 'fallback',
       unverifiedXdMediaKinds: ['image', 'video', 'embedding'],
       catalog: BUNDLED_CATALOG,
+      authorityCatalog: null,
     });
   });
 
@@ -595,6 +653,9 @@ describe('loadCatalog', () => {
     for (const loaded of [local, remote, cache]) {
       expect(loaded.catalog.presets?.find((preset) => preset.id === 'deepseek')?.runtimes.pi)
         .toEqual(bundledPreset.runtimes.pi);
+      expect(
+        loaded.authorityCatalog?.presets?.find((preset) => preset.id === 'deepseek')?.runtimes.pi,
+      ).toBeUndefined();
     }
 
     const currentLoaded = await loadCatalogWithSource(
@@ -781,6 +842,7 @@ describe('loadCatalog', () => {
       capabilityEvidence: 'fallback',
       unverifiedXdMediaKinds: ['image', 'video', 'embedding'],
       catalog: BUNDLED_CATALOG,
+      authorityCatalog: null,
     });
   });
 
@@ -813,7 +875,7 @@ describe('loadCatalog', () => {
     );
     expect(fetchText).toHaveBeenNthCalledWith(
       1,
-      'https://model-access.example.com/api/model-catalog/catalog',
+      'https://model-access.example.com/api/model-catalog/catalog?registrySchemaVersion=3',
       15_000,
     );
     expect(fetchText).toHaveBeenNthCalledWith(
@@ -847,6 +909,7 @@ describe('loadCatalog', () => {
       source: 'remote',
       capabilityEvidence: 'fallback',
       catalog: { version: 'test' },
+      authorityCatalog: null,
     });
   });
   it('falls back from invalid public API payload to legacy OSS before bundled', async () => {
@@ -868,7 +931,7 @@ describe('loadCatalog', () => {
     );
     expect(fetchText).toHaveBeenNthCalledWith(
       1,
-      'https://model-access.example.com/api/model-catalog/catalog',
+      'https://model-access.example.com/api/model-catalog/catalog?registrySchemaVersion=3',
       15_000,
     );
     expect(fetchText).toHaveBeenNthCalledWith(
@@ -902,6 +965,7 @@ describe('loadCatalog', () => {
     expect(result.capabilityEvidence).toBe('fallback');
     expect(result.catalog.version).toBe('test');
     expect(result.catalog).not.toHaveProperty('cindyModelMeta');
+    expect(result.authorityCatalog).toBeNull();
   });
 
   it('shares one remote budget across the public API and legacy OSS fallback', async () => {
@@ -923,7 +987,7 @@ describe('loadCatalog', () => {
     );
     expect(fetchText).toHaveBeenNthCalledWith(
       1,
-      'https://model-access.example.com/api/model-catalog/catalog',
+      'https://model-access.example.com/api/model-catalog/catalog?registrySchemaVersion=3',
       15_000,
     );
     expect(fetchText).toHaveBeenNthCalledWith(
@@ -951,7 +1015,7 @@ describe('loadCatalog', () => {
     );
     expect(fetchText).toHaveBeenCalledTimes(1);
     expect(fetchText).toHaveBeenCalledWith(
-      'https://model-access.example.com/api/model-catalog/catalog',
+      'https://model-access.example.com/api/model-catalog/catalog?registrySchemaVersion=3',
       15_000,
     );
     expect(cat.version).toBe(BUNDLED_CATALOG.version);
@@ -1017,6 +1081,7 @@ describe('loadCatalog', () => {
       capabilityEvidence: 'fallback',
       unverifiedXdMediaKinds: ['image', 'video', 'embedding'],
       catalog: BUNDLED_CATALOG,
+      authorityCatalog: null,
     });
     expect((Object.prototype as { polluted?: unknown }).polluted).toBeUndefined();
   });

@@ -35,6 +35,7 @@ import screenRecordingPermissionIcon from '@/assets/system-settings/screen-recor
 import { toast } from '@/lib/toast';
 import { Switch } from '@/components/ui/switch';
 import { Spinner } from '@/components/ui/spinner';
+import { useOptionalConfirmDialog } from '@/components/ui/confirm-dialog-provider';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -43,7 +44,15 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { createLogger } from '@/lib/logger';
 import { BrowserBackendSubsection } from './BrowserBackendSubsection';
-import type { BrowserBackendHealth } from '../../../shared/browserBackend';
+import { BrowserRealProfileSubsection } from './BrowserRealProfileSubsection';
+import {
+  REAL_PROFILE_READ_DENIED,
+  type BrowserBackendHealth,
+} from '../../../shared/browserBackend';
+import {
+  browserOpenForLoginErrorCode,
+  browserOpenForLoginToastKey,
+} from './browserOpenForLoginError';
 import {
   androidDeviceLabel,
   androidStatusFallback,
@@ -56,6 +65,10 @@ import {
   isComputerPermissionReady,
   shouldStartComputerPermissionGuide,
 } from './computerPermissionFlow';
+import {
+  confirmEnableRealProfile,
+  guideFullDiskAccessAfterReadDenied,
+} from './realProfilePermissionGuide';
 
 const log = createLogger('ComputerUseSection');
 
@@ -410,6 +423,9 @@ export function ComputerUseSection({
   const [browserBackendPending, setBrowserBackendPending] = useState(false);
   const [browserBackendRecovering, setBrowserBackendRecovering] = useState(false);
   const [browserBackendHealth, setBrowserBackendHealth] = useState<BrowserBackendHealth | null>(null);
+  const [useRealProfile, setUseRealProfile] = useState(false);
+  const [useRealProfilePending, setUseRealProfilePending] = useState(false);
+  const confirmDialog = useOptionalConfirmDialog();
   // Health can include an automatic embedded-browser recovery and therefore
   // take several seconds. Track the latest health owner so a late initial
   // probe cannot overwrite a newer user-initiated switch or recovery result.
@@ -557,6 +573,7 @@ export function ComputerUseSection({
       // 让卡片整张瘫成内置态强。
       const activeBackend = backendState?.active ?? 'external';
       setBrowserBackendKind(activeBackend);
+      setUseRealProfile(backendState?.useRealProfile === true);
       const { health: backendHealth, error: backendHealthError } = await backendHealthPromise;
       if (cancelled || browserBackendHealthSeqRef.current !== backendHealthSeq) return;
       setBrowserBackendHealth(
@@ -606,6 +623,49 @@ export function ComputerUseSection({
       }
     },
     [browserBackendKind, browserBackendPending, t],
+  );
+
+  const handleToggleRealProfile = useCallback(
+    async (next: boolean) => {
+      if (useRealProfilePending) return;
+      if (next) {
+        const confirmed = await confirmEnableRealProfile({
+          platform: window.electronAPI.platform,
+          t,
+          confirm: confirmDialog?.confirm,
+          openExternal: window.electronAPI.openExternal,
+          onOpenSettingsFailed: (result) => {
+            log.warn('open Full Disk Access settings failed', result);
+          },
+          hasDiskAccess: async () => {
+            try {
+              const result = await window.electronAPI.browserBackend.probeSourceRead?.();
+              return result?.readable === true;
+            } catch (error) {
+              log.warn('browserBackend.probeSourceRead failed', error);
+              return false;
+            }
+          },
+        });
+        if (!confirmed) return;
+      }
+      setUseRealProfilePending(true);
+      try {
+        const res = await window.electronAPI.browserBackend.setUseRealProfile(next);
+        setUseRealProfile(res.enabled);
+        toast.success(
+          res.enabled
+            ? t('settings.computerUse.realProfile.toast.enabled')
+            : t('settings.computerUse.realProfile.toast.disabled'),
+        );
+      } catch (err) {
+        log.error('browserBackend.setUseRealProfile failed', err);
+        toast.error(t('settings.computerUse.realProfile.toast.failed'));
+      } finally {
+        setUseRealProfilePending(false);
+      }
+    },
+    [confirmDialog, t, useRealProfilePending],
   );
 
   const handleRecoverBrowserBackend = useCallback(async () => {
@@ -812,10 +872,13 @@ export function ComputerUseSection({
 
   const handleToggleBrowser = useCallback(
     async (next: boolean) => {
-      if (!workingDir) return;
       setTogglePending(true);
       try {
-        await window.electronAPI.maker.plugins.setProjectEnabled(workingDir, BROWSER_PLUGIN_ID, next);
+        if (workingDir) {
+          await window.electronAPI.maker.plugins.setProjectEnabled(workingDir, BROWSER_PLUGIN_ID, next);
+        } else {
+          await window.electronAPI.maker.plugins.setEnabled(BROWSER_PLUGIN_ID, next);
+        }
         setBrowserEnabled(next);
         toast.success(
           next
@@ -823,7 +886,7 @@ export function ComputerUseSection({
             : t('settings.computerUse.browser.toast.disabled'),
         );
       } catch (err) {
-        log.warn('setProjectEnabled(browser) failed', err);
+        log.warn('set browser plugin enabled failed', err);
         toast.error(t('settings.computerUse.browser.toast.toggleFailed'));
       } finally {
         setTogglePending(false);
@@ -1057,9 +1120,31 @@ export function ComputerUseSection({
       toast.success(t('settings.computerUse.browser.toast.openedForLogin'));
     } catch (err) {
       log.warn('browser.openForLogin failed', err);
-      toast.error(t('settings.computerUse.browser.toast.openForLoginFailed'));
+      const errorCode = browserOpenForLoginErrorCode(err);
+      if (errorCode === REAL_PROFILE_READ_DENIED) {
+        if (!confirmDialog) {
+          toast.error(t('settings.computerUse.realProfile.readDeniedDescription'));
+        }
+        await guideFullDiskAccessAfterReadDenied({
+          platform: window.electronAPI.platform,
+          t,
+          confirm: confirmDialog?.confirm,
+          openExternal: window.electronAPI.openExternal,
+          onOpenSettingsFailed: (result) => {
+            log.warn('open Full Disk Access settings failed', result);
+          },
+        });
+        return;
+      }
+      toast.error(
+        t(
+          errorCode
+            ? browserOpenForLoginToastKey(errorCode)
+            : 'settings.computerUse.browser.toast.openForLoginFailed',
+        ),
+      );
     }
-  }, [t]);
+  }, [confirmDialog, t]);
 
   const handleOpenComputerPermission = useCallback(
     async (url: string, granted: boolean) => {
@@ -1277,7 +1362,7 @@ export function ComputerUseSection({
           </div>
           <Switch
             checked={browserEnabled}
-            disabled={togglePending || !workingDir}
+            disabled={togglePending}
             onCheckedChange={handleToggleBrowser}
             aria-label={t('settings.computerUse.browser.toggleAria')}
           />
@@ -1295,6 +1380,14 @@ export function ComputerUseSection({
             onRecover={() => void handleRecoverBrowserBackend()}
           />
         ) : null}
+        {browserBackendKind !== null ? (
+          <BrowserRealProfileSubsection
+            enabled={useRealProfile}
+            pending={useRealProfilePending}
+            available={browserBackendKind === 'external'}
+            onToggle={(next) => void handleToggleRealProfile(next)}
+          />
+        ) : null}
         {/* 只在 backend === 'external' 时展示 Chrome 探测 + 登录入口。内置 webview
             backend 用 Electron 自带 Chromium,这些 UI 对它都没有意义。 */}
         {browserBackendKind === 'external' ? (
@@ -1310,7 +1403,6 @@ export function ComputerUseSection({
               <button
                 type="button"
                 onClick={handleOpenForLogin}
-                disabled={!browserEnabled}
                 className={ACTION_BUTTON_CLASS}
               >
                 <LogIn size={12} className="shrink-0" />
@@ -1332,9 +1424,7 @@ export function ComputerUseSection({
         </p>
       ) : null}
       <p className="text-12 leading-[1.5] text-[var(--settings-section-desc)]">
-        {workingDir
-          ? t('settings.computerUse.browser.toggleHint')
-          : t('settings.computerUse.browser.noProjectHint')}
+        {t('settings.computerUse.browser.toggleHint')}
       </p>
 
       <div aria-hidden="true" className="h-px bg-[var(--settings-theme-card-border)]" />
