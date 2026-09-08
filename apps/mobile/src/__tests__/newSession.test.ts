@@ -1448,7 +1448,8 @@ describe('new session model', () => {
     ]);
     // 记忆的目录优先;不要求它仍在最近列表里(列表只保留 6 项,用户本就可从浏览器选任意目录)
     expect(pickInitialNewSessionWorkspace('', recentWorkspaces, '/repo/third')).toBe('/repo/third');
-    expect(pickInitialNewSessionWorkspace('', recentWorkspaces, ' /elsewhere/app ')).toBe('/elsewhere/app');
+    // 路径原样返回:首尾空格可能是目录名的一部分(review:Greptile P1)
+    expect(pickInitialNewSessionWorkspace('', recentWorkspaces, ' /elsewhere/app ')).toBe(' /elsewhere/app ');
     expect(pickInitialNewSessionWorkspace('', [], '/repo/third')).toBe('/repo/third');
     // 草稿已有目录时仍然不动;没有记忆时回落最近项目首项
     expect(pickInitialNewSessionWorkspace('/explicit', recentWorkspaces, '/repo/third')).toBeNull();

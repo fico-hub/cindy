@@ -49,7 +49,8 @@ async function writeNewSessionPreferences(patch: NewSessionPreferencePatch): Pro
   const permissionPatch = patch.permissionModeForAgent;
   const workingDirPatch = patch.workingDirForDevice;
   const workingDirDeviceId = workingDirPatch?.deviceId.trim() ?? '';
-  const workingDirValue = workingDirPatch?.workingDir.trim() ?? '';
+  // 路径原样保存(macOS / Linux 允许目录名首尾带空格,浏览器也原样返回);只用 trim 判空。
+  const workingDirValue = workingDirPatch && workingDirPatch.workingDir.trim() ? workingDirPatch.workingDir : '';
   const next: NewSessionStoredPreferences = {
     agentKind: patch.agentKind ?? current.agentKind,
     workspaceKind: patch.workspaceKind ?? current.workspaceKind,
@@ -90,8 +91,8 @@ function normalizeWorkingDirByDevice(value: unknown): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [deviceId, workingDir] of Object.entries(record)) {
     const id = deviceId.trim();
-    const dir = readString(workingDir);
-    if (id && dir) out[id] = dir;
+    // 目录原样保留(首尾空格可能是路径的一部分),只剔除非字符串 / 纯空白。
+    if (id && typeof workingDir === 'string' && workingDir.trim()) out[id] = workingDir;
   }
   return out;
 }

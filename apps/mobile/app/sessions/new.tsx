@@ -2148,15 +2148,24 @@ export default function NewRemoteSessionScreen() {
     setShowHiddenDirectories(false);
   }, [patchDraft]);
 
+  // 用户显式选定目录 → 该设备的目录记忆(#4103):同步进本地 state(本页内切走再切回
+  // 也拿最新值,落盘不回写 state,对齐 selectPermissionMode)并返回落盘 patch 片段。
+  // 路径原样保存,只用 trim 判空(首尾空格可能是路径的一部分)。设备未定时不记。
+  const rememberWorkingDirForDevice = useCallback((workingDir: string) => {
+    if (!selectedDeviceId || !workingDir.trim()) return undefined;
+    setNewSessionPreferences((prev) => prev
+      ? { ...prev, workingDirByDevice: { ...prev.workingDirByDevice, [selectedDeviceId]: workingDir } }
+      : prev);
+    return { deviceId: selectedDeviceId, workingDir };
+  }, [selectedDeviceId]);
+
   // 用户显式选定目录(快捷选择 / 目录浏览器确认):按设备记住,下次空白新建先恢复它(#4103)。
   // 自动取最近项目首项走上面的 selectWorkingDir,不算显式选择,不写记忆。
   const chooseWorkingDir = useCallback((workingDir: string) => {
-    const trimmed = workingDir.trim();
-    if (selectedDeviceId && trimmed) {
-      void saveNewSessionPreferences({ workingDirForDevice: { deviceId: selectedDeviceId, workingDir: trimmed } });
-    }
+    const remembered = rememberWorkingDirForDevice(workingDir);
+    if (remembered) void saveNewSessionPreferences({ workingDirForDevice: remembered });
     selectWorkingDir(workingDir);
-  }, [selectWorkingDir, selectedDeviceId]);
+  }, [rememberWorkingDirForDevice, selectWorkingDir]);
 
   const selectDialogueWorkspace = useCallback(() => {
     userTouchedWorkspaceRef.current = true;
@@ -2169,19 +2178,17 @@ export default function NewRemoteSessionScreen() {
 
   const selectRecentProject = useCallback((workingDir: string) => {
     userTouchedWorkspaceRef.current = true;
-    const trimmed = workingDir.trim();
+    // 显式点选最近项目 = 该设备的目录记忆(#4103);设备未定时只记模式。
+    const remembered = rememberWorkingDirForDevice(workingDir);
     void saveNewSessionPreferences({
       workspaceKind: 'project',
-      // 显式点选最近项目 = 该设备的目录记忆(#4103);设备未定时只记模式。
-      ...(selectedDeviceId && trimmed
-        ? { workingDirForDevice: { deviceId: selectedDeviceId, workingDir: trimmed } }
-        : {}),
+      ...(remembered ? { workingDirForDevice: remembered } : {}),
     });
     patchDraft({ workspaceKind: 'project', workingDir });
     setWorkspacePickerOpen(false);
     setBrowseOpen(false);
     setShowHiddenDirectories(false);
-  }, [patchDraft, selectedDeviceId]);
+  }, [patchDraft, rememberWorkingDirForDevice]);
 
   const openProjectBrowse = useCallback(() => {
     userTouchedWorkspaceRef.current = true;

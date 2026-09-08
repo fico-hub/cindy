@@ -138,6 +138,7 @@ describe('newSessionPreferenceStore', () => {
     } = await import('@/session/newSessionPreferenceStore');
 
     await saveNewSessionPreferences({ workingDirForDevice: { deviceId: 'devA', workingDir: '/repo/third' } });
+    // 路径原样保存:首尾空格可能是目录名的一部分(review:Greptile P1)
     await saveNewSessionPreferences({ workingDirForDevice: { deviceId: 'devB', workingDir: ' /other/app ' } });
     // 同设备再次选择覆盖上次;空值 / 空设备被忽略,不清掉已有记忆。
     await saveNewSessionPreferences({ workingDirForDevice: { deviceId: 'devA', workingDir: '/repo/fourth' } });
@@ -150,19 +151,19 @@ describe('newSessionPreferenceStore', () => {
       device: null,
       workspaceKind: 'dialogue',
       permissionModeByAgent: {},
-      workingDirByDevice: { devA: '/repo/fourth', devB: '/other/app' },
+      workingDirByDevice: { devA: '/repo/fourth', devB: ' /other/app ' },
     });
     expect(JSON.parse(store.get(__testing.storageKey) ?? '{}')).toEqual({
       workspaceKind: 'dialogue',
-      workingDirByDevice: { devA: '/repo/fourth', devB: '/other/app' },
+      workingDirByDevice: { devA: '/repo/fourth', devB: ' /other/app ' },
     });
 
     // 落盘里的非法条目(非字符串 / 空)在读取时被清洗,旧存储没有该字段也不报错。
     store.set(__testing.storageKey, JSON.stringify({
-      workingDirByDevice: { devA: '/repo/ok', devB: 42, ' ': '/x', devC: '' },
+      workingDirByDevice: { devA: '/repo/ok', devB: 42, ' ': '/x', devC: '', devD: ' /keep me ' },
     }));
     await expect(readNewSessionPreferences()).resolves.toMatchObject({
-      workingDirByDevice: { devA: '/repo/ok' },
+      workingDirByDevice: { devA: '/repo/ok', devD: ' /keep me ' },
     });
     store.set(__testing.storageKey, JSON.stringify({ workingDirByDevice: 'bad' }));
     await expect(readNewSessionPreferences()).resolves.toMatchObject({ workingDirByDevice: {} });

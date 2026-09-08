@@ -27,7 +27,8 @@ const declarations = new Set([
   'selectedDeviceId', 'selectedDeviceName', 'newSessionPreferences', 'newSessionPreferencesLoaded',
   'preferredDefaultDevice', 'recentWorkspaces', 'draft', 'initialWorkspaceKeyRef',
   'appliedDefaultDeviceKeyRef', 'userTouchedDeviceRef', 'userTouchedWorkspaceRef',
-  'patchDraft', 'selectWorkingDir', 'selectDialogueWorkspace', 'selectRecentProject', 'openProjectBrowse',
+  'patchDraft', 'selectWorkingDir', 'rememberWorkingDirForDevice', 'selectDialogueWorkspace',
+  'selectRecentProject', 'openProjectBrowse',
 ]);
 const effectMarkers = new Set([
   'drainStashedNewSessionDraft', 'readNewSessionPreferences',
@@ -67,6 +68,8 @@ interface WorkspaceState {
   selectDialogueWorkspace(): void;
   selectRecentProject(path: string): void;
   openProjectBrowse(): void;
+  /** 模拟页面 selectDevice 里与工作区相关的部分:标记用户动过设备、重置初始工作区决策、清空项目目录。 */
+  switchDevice(deviceId: string): void;
 }
 const bindingNames = [
   'useState', 'useRef', 'useMemo', 'useEffect', 'useCallback', 'DEFAULT_NEW_SESSION_DRAFT',
@@ -80,8 +83,14 @@ const bindingNames = [
 const compiled = ts.transpileModule(`function usePageWorkspace(bindings) {
   const { ${bindingNames.join(', ')} } = bindings;
   ${selected.map((statement) => statement.getText(source)).join('\n')}
+  const switchDevice = (deviceId) => {
+    userTouchedDeviceRef.current = true;
+    initialWorkspaceKeyRef.current = null;
+    setSelectedDeviceId(deviceId);
+    setDraft((current) => current.workspaceKind === 'project' ? { ...current, workingDir: '' } : current);
+  };
   return { draft, selectedDeviceId, newSessionPreferencesLoaded,
-    selectDialogueWorkspace, selectRecentProject, openProjectBrowse };
+    selectDialogueWorkspace, selectRecentProject, openProjectBrowse, switchDevice };
 }`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 const usePageWorkspace = new Function(`${compiled}; return usePageWorkspace;`)() as
   (bindings: Record<string, unknown>) => WorkspaceState;
@@ -211,6 +220,20 @@ describe('new session workspace page effects', () => {
       expect.objectContaining({ workingDirForDevice: expect.anything() }),
     );
     expect(page.bindings.loadBrowsePath).not.toHaveBeenCalled();
+  });
+
+  it('uses the directory chosen in this session after switching devices and back, not the stale stored one (#4103 Codex P2)', async () => {
+    const page = mountWorkspace();
+    await page.resolvePreferences('project', 'a', { a: '/projects/old-a' });
+    expect(page.current.draft.workingDir).toBe('/projects/old-a');
+    // 本页内显式换成新目录 → 内存里的设备记忆同步更新(落盘不回写 state)
+    act(() => page.current.selectRecentProject('/projects/new-a'));
+    expect(page.current.draft.workingDir).toBe('/projects/new-a');
+    // 切到 b(无记忆 → 最近首项),再切回 a:应恢复本页刚选的 new-a,而不是读取时的 old-a
+    act(() => page.current.switchDevice('b'));
+    expect(page.current.draft.workingDir).toBe('/projects/b');
+    act(() => page.current.switchDevice('a'));
+    expect(page.current.draft.workingDir).toBe('/projects/new-a');
   });
 
   it('falls back to the most recent workspace when only another device has a remembered directory', async () => {

@@ -841,8 +841,8 @@ export function pickInitialNewSessionWorkspace(
   rememberedWorkingDir?: string | null,
 ): string | null {
   if (currentWorkingDir.trim()) return null;
-  const remembered = rememberedWorkingDir?.trim();
-  if (remembered) return remembered;
+  // 记忆目录原样返回(首尾空格可能是路径的一部分),只用 trim 判空。
+  if (rememberedWorkingDir?.trim()) return rememberedWorkingDir;
   return recentWorkspaces[0]?.workingDir ?? null;
 }
 
