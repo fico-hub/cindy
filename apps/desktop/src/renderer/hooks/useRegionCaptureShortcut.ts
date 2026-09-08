@@ -8,6 +8,7 @@ import { NEW_MAKER_DRAFT_KEY } from '../features/cc-agent/newMakerDraftKeys';
 import {
   getDataOwnerGeneration,
   isDataOwnerGenerationCurrent,
+  isDataOwnerIdCurrent,
 } from '../contexts/dataOwnerGeneration';
 import { resolveAgentIslandVisibleSessionIdFromPath } from '../lib/agentIslandVisibleSessionRoute';
 import {
@@ -62,9 +63,11 @@ export function registerComposerCaptureDraftFlusher(
   const flushers = composerCaptureDraftFlushers.get(draftKey) ?? new Set<CaptureDraftFlusher>();
   flushers.add(entry);
   composerCaptureDraftFlushers.set(draftKey, flushers);
+  notifyCaptureLockChange();
   return () => {
     flushers.delete(entry);
     if (flushers.size === 0) composerCaptureDraftFlushers.delete(draftKey);
+    notifyCaptureLockChange();
   };
 }
 
@@ -176,7 +179,27 @@ export interface RegionCaptureTarget {
  * 主内容区当前 composer 的归属; 无 composer 的路由(设置/文档浏览等)返回
  * null, 触发端据此不消费按键。纯函数, 供单测直接断言。
  */
+const captureRouteOwners = new Map<string, Set<{ target: RegionCaptureTarget; owner: ReturnType<typeof getDataOwnerGeneration> }>>();
+
+/** Called only by a mounted, writable route-owner view after its ownership gate. */
+export function registerRegionCaptureRouteOwner(pathname: string, sessionId: string): () => void {
+  const entry = { target: { sessionId, draftKey: sessionId }, owner: getDataOwnerGeneration() };
+  const entries = captureRouteOwners.get(pathname) ?? new Set();
+  entries.add(entry);
+  captureRouteOwners.set(pathname, entries);
+  notifyCaptureLockChange();
+  return () => {
+    entries.delete(entry);
+    if (entries.size === 0) captureRouteOwners.delete(pathname);
+    notifyCaptureLockChange();
+  };
+}
+
 export function resolveRegionCaptureTargetFromPath(pathname: string): RegionCaptureTarget | null {
+  const registered = [...(captureRouteOwners.get(pathname) ?? [])].find((entry) => isDataOwnerIdCurrent(entry.owner));
+  if (registered) {
+    return composerCaptureDraftFlushers.get(registered.target.draftKey)?.size ? registered.target : null;
+  }
   if (pathname === '/cc-agent/new') {
     return { sessionId: null, draftKey: NEW_MAKER_DRAFT_KEY };
   }

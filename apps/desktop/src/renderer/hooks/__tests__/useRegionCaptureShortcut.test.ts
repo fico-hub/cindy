@@ -7,6 +7,7 @@ import { getDraft, saveDraft, plainTextToTiptapDoc } from '../../lib/composerDra
 import { NEW_MAKER_DRAFT_KEY } from '../../features/cc-agent/newMakerDraftKeys';
 import {
   appendRegionCaptureToDraft,
+  registerRegionCaptureRouteOwner,
   registerComposerCaptureDraftFlusher,
   getComposerCaptureLockVersion,
   isComposerCaptureLocked,
@@ -186,4 +187,24 @@ it.each([false, true])('capture flusher survives same-owner refresh but rejects 
   } finally {
     ownerTesting.reset();
   }
+});
+
+
+it('resolves only a mounted verified Bot route owner and revokes it on unmount/account switch', () => {
+  const path = '/bots/bot-a/session/session-a';
+  expect(resolveRegionCaptureTargetFromPath(path)).toBeNull();
+  setDataOwnerGeneration('account-a', 1);
+  const release = registerRegionCaptureRouteOwner(path, 'session-a');
+  expect(resolveRegionCaptureTargetFromPath(path)).toBeNull();
+  const releaseComposer = registerComposerCaptureDraftFlusher('session-a', () => {}, () => true);
+  try {
+    expect(resolveRegionCaptureTargetFromPath(path)).toEqual({ sessionId: 'session-a', draftKey: 'session-a' });
+    expect(resolveRegionCaptureTargetFromPath('/bots/bot-b/session/session-a')).toBeNull();
+    expect(resolveRegionCaptureTargetFromPath('/bots/bot-a/history/session-a')).toBeNull();
+    setDataOwnerGeneration('account-a', 2);
+    expect(resolveRegionCaptureTargetFromPath(path)?.sessionId).toBe('session-a');
+    setDataOwnerGeneration('account-b', 3);
+    expect(resolveRegionCaptureTargetFromPath(path)).toBeNull();
+  } finally { releaseComposer(); release(); ownerTesting.reset(); }
+  expect(resolveRegionCaptureTargetFromPath(path)).toBeNull();
 });
