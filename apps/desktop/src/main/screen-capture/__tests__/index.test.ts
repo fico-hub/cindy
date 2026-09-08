@@ -103,6 +103,21 @@ describe('registerScreenCaptureIpc', () => {
       pillFg: '#ffffff',
     });
 
+    await handler({}, {
+      overlayPalette: {
+        scrim: `rgb(${'1'.repeat(129)})`,
+        selectionBorder: `rgb(${' '.repeat(129)}1)`,
+        pillBg: `${' '.repeat(129)}#fff`,
+        pillFg: '#123456',
+      },
+    });
+    expect(mocks.overlayCapture).toHaveBeenLastCalledWith(expect.any(Number), expect.any(String), {
+      scrim: 'rgba(0, 0, 0, 0.7)',
+      selectionBorder: 'rgba(255, 255, 255, 0.9)',
+      pillBg: '#1f1f1e',
+      pillFg: '#123456',
+    });
+
     // 未传配色 → 全默认
     await handler({});
     expect(mocks.overlayCapture).toHaveBeenLastCalledWith(expect.any(Number), expect.any(String), {

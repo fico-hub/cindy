@@ -131,7 +131,10 @@ function sanitizeOverlayPalette(payload: unknown): ScreenCaptureOverlayPalette {
   const source = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
   const pick = (key: keyof ScreenCaptureOverlayPalette): string => {
     const value = source[key];
-    if (typeof value === 'string' && SAFE_CSS_COLOR.test(value.trim())) return value.trim();
+    // Bound raw input before trim/regex and downstream HTML construction.
+    if (typeof value === 'string' && value.length <= 128 && SAFE_CSS_COLOR.test(value.trim())) {
+      return value.trim();
+    }
     return DEFAULT_OVERLAY_PALETTE[key];
   };
   return {
