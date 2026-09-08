@@ -168,6 +168,19 @@ describe('captureRegionViaOverlay', () => {
     expect(overlay.destroyed).toBe(true);
   });
 
+  it.each(['crop', 'encode'])('rejects and cleans up when native %s throws', async (stage) => {
+    const pending = captureRegionViaOverlay(5_000, 'drag to select', TEST_PALETTE);
+    const outcome = pending.then(() => 'unexpected-success', (error: Error) => error.message);
+    const overlay = await flushLoad();
+    const fail = () => { throw new Error('native failure'); };
+    if (stage === 'crop') mocks.frame.crop.mockImplementationOnce(fail);
+    else mocks.cropped.toPNG.mockImplementationOnce(fail);
+    expect(() => emitOverlayResult(501, { kind: 'select', rect: { x: 10, y: 20, width: 100, height: 50 } })).not.toThrow();
+    expect(await outcome).toBe('native failure');
+    expect(overlay.destroyed).toBe(true);
+    expect(mocks.ipcListeners.has('screen-capture:overlay-result')).toBe(false);
+  });
+
   it('resolves cancelled on cancel result and on near-zero selections', async () => {
     const first = captureRegionViaOverlay(5_000, 'drag to select', TEST_PALETTE);
     await flushLoad();

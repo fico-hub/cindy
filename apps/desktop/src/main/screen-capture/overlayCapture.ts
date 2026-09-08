@@ -192,7 +192,15 @@ export async function captureRegionViaOverlay(
           settle(() => resolve({ cancelled: true }));
           return;
         }
-        settle(() => resolve({ cancelled: false, data: frame.crop(px).toPNG() }));
+        // Native crop/encoding may throw: finish that work before marking settled.
+        let data: Buffer;
+        try {
+          data = frame.crop(px).toPNG();
+        } catch (error) {
+          settle(() => reject(error instanceof Error ? error : new Error(String(error))));
+          return;
+        }
+        settle(() => resolve({ cancelled: false, data }));
       };
 
       const onClosed = () => settle(() => resolve({ cancelled: true }));
