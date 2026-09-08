@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { accountVaultKey } from '@cindy/auth-client';
 import { getMobileAuthOwner, isMobileAuthOwnerCurrent, setMobileAuthOwner } from '@/auth/authOwnerGeneration';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -80,6 +82,25 @@ describe('newSessionPreferenceStore', () => {
     expect((await readNewSessionPreferences()).workingDirByDevice).toEqual({ 'shared-device': '/cn/private' });
     setMobileAuthOwner('shared-member', 'global');
     expect((await readNewSessionPreferences()).workingDirByDevice).toEqual({ 'shared-device': '/global/private' });
+  });
+
+  it('keeps the bare owner ID accepted by both live creation guards and recovery namespaces', () => {
+    setMobileAuthOwner('shared-member', 'cn');
+    // These are the actual normal/goal creation predicates, not a copied guard.
+    const source = readFileSync(resolve(process.cwd(), 'app/sessions/new.tsx'), 'utf8');
+    const guards = [...source.matchAll(/const isCurrentOwner = \(\) => \(([\s\S]*?)\n    \);/g)];
+    expect(guards).toHaveLength(2);
+    for (const [, predicate] of guards) {
+      const accepts = new Function('authOwnerAtCreate', 'accountIdAtCreate', 'isMobileAuthOwnerCurrent', `return (${predicate});`);
+      const currentOwner = getMobileAuthOwner();
+      expect(accepts(currentOwner, 'shared-member', isMobileAuthOwnerCurrent)).toBe(true);
+      setMobileAuthOwner('shared-member', 'global');
+      expect(accepts(currentOwner, 'shared-member', isMobileAuthOwnerCurrent)).toBe(false);
+      setMobileAuthOwner('shared-member', 'cn');
+    }
+    // Existing recovery entries are namespaced by the bare membership ID.
+    expect(getMobileAuthOwner().accountId).toBe('shared-member');
+    expect(source.match(/const worktreeAccountId = authOwnerAtCreate.accountId;/g)).toHaveLength(2);
   });
 
   it('stores the last selected device and agent for new sessions', async () => {

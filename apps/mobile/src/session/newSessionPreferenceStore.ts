@@ -28,7 +28,7 @@ export async function readNewSessionPreferences(): Promise<NewSessionStoredPrefe
   // 刚选完就重新打开新建页时，也要看到已提交但尚未落盘的选择。
   const owner = getMobileAuthOwner();
   await writeChain;
-  const preferences = await loadNewSessionPreferences(owner.accountId);
+  const preferences = await loadNewSessionPreferences(owner.accountKey);
   return isMobileAuthOwnerCurrent(owner) ? preferences : { ...preferences, workingDirByDevice: {} };
 }
 
@@ -70,7 +70,7 @@ async function writeNewSessionPreferences(
   patch: NewSessionPreferencePatch,
   owner: MobileAuthOwnerGeneration,
 ): Promise<void> {
-  const current = await loadNewSessionPreferences(owner.accountId);
+  const current = await loadNewSessionPreferences(owner.accountKey);
   const permissionPatch = patch.permissionModeForAgent;
   const workingDirPatch = patch.workingDirForDevice;
   const workingDirDeviceId = workingDirPatch?.deviceId.trim() ?? '';
@@ -92,8 +92,8 @@ async function writeNewSessionPreferences(
         : current.workingDirByDevice,
   };
   await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(serializePreferences(next))).catch(() => undefined);
-  if (workingDirDeviceId && workingDirValue && owner.accountId && isMobileAuthOwnerCurrent(owner)) {
-    await AsyncStorage.setItem(workingDirStorageKey(owner.accountId), JSON.stringify(next.workingDirByDevice)).catch(() => undefined);
+  if (workingDirDeviceId && workingDirValue && owner.accountKey && isMobileAuthOwnerCurrent(owner)) {
+    await AsyncStorage.setItem(workingDirStorageKey(owner.accountKey), JSON.stringify(next.workingDirByDevice)).catch(() => undefined);
   }
 }
 
@@ -101,7 +101,7 @@ export function clearNewSessionPreferences(): Promise<void> {
   const owner = getMobileAuthOwner();
   const next = writeChain.then(async () => {
     await AsyncStorage.removeItem(STORAGE_KEY);
-    if (owner.accountId) await AsyncStorage.removeItem(workingDirStorageKey(owner.accountId));
+    if (owner.accountKey) await AsyncStorage.removeItem(workingDirStorageKey(owner.accountKey));
   });
   writeChain = next.catch(() => undefined);
   return writeChain;
