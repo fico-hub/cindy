@@ -226,11 +226,15 @@ export async function captureRegionViaOverlay(
       const onReady = (event: Electron.IpcMainEvent) => {
         if (settled || overlay.isDestroyed()) return;
         if (event.sender.id !== overlay.webContents.id) return;
-        const payload: ScreenCaptureOverlayInitPayload = {
-          imageDataUrl: frame.toDataURL(),
-          displaySize: { width: display.size.width, height: display.size.height },
-        };
-        overlay.webContents.send(SCREEN_CAPTURE_OVERLAY_INIT_CHANNEL, payload);
+        try {
+          const payload: ScreenCaptureOverlayInitPayload = {
+            imageDataUrl: frame.toDataURL(),
+            displaySize: { width: display.size.width, height: display.size.height },
+          };
+          overlay.webContents.send(SCREEN_CAPTURE_OVERLAY_INIT_CHANNEL, payload);
+        } catch (error) {
+          settle(() => reject(error instanceof Error ? error : new Error(String(error))));
+        }
       };
 
       // show() 等冻结帧 <img> 解码完成(loadURL resolve 只代表 HTML 加载完,

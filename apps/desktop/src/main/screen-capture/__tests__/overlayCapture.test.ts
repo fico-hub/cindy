@@ -181,6 +181,19 @@ describe('captureRegionViaOverlay', () => {
     expect(mocks.ipcListeners.has('screen-capture:overlay-result')).toBe(false);
   });
 
+  it.each(['serialize', 'send'])('rejects and cleans up when ready %s throws', async (stage) => {
+    const pending = captureRegionViaOverlay(5_000, 'drag to select', TEST_PALETTE);
+    const outcome = pending.then(() => 'unexpected-success', (error: Error) => error.message);
+    const overlay = await flushLoad();
+    const fail = () => { throw new Error('ready failure'); };
+    if (stage === 'serialize') mocks.frame.toDataURL.mockImplementationOnce(fail);
+    else overlay.webContents.send.mockImplementationOnce(fail);
+    expect(() => emitOverlayReady(501)).not.toThrow();
+    expect(await outcome).toBe('ready failure');
+    expect(overlay.destroyed).toBe(true);
+    expect(mocks.ipcListeners.has('screen-capture:overlay-ready')).toBe(false);
+  });
+
   it('resolves cancelled on cancel result and on near-zero selections', async () => {
     const first = captureRegionViaOverlay(5_000, 'drag to select', TEST_PALETTE);
     await flushLoad();
