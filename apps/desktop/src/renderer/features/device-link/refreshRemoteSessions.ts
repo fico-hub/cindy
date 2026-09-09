@@ -337,6 +337,9 @@ async function probeMissingSessionStatuses(
   if (queue.length === 0) return;
   const count = Math.min(MISSING_STATUS_PROBE_LIMIT, queue.length);
   const candidates = queue.slice(0, count);
+  const snapshots = new Map(
+    remoteProjectsStore.getDeviceSessions(deviceId).map((session) => [session.id, session]),
+  );
   const results = await Promise.all(
     candidates.map(async (sessionId) => {
       try {
@@ -355,6 +358,12 @@ async function probeMissingSessionStatuses(
   if (!remoteProjectsStore.isLatestSnapshotEpoch(deviceId, epoch, 'active')) return;
   const terminalIds = new Set<string>();
   for (const result of results) {
+    // A live push accepted while this GET was in flight is newer than its
+    // snapshot. Do not roll its model/status back; the next tick can reconcile.
+    const current = remoteProjectsStore
+      .getDeviceSessions(deviceId)
+      .find((session) => session.id === result.sessionId);
+    if (current !== snapshots.get(result.sessionId)) continue;
     if (result.errorCode === 'NOT_FOUND') {
       terminalIds.add(result.sessionId);
       remoteProjectsStore.applyPatch(deviceId, result.sessionId, { status: 'deleted' });
@@ -423,22 +432,30 @@ async function runRefreshRemoteDeviceSessions(
         if (!remoteProjectsStore.isLatestSnapshotEpoch(deviceId, epoch, status))
           return 'superseded';
         const sessions = parseRemoteSessionList(value, status);
+        // Companions are fetched by resource:get + sessions:get, not by the
+        // ordinary task list. Keep their live state and reconcile them by id,
+        // even when the ordinary list is empty or is a full replacement.
+        const incomingIds = new Set(sessions.map((session) => session.id));
+        const missingSessions = remoteProjectsStore
+          .getDeviceSessions(deviceId, status)
+          .filter((session) => !incomingIds.has(session.id));
+        const missingCompanionIds = missingSessions
+          .filter((session) => session.source === 'bot')
+          .map((session) => session.id);
         if ((opts.snapshotMode ?? 'merge') === 'merge') {
-          const incomingIds = new Set(sessions.map((session) => session.id));
-          const missingSessionIds = remoteProjectsStore
-            .getDeviceSessions(deviceId, status)
-            .filter((session) => !incomingIds.has(session.id))
-            .map((session) => session.id);
+          const missingSessionIds = missingSessions.map((session) => session.id);
           // archived 使用与本地侧栏一致的 1000 条产品窗口，可直接替换并清掉断线期间的
           // 删除 / 取消归档陈旧行；active 仍保持 200 条轻量窗口，满窗时有界补查缺席缓存。
           if (status === 'archived' || sessions.length < LIST_LIMIT) {
             if (status === 'active') {
-              missingStatusProbeQueues.delete(deviceId);
-              for (const sessionId of missingSessionIds) {
-                removeRemoteSessionActivityEntry(sessionId);
+              for (const session of missingSessions) {
+                if (session.source !== 'bot') removeRemoteSessionActivityEntry(session.id);
               }
             }
             remoteProjectsStore.setDeviceSessions(deviceId, deviceName, sessions, status);
+            if (status === 'active') {
+              await probeMissingSessionStatuses(deviceId, epoch, missingCompanionIds);
+            }
           } else {
             remoteProjectsStore.mergeDeviceSessions(deviceId, deviceName, sessions, status);
             if (status === 'active') {
@@ -447,6 +464,9 @@ async function runRefreshRemoteDeviceSessions(
           }
         } else {
           remoteProjectsStore.setDeviceSessions(deviceId, deviceName, sessions, status);
+          if (status === 'active') {
+            await probeMissingSessionStatuses(deviceId, epoch, missingCompanionIds);
+          }
         }
       }
       if (opts.scope === 'schedule' || opts.scope === 'both') {
@@ -477,7 +497,9 @@ async function runRefreshRemoteDeviceSessions(
           log.debug('remote schedule index unavailable');
         }
       }
-      return 'ok'; // 成功
+      return remoteProjectsStore.isLatestSnapshotEpoch(deviceId, epoch, status)
+        ? 'ok'
+        : 'superseded';
     } catch (err) {
       if (!remoteProjectsStore.isLatestSnapshotEpoch(deviceId, epoch, status)) {
         return 'superseded';

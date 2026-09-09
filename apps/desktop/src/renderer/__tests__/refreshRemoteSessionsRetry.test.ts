@@ -114,6 +114,173 @@ describe('isTransientRemoteError', () => {
 });
 
 describe('refreshRemoteDeviceSessions retry', () => {
+  it.each(['merge', 'replace'] as const)(
+    '%s refresh preserves a remote companion omitted by the ordinary task list',
+    async (snapshotMode) => {
+      const d = did();
+      const bot = session('remote-lizi', {
+        source: 'bot',
+        model: 'gpt-6-astra',
+        agentKind: 'codex',
+        providerId: 'openai',
+      });
+      remoteProjectsStore.pinSessionOrigin(d, bot.id);
+      remoteProjectsStore.mergeDeviceSessions(d, 'MacBook', [bot, session('old-task')]);
+      invoke.mockImplementation(async (_device, channel, args) => {
+        if (channel === 'local-db:sessions:list') return [session('ordinary-task')];
+        if (channel === 'local-db:sessions:get' && args[0] === bot.id) return bot;
+        throw new Error(`Unexpected channel: ${channel}`);
+      });
+
+      for (let turn = 0; turn < 3; turn++) {
+        await expect(refreshRemoteDeviceSessions(d, 'MacBook', { snapshotMode })).resolves.toBe(
+          'ok',
+        );
+        const mirrored = remoteProjectsStore.getDeviceSessions(d).find((row) => row.id === bot.id);
+        expect(mirrored).toMatchObject({
+          model: 'gpt-6-astra',
+          agentKind: 'codex',
+          providerId: 'openai',
+          source: 'bot',
+          deviceLinkDeviceId: d,
+        });
+        expect(remoteProjectsStore.getSessionDeviceId(bot.id)).toBe(d);
+      }
+      expect(remoteProjectsStore.getDeviceSessions(d).some((row) => row.id === 'old-task')).toBe(
+        false,
+      );
+    },
+  );
+
+  it('preserves a busy companion and applies the host runtime model across an empty list refresh', async () => {
+    const d = did();
+    const bot = session('busy-companion', {
+      source: 'bot',
+      model: 'gpt-6-astra',
+      agentKind: 'codex',
+    });
+    remoteProjectsStore.mergeDeviceSessions(d, 'MacBook', [bot]);
+    applyRemoteSessionActivity(d, {
+      sessionId: bot.id,
+      phase: 'running',
+      compactDetail: 'generating',
+    });
+    const runtimeEffective = {
+      agentKind: 'codex' as const,
+      model: 'gpt-6-astra',
+      providerId: 'openai',
+      effort: 'high' as const,
+      fastMode: false,
+    };
+    invoke.mockImplementation(async (_device, channel) =>
+      channel === 'local-db:sessions:list' ? [] : { ...bot, runtimeEffective },
+    );
+
+    await refreshRemoteDeviceSessions(d);
+
+    expect(getRemoteSessionActivity(bot.id)?.phase).toBe('running');
+    expect(remoteProjectsStore.getDeviceSessions(d)[0]).toMatchObject({ runtimeEffective });
+    remoteProjectsStore.applyPatch(d, bot.id, { effort: 'high', listPreview: 'reply received' });
+    expect(remoteProjectsStore.getDeviceSessions(d)[0]).toMatchObject({
+      model: 'gpt-6-astra',
+      effort: 'high',
+      listPreview: 'reply received',
+    });
+  });
+
+  it('keeps the companion snapshot when its detail request times out, without retrying other peers', async () => {
+    const d = did();
+    const other = did();
+    const bot = session('offline-companion', { source: 'bot', model: 'gpt-6-astra' });
+    remoteProjectsStore.mergeDeviceSessions(d, 'MacBook', [bot]);
+    remoteProjectsStore.setDeviceSessions(other, 'Other Mac', [session('unaffected')]);
+    applyRemoteSessionActivity(d, {
+      sessionId: bot.id,
+      phase: 'running',
+      compactDetail: 'generating',
+    });
+    invoke.mockImplementation(async (device, channel) => {
+      expect(device).toBe(d);
+      if (channel === 'local-db:sessions:list') return [];
+      throw new Error('[DEVICE_LINK_TIMEOUT] detail timed out');
+    });
+
+    await expect(refreshRemoteDeviceSessions(d)).resolves.toBe('ok');
+
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(remoteProjectsStore.getDeviceSessions(d)[0]?.model).toBe('gpt-6-astra');
+    expect(getRemoteSessionActivity(bot.id)?.phase).toBe('running');
+    expect(remoteProjectsStore.getDeviceSessions(other)[0]?.deviceLinkConnectionStatus).toBe(
+      'connected',
+    );
+  });
+
+  it.each(['deleted', 'archived', 'missing'] as const)(
+    'reconciles a companion that became %s while disconnected',
+    async (terminal) => {
+      const d = did();
+      const bot = session('retired-companion', { source: 'bot' });
+      remoteProjectsStore.mergeDeviceSessions(d, 'MacBook', [bot]);
+      remoteProjectsStore.markDeviceDisconnected(d);
+      applyRemoteSessionActivity(d, {
+        sessionId: bot.id,
+        phase: 'running',
+        compactDetail: 'generating',
+      });
+      invoke.mockImplementation(async (_device, channel) => {
+        if (channel === 'local-db:sessions:list') return [];
+        if (terminal === 'missing') throw new Error('[NOT_FOUND] session missing');
+        return { ...bot, status: terminal };
+      });
+
+      await refreshRemoteDeviceSessions(d, 'MacBook', { snapshotMode: 'replace' });
+
+      expect(getRemoteSessionActivity(bot.id)).toBeUndefined();
+      expect(remoteProjectsStore.getDeviceSessions(d, 'active')).toHaveLength(0);
+      expect(remoteProjectsStore.getDeviceSessions(d)).toHaveLength(
+        terminal === 'archived' ? 1 : 0,
+      );
+    },
+  );
+
+  it('does not revive or modify a companion from a late detail response after disconnect', async () => {
+    const d = did();
+    const bot = session('late-companion', { source: 'bot', model: 'gpt-6-astra' });
+    const detail = deferred<Session>();
+    remoteProjectsStore.mergeDeviceSessions(d, 'MacBook', [bot]);
+    invoke.mockImplementation(async (_device, channel) =>
+      channel === 'local-db:sessions:list' ? [] : detail.promise,
+    );
+    const refresh = refreshRemoteDeviceSessions(d);
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
+    remoteProjectsStore.markDeviceDisconnected(d);
+    detail.resolve({ ...bot, model: 'stale-model' });
+    await expect(refresh).resolves.toBe('superseded');
+    expect(remoteProjectsStore.getDeviceSessions(d)[0]).toMatchObject({
+      model: 'gpt-6-astra',
+      deviceLinkConnectionStatus: 'disconnected',
+    });
+  });
+
+  it('does not overwrite a live model switch with an older companion detail response', async () => {
+    const d = did();
+    const bot = session('switching-companion', { source: 'bot', model: 'old-model' });
+    const detail = deferred<Session>();
+    remoteProjectsStore.mergeDeviceSessions(d, 'MacBook', [bot]);
+    invoke.mockImplementation(async (_device, channel) =>
+      channel === 'local-db:sessions:list' ? [] : detail.promise,
+    );
+    const refresh = refreshRemoteDeviceSessions(d);
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
+    remoteProjectsStore.applyPatch(d, bot.id, { model: 'gpt-6-astra', agentKind: 'codex' });
+    detail.resolve(bot);
+    await refresh;
+    expect(remoteProjectsStore.getDeviceSessions(d)[0]).toMatchObject({
+      model: 'gpt-6-astra',
+      agentKind: 'codex',
+    });
+  });
+
   it('被控端 DB 未就绪:重试两次后成功 → 会话出现在控制端', async () => {
     const d = did();
     invoke
