@@ -1376,6 +1376,18 @@ export class Scheduler extends EventEmitter {
     }
     const existing = await this.get(id);
     if (!existing) throw new Error(`Schedule not found: ${id}`);
+    // 换引擎(agentKind 变了)时,上一引擎的 model / providerId / effort 是另一套模型
+    // 目录里的路由,对新引擎没有意义,patch 没显式给就丢弃(带 key 的 undefined →
+    // storage 清列 NULL),让任务回到新引擎的默认路由。否则陈旧路由会被原样带过去:
+    // fire 时路由守卫对「没有任何来源提供该模型」的组合放行,runner 再把绑定会话的
+    // 凭证/模型切到这条跑不通的路由上,每轮都以上游拒绝失败,会话 meta 也被写坏
+    // (伙伴接管期用 Codex 模型钉过的任务改回 Claude Code 后即复现)。
+    // 显式给了(含带 key 的 undefined)按调用方意图,不覆盖。
+    if (patch.agentKind !== undefined && patch.agentKind !== existing.agentKind) {
+      for (const key of ['model', 'providerId', 'effort'] as const) {
+        if (!Object.prototype.hasOwnProperty.call(patch, key)) updates[key] = undefined;
+      }
+    }
     const candidate: Schedule = { ...existing, ...updates };
     validateScheduleExecutionShape(
       candidate,

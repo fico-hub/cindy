@@ -363,6 +363,51 @@ describe('Scheduler', () => {
     expect(plain.workspaceKind).toBe('project');
   });
 
+  it('update() 换 agentKind 时丢弃上一引擎的 model / providerId / effort(回到默认路由)', async () => {
+    // 伙伴接管期把任务钉在 Codex 的 gpt-6-astra@openai 上,之后改回 Claude Code 却没法
+    // 清模型 → 任务带着 Claude Code 跑不了的路由,每轮 fire 都被上游拒绝。
+    const sch = await h.scheduler.create({
+      ...baseInput,
+      agentKind: 'codex',
+      model: 'gpt-6-astra',
+      providerId: 'openai',
+      effort: 'medium',
+    });
+    const switched = await h.scheduler.update(sch.id, { agentKind: 'claude-code' });
+    expect(switched.agentKind).toBe('claude-code');
+    expect(switched.model).toBeUndefined();
+    expect(switched.providerId).toBeUndefined();
+    expect(switched.effort).toBeUndefined();
+    // 落库 patch 必须带 key(storage 按 hasOwnProperty 清列),不能只是省略
+    const stored = h.storage.schedules.get(sch.id)!;
+    expect(Object.prototype.hasOwnProperty.call(stored, 'model')).toBe(true);
+    expect(stored.model).toBeUndefined();
+    expect(stored.providerId).toBeUndefined();
+
+    // 反证 1:agentKind 没变 → 路由原样保留
+    const sch2 = await h.scheduler.create({
+      ...baseInput,
+      agentKind: 'codex',
+      model: 'gpt-6-astra',
+      providerId: 'openai',
+    });
+    const same = await h.scheduler.update(sch2.id, { agentKind: 'codex', prompt: 'p2' });
+    expect(same.model).toBe('gpt-6-astra');
+    expect(same.providerId).toBe('openai');
+    const untouched = await h.scheduler.update(sch2.id, { prompt: 'p3' });
+    expect(untouched.model).toBe('gpt-6-astra');
+
+    // 反证 2:换引擎同时显式给了新路由 → 按调用方意图
+    const explicit = await h.scheduler.update(sch2.id, {
+      agentKind: 'claude-code',
+      model: 'claude-fable-5-1',
+      providerId: 'anthropic',
+    });
+    expect(explicit.model).toBe('claude-fable-5-1');
+    expect(explicit.providerId).toBe('anthropic');
+    expect(explicit.effort).toBeUndefined();
+  });
+
   it('update() 给了真实 workingDir 时翻成 project(与 create 推断对称)', async () => {
     // 对话任务后来被显式改了项目目录 → 不能仍留 dialogue,否则 fire 时
     // 新目录会被管理工作区分配覆盖,显式设置被静默丢弃

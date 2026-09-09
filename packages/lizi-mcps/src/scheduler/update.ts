@@ -40,10 +40,26 @@ export function registerScheduleUpdateTool(
       recurring: z.boolean().optional(),
       agentKind: z.enum(AGENT_KIND).optional(),
       kind: z.literal('cron').optional(),
-      model: z.string().optional(),
-      providerId: z.string().optional(),
-      effort: z.enum(EFFORT).optional(),
-      workingDir: z.string().optional(),
+      model: z
+        .string()
+        .nullable()
+        .optional()
+        .describe('传 null = 清空,回到所选 agentKind 的默认模型路由;省略 = 不修改。换 agentKind 时上一引擎的 model 会被引擎自动丢弃,无需手动清。'),
+      providerId: z
+        .string()
+        .nullable()
+        .optional()
+        .describe('传 null = 清空(同 model 一起回到默认路由);省略 = 不修改。'),
+      effort: z
+        .enum(EFFORT)
+        .nullable()
+        .optional()
+        .describe('传 null = 清空(按模型默认档);省略 = 不修改。'),
+      workingDir: z
+        .string()
+        .nullable()
+        .optional()
+        .describe('传 null = 清空(回到绑定会话 / 对话工作区语义);省略 = 不修改。'),
       useWorktree: z.boolean().optional(),
       targetSessionId: z
         .string()
@@ -110,6 +126,15 @@ export function registerScheduleUpdateTool(
           // cronExpr 壁钟槽位语义。引擎遵循真 partial 契约(没带 key 就不动),
           // 这是 JSON 边界唯一的清空表达。
           input = { ...input, intervalMs: undefined };
+        }
+        // 同上:model / providerId / effort / workingDir 的 null 也翻成带 key 的
+        // undefined(storage 按 hasOwnProperty 判定 → 清列 NULL)。此前 schema 只收
+        // string,agent 想把任务从一个引擎的模型路由上摘下来(如伙伴接管期用 Codex
+        // 模型跑过、再改回 Claude Code)只能报 INVALID_ARGS,陈旧路由永远清不掉。
+        for (const key of ['model', 'providerId', 'effort', 'workingDir'] as const) {
+          if ((patch as Record<string, unknown>)[key] === null) {
+            input = { ...input, [key]: undefined };
+          }
         }
         // 无条件校验本次 patch 显式带的 cronExpr / timezone(函数对缺省字段是
         // no-op)。不能只在 patch 带 intervalMs 数值时校验:任务已有 intervalMs、
