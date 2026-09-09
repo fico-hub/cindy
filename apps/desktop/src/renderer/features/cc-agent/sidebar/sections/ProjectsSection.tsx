@@ -922,6 +922,8 @@ export function ProjectsSection({
         <SessionGroupNode
           key={`bot-group:${entry.bot.botId}`}
           sessions={entry.bot.sessions}
+          lamp={lampAgg(entry.bot.sessions)}
+          foldExemptSessionIds={lampFoldExemptIds}
           groupIcon={
             <BotAvatar
               bot={{
