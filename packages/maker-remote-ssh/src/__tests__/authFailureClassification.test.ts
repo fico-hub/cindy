@@ -14,7 +14,7 @@
 
 import { describe, it, expect } from 'vitest';
 
-import { isAuthFailure, authFailureHint } from '../RemoteHost.js';
+import { isAuthFailure, authFailureHint, describeIdentityPath } from '../RemoteHost.js';
 import type { HostConfig } from '../types.js';
 
 function cfg(partial: Partial<HostConfig>): HostConfig {
@@ -71,6 +71,83 @@ describe('isAuthFailure recognizes every authFailureHint variant', () => {
     expect(
       isAuthFailure(authFailureHint(cfg({ authMethod: 'password' as HostConfig['authMethod'] }))),
     ).toBe(true);
+  });
+});
+
+describe('authFailureHint names the identity set and keeps the real reason (#4201)', () => {
+  const pinnedCfg = cfg({
+    authMethod: 'agent',
+    sshAuthentication: {
+      identitiesOnly: true,
+      configuredIdentityFiles: ['/home/u/.ssh/id_ed25519_github'],
+      identityFileDirectiveSeen: true,
+      identityFileNoneSeen: false,
+      allowedAgentFingerprints: ['SHA256:test'],
+    },
+  });
+
+  it('pinned agent: says the remote rejected the configured identity set, names the IdentityFile, and does not assert the key is missing from the agent', () => {
+    const hint = authFailureHint(pinnedCfg, { homeDir: '/home/u' });
+    expect(hint).toContain('IdentityFile: ~/.ssh/id_ed25519_github');
+    expect(hint).toContain('was rejected by the remote');
+    expect(hint).not.toContain('has no key');
+    // 绝对路径不进用户可见文案(主目录缩写),也不猜 .pub 文件名。
+    expect(hint).not.toContain('/home/u/.ssh');
+    expect(hint).not.toContain('.pub');
+    expect(isAuthFailure(hint)).toBe(true);
+  });
+
+  it('pinned agent: explicit Cindy identity marker is listed first, de-duplicated against ssh_config entries', () => {
+    const hint = authFailureHint(
+      cfg({
+        ...pinnedCfg,
+        identityFile: '/home/u/.ssh/id_ed25519_github',
+        sshAuthentication: {
+          ...pinnedCfg.sshAuthentication!,
+          configuredIdentityFiles: ['/home/u/.ssh/id_ed25519_github', '/home/u/.ssh/id_rsa'],
+        },
+      }),
+      { homeDir: '/home/u' },
+    );
+    expect(hint).toContain('IdentityFile: ~/.ssh/id_ed25519_github, ~/.ssh/id_rsa');
+    expect(hint.split('id_ed25519_github').length - 1).toBe(1);
+  });
+
+  it('appends the underlying ssh2 reason once, and not when the text already says it', () => {
+    const hint = authFailureHint(pinnedCfg, {
+      homeDir: '/home/u',
+      cause: 'All configured authentication methods failed',
+    });
+    expect(hint).toContain('(ssh: All configured authentication methods failed)');
+    expect(hint.split('All configured authentication methods failed').length - 1).toBe(1);
+    expect(isAuthFailure(hint)).toBe(true);
+
+    const plain = authFailureHint(cfg({ authMethod: 'agent' }), { cause: '  ' });
+    expect(plain).not.toContain('(ssh:');
+    const fallback = authFailureHint(
+      cfg({ authMethod: 'password' as HostConfig['authMethod'] }),
+      { cause: 'Authentication failed.' },
+    );
+    expect(fallback).toContain('(ssh: Authentication failed.)');
+    expect(isAuthFailure(fallback)).toBe(true);
+  });
+
+  it('key mode names the identity by basename only when it is outside the home directory', () => {
+    const hint = authFailureHint(
+      cfg({ authMethod: 'key', identityFile: '/srv/keys/deploy.key' }),
+      { homeDir: '/home/u', cause: 'All configured authentication methods failed' },
+    );
+    expect(hint).toContain('The configured identity file (deploy.key) was rejected by the remote');
+    expect(hint).not.toContain('/srv/keys');
+    expect(isAuthFailure(hint)).toBe(true);
+  });
+
+  it('describeIdentityPath abbreviates home, keeps ~ forms, and otherwise falls back to the basename', () => {
+    expect(describeIdentityPath('/home/u/.ssh/id_ed25519', '/home/u')).toBe('~/.ssh/id_ed25519');
+    expect(describeIdentityPath('~/.ssh/id_ed25519', '/home/u')).toBe('~/.ssh/id_ed25519');
+    expect(describeIdentityPath('/srv/keys/deploy.key', '/home/u')).toBe('deploy.key');
+    expect(describeIdentityPath('/home/u2/.ssh/id_rsa', '/home/u')).toBe('id_rsa');
+    expect(describeIdentityPath('   ', '/home/u')).toBe('');
   });
 });
 
