@@ -886,18 +886,32 @@ export class WechatIM extends BaseIM implements RichChannelIM {
     // A send rejection can abort this epoch while a poll batch is already in
     // flight. The continuation below must not then publish a 'connected'
     // phase and hide the needs_reauth transition that stopped the epoch.
-    const isCurrent = () => this.#isSendEpochCurrent(binding.bindingEpoch, signal);
+    const isCurrent = () =>
+      this.#isSendEpochCurrent(binding.bindingEpoch, signal) &&
+      this.#isGenerationCurrent(generation);
     let cursor = binding.cursor;
     let failures = 0;
     while (!signal.aborted && this.#isGenerationCurrent(generation)) {
       try {
         const result = await transport.poll(cursor, signal);
+        if (!isCurrent()) return;
         const now = this.#now();
-        const preparedInputs = await Promise.all(
+        const preparations = await Promise.allSettled(
           result.messages.map((message, index) =>
             this.#toTaskInput(binding.bindingEpoch, message, transport, signal, now, index),
           ),
         );
+        const preparedInputs = preparations.flatMap((item) =>
+          item.status === 'fulfilled' ? [item.value] : [],
+        );
+        const failed = preparations.find((item) => item.status === 'rejected');
+        if (failed) {
+          await removeUncommittedWechatFiles(
+            preparedInputs.flatMap((input) => input.fileAttachments),
+            new Set(),
+          );
+          throw failed.reason;
+        }
         const interactionIndexes = new Set(
           result.messages
             .map((message, index) =>
@@ -917,10 +931,15 @@ export class WechatIM extends BaseIM implements RichChannelIM {
         const mediaRefs = normalPreparedInputs.flatMap((input) => input.mediaRefs);
         const fileAttachments = normalPreparedInputs.flatMap((input) => input.fileAttachments);
         const allFileAttachments = preparedInputs.flatMap((input) => input.fileAttachments);
+        if (!isCurrent()) {
+          await removeUncommittedWechatFiles(allFileAttachments, new Set());
+          return;
+        }
         let releasePollBarrier!: () => void;
         this.#pollBarrier = new Promise<void>((resolve) => {
           releasePollBarrier = resolve;
         });
+        const commitFence = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
         let committed;
         try {
           committed = await this.#requireStore().commitPollBatch({
@@ -932,18 +951,23 @@ export class WechatIM extends BaseIM implements RichChannelIM {
             mediaBlobs,
             mediaRefs,
             fileAttachments,
+            signal,
+            commitFence,
+            controlCommands: result.messages.flatMap((message, index) => {
+              const command = message.text.trim();
+              if (command !== '/stop' && command !== '/stop all') return [];
+              return [{
+                commandTaskId: preparedInputs[index]!.message.id,
+                ...(command === '/stop' ? { peerId: message.senderId } : {}),
+              }];
+            }),
+            pollEffects: result.messages.map((message) => ({
+              peerId: message.senderId,
+              contextToken: message.contextToken,
+            })),
           });
           await removeUncommittedWechatFiles(allFileAttachments, acceptedPollTaskIds(committed));
-          if (committed.committed) {
-            for (const message of result.messages) {
-              await this.#requireStore().refreshPendingOutboxContext({
-                bindingEpoch: binding.bindingEpoch,
-                peerId: message.senderId,
-                contextToken: message.contextToken,
-                now,
-              });
-            }
-          }
+          if (!committed.committed || !isCurrent()) return;
           if (committed.committed) {
             for (let index = 0; index < result.messages.length; index += 1) {
               const message = result.messages[index];
@@ -952,12 +976,7 @@ export class WechatIM extends BaseIM implements RichChannelIM {
               if (!message || !task || (command !== '/stop' && command !== '/stop all')) {
                 continue;
               }
-              await this.#requireStore().cancelForCommand({
-                bindingEpoch: binding.bindingEpoch,
-                commandTaskId: task.id,
-                ...(command === '/stop' ? { peerId: message.senderId } : {}),
-                now,
-              });
+              if (!isCurrent()) return;
               if (command === '/stop all') {
                 await this.#turnRuntime?.runner.disposeAllSessions();
               } else {
@@ -966,6 +985,7 @@ export class WechatIM extends BaseIM implements RichChannelIM {
                   userId: message.senderId,
                 });
               }
+              if (!isCurrent()) return;
               const pending = this.#pendingInteractions.get(message.senderId);
               if (pending) {
                 clearTimeout(pending.timer);
@@ -977,6 +997,7 @@ export class WechatIM extends BaseIM implements RichChannelIM {
             }
           }
           for (const index of interactionIndexes) {
+            if (!isCurrent()) return;
             const message = result.messages[index];
             if (message) {
               await this.#handleInteractionReplyMessage(
@@ -987,6 +1008,13 @@ export class WechatIM extends BaseIM implements RichChannelIM {
               );
             }
           }
+        } catch (error) {
+          // A rejected transaction owns no files. A successful transaction keeps
+          // its accepted attachments even if the epoch was stopped afterwards.
+          if (!committed && Atomics.load(commitFence, 0) !== 2) {
+            await removeUncommittedWechatFiles(allFileAttachments, new Set());
+          }
+          throw error;
         } finally {
           releasePollBarrier();
         }
@@ -1217,6 +1245,7 @@ export class WechatIM extends BaseIM implements RichChannelIM {
     bindingEpoch: string,
     signal: AbortSignal,
   ): Promise<void> {
+    if (!this.#isSendEpochCurrent(bindingEpoch, signal)) return;
     const pending = this.#pendingInteractions.get(message.senderId);
     if (!pending) return;
     const decision = parseWechatInteractionReply(pending.request, message.text);
