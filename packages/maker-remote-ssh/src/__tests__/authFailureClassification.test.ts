@@ -120,6 +120,16 @@ describe('authFailureHint names the identity set and keeps the real reason (#420
     expect(isAuthFailure(hint)).toBe(true);
   });
 
+  it('pinned agent, several keys offered but only some signed: does not claim every key was rejected', () => {
+    const hint = authFailureHint(pinnedCfg, {
+      homeDir: '/home/u',
+      agentOutcome: { offeredCount: 3, signedCount: 1, signFailureCount: 0 },
+    });
+    expect(hint).toContain('the remote rejected the key(s) ssh-agent offered from the configured identity set (IdentityFile: ~/.ssh/id_ed25519_github) before every identity was tried');
+    expect(hint).not.toContain('rejected every key');
+    expect(isAuthFailure(hint)).toBe(true);
+  });
+
   it('pinned agent, key offered but the agent could not sign: local problem, never blamed on the remote', () => {
     const hint = authFailureHint(pinnedCfg, {
       homeDir: '/home/u',

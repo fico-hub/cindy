@@ -350,8 +350,14 @@ export function authFailureHint(cfg: HostConfig, options: AuthFailureHintOptions
         );
       }
       if (outcome && (outcome.offeredCount ?? 0) > 0 && outcome.signedCount > 0) {
+        // A signature proves the remote saw that key; it does not prove every
+        // enumerated key was tried (MaxAuthTries can end the session early).
+        const everyKeyTried = outcome.signedCount >= (outcome.offeredCount ?? 0);
+        const rejected = everyKeyTried
+          ? `the remote rejected every key ssh-agent offered from the configured identity set${identitySet}`
+          : `the remote rejected the key(s) ssh-agent offered from the configured identity set${identitySet} before every identity was tried`;
         return withCause(
-          `Authentication failed for ${who}: the remote rejected every key ssh-agent offered from the configured identity set${identitySet}. `
+          `Authentication failed for ${who}: ${rejected}. `
             + 'Verify that identity\'s public key is installed on the remote, or re-add this host with the right identity.',
         );
       }

@@ -101,9 +101,21 @@ export async function resolveAuth(host: HostConfig): Promise<ResolvedAuth> {
 
   if (host.authMethod === 'agent') {
     let allowedFingerprints = host.sshAuthentication?.allowedAgentFingerprints;
-    let pinnedIdentityFiles: string[] = allowedFingerprints && allowedFingerprints.length > 0
-      ? [...(host.sshAuthentication?.configuredIdentityFiles ?? [])]
-      : [];
+    // Only the configured files whose public key actually made it into the pin
+    // set count as "this attempt's identities": with `IdentitiesOnly yes` and
+    // no explicit IdentityFile, sshConfig lists every default path but only
+    // fingerprints the ones that exist (#4201 review). Public-key files only;
+    // private keys are never read here.
+    let pinnedIdentityFiles: string[] = [];
+    if (allowedFingerprints && allowedFingerprints.length > 0) {
+      const allowed = new Set(allowedFingerprints);
+      for (const identityFile of host.sshAuthentication?.configuredIdentityFiles ?? []) {
+        const resolved = await resolveIdentityFingerprints(identityFile);
+        if (resolved.fingerprints.some((fingerprint) => allowed.has(fingerprint))) {
+          pinnedIdentityFiles.push(identityFile);
+        }
+      }
+    }
 
     // A marker-authenticated agent host may carry an explicit Cindy pin even
     // when IdentitiesOnly is no. External IdentityFile metadata never enters
