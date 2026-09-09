@@ -63,6 +63,7 @@ export interface MobilePendingSendItem {
   thumbs: MobileOutboxThumb[];
   /** 非图片附件数(pdf / office 等,渲染「N 个文件」计数行)。 */
   fileCount: number;
+  fileNames?: string[];
   /** 附件总数与已上传数(uploading 阶段渲染「上传中 k/N」)。 */
   attachmentCount: number;
   uploadedCount: number;
@@ -71,6 +72,31 @@ export interface MobilePendingSendItem {
   actions: MobilePendingSendActions | null;
   /** 展开后显示的提示(插队限制等)。 */
   hint: string | null;
+}
+
+export interface MobileMessageListExtraData {
+  pendingSendSelectedClientId: string | null;
+  shareSelectionActive: boolean;
+}
+
+/**
+ * LegendList 的行外刷新信号。待发送气泡的展开态不改变 data，必须把选中项放进
+ * extraData，才能让已复用的可见行重新计算操作区。
+ */
+export function buildMobileMessageListExtraData(
+  pendingSendSelectedClientId: string | null,
+  shareSelectionActive: boolean,
+): MobileMessageListExtraData {
+  return { pendingSendSelectedClientId, shareSelectionActive };
+}
+
+/** 待发送气泡是否处于展开态；生产渲染与状态转换测试共用同一判据。 */
+export function isPendingSendItemSelected(
+  item: Pick<MobilePendingSendItem, 'actions' | 'clientId' | 'phase'>,
+  selectedClientId: string | null,
+): boolean {
+  const interactive = item.actions !== null || item.phase === 'failed';
+  return interactive && selectedClientId === item.clientId;
 }
 
 export function pendingSendItemKey(clientId: string): string {
@@ -206,6 +232,7 @@ export function buildPendingSendItems(input: BuildPendingSendItemsInput): Mobile
       queueIndex,
       thumbs: attachments.thumbs,
       fileCount: attachments.fileCount,
+      fileNames: (item.files ?? []).filter((file) => file.category !== 'image').map((file) => file.name),
       attachmentCount: attachments.thumbs.length + attachments.fileCount,
       uploadedCount: attachments.thumbs.length + attachments.fileCount,
       errorText: null,
@@ -222,7 +249,8 @@ export function buildPendingSendItems(input: BuildPendingSendItemsInput): Mobile
   input.queue.forEach((item, index) => {
     const phase: MobilePendingSendPhase = input.editingClientId === item.clientId
       ? 'editing'
-      : input.steeringClientIds.has(item.clientId) || input.sendingClientIds.has(item.clientId)
+      : input.steeringClientIds.has(item.clientId)
+        || input.sendingClientIds.has(item.clientId)
         ? 'sending'
         : 'queued';
     pushQueued(item, phase, index + 1);
@@ -242,6 +270,7 @@ export function buildPendingSendItems(input: BuildPendingSendItemsInput): Mobile
       queueIndex: null,
       thumbs: item.thumbnails,
       fileCount: item.fileCount,
+      fileNames: item.fileNames,
       attachmentCount: item.attachmentCount,
       uploadedCount: item.uploadedCount,
       errorText: item.errorText,

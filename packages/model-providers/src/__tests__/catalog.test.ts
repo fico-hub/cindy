@@ -2,9 +2,9 @@
  * 目录校验 + 内置供应商契约(2026-07-19 模型列表统一重构后的新契约)。
  *
  * **清单来源唯一化**——
- *   - anthropic / openai / xd 是动态清单供应商:bundled 目录只有身份卡,models 恒为空,
- *     清单运行时由 host 注入(SDK 发现 / codex 注册表 / 网关下发);
- *   - xai 是唯一的静态清单供应商(官方无列模型通道),清单活在 catalog/providers.json;
+ *   - anthropic / openai 的 Claude/Codex 清单动态注入，Pi 使用随包原生目录；
+ *   - xd 是动态清单供应商:bundled 目录只有身份卡,models 恒为空;
+ *   - xai 的静态段是离线 fallback/元数据层；登录后的成员由账号发现决定;
  *   - presets 是自定义供应商模板,随目录 OSS 热更。
  *
  * 本测试守:(a) bundled 结构合法且符合上述形态;(b) parseCatalog 校验规则
@@ -23,11 +23,12 @@ import {
 } from '../registry.js';
 import type { AgentKind, Catalog, CatalogModel } from '../types.js';
 
-/** 动态清单供应商(bundled 零模型,运行时注入)。 */
+/** Claude/Codex 动态清单供应商；Anthropic/OpenAI 的 Pi 目录是独立静态快照。 */
 const DYNAMIC_PROVIDER_IDS = ['anthropic', 'openai', 'xd'] as const;
 
-/** xai 静态清单(唯一活在目录文件里的模型清单)。 */
+/** xAI 随包 fallback 元数据清单。 */
 const EXPECTED_XAI_IDS = [
+  'xai/grok-4.6',
   'xai/grok-4.5',
   'xai/grok-4.3',
   'xai/grok-build-0.1',
@@ -37,6 +38,7 @@ const EXPECTED_XAI_IDS = [
   'xai/grok-4.20',
   'xai/grok-code-fast',
 ];
+const EXPECTED_XAI_PI_IDS = ['grok-4.3', 'grok-4.5', 'grok-4.6', 'grok-build-0.1'];
 
 function provider(id: string) {
   const p = BUNDLED_CATALOG.providers.find((x) => x.id === id);
@@ -100,31 +102,101 @@ describe('bundled catalog validity (dynamic-first contract)', () => {
     expect(() => parseCatalog(BUNDLED_CATALOG)).not.toThrow();
   });
 
+  it('keeps selectable registry efforts self-consistent with defaultEffort', () => {
+    const registry = BUNDLED_CATALOG.modelRegistry;
+    expect(registry).toBeDefined();
+    for (const entry of registry!.models) {
+      for (const agent of new Set(entry.routes.flatMap((route) => route.agents))) {
+        const override = entry.perAgent?.[agent];
+        const efforts = override?.efforts ?? entry.efforts ?? [];
+        const defaultEffort = override?.defaultEffort ?? entry.defaultEffort;
+        if (efforts.length === 0) continue;
+        // Disabled legacy entries may rely on discovery for a default, but must
+        // never declare a default that the target engine does not support.
+        if (entry.defaultEnabled === false && defaultEffort === undefined) continue;
+        expect(defaultEffort, `${entry.id}/${agent}`).toBeTruthy();
+        expect(efforts, `${entry.id}/${agent}`).toContain(defaultEffort);
+      }
+    }
+    expect(registryEntryForRoute('openai', 'gpt-5.6-luna')).toMatchObject({
+      efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      defaultEffort: 'medium',
+    });
+    expect(registryEntryForRoute('openai', 'gpt-5.4-nano')).toMatchObject({
+      efforts: ['low', 'medium', 'high', 'xhigh'],
+      defaultEnabled: false,
+    });
+    // Corrections must forward-fix: same updatedAt + different content is a
+    // conflict, so cached clients would keep the entries without defaultEffort.
+    expect(Date.parse(registry!.updatedAt)).toBeGreaterThan(Date.parse('2026-08-05T00:00:00.000Z'));
+  });
+
   it('has exactly the built-in providers in stable order', () => {
     // 顺序契约:决定选择器分段顺序与 deriveAvailableModels first-wins 优先级。
     expect(BUNDLED_CATALOG.providers.map((p) => p.id)).toEqual(['anthropic', 'openai', 'xai', 'xd', 'gemini']);
     expect(BUNDLED_CATALOG.providers.every((p) => p.source === 'builtin')).toBe(true);
   });
 
-  it('dynamic providers ship ZERO static models (list is runtime-injected, no fallback)', () => {
+  it('dynamic providers keep Claude/Codex empty while Pi ships its independent native baseline', () => {
     for (const id of DYNAMIC_PROVIDER_IDS) {
       const p = provider(id);
       for (const agent of p.agents) {
-        expect(p.models[agent], `${id} models[${agent}] must exist (empty array)`).toEqual([]);
+        if (agent === 'pi' && (id === 'anthropic' || id === 'openai')) {
+          expect(p.models.pi?.length, `${id} must ship Pi native models`).toBeGreaterThan(0);
+        } else {
+          expect(p.models[agent], `${id} models[${agent}] must exist (empty array)`).toEqual([]);
+        }
       }
     }
   });
 
-  it('xai is the only provider with a static model list', () => {
+  it('ships Pi-native subscription models plus explicit Astra support, independent of Registry', () => {
+    expect(provider('openai').models.pi?.map((model) => model.id)).toEqual([
+      'chatgpt/gpt-5.3-codex-spark',
+      'chatgpt/gpt-5.4',
+      'chatgpt/gpt-5.4-mini',
+      'chatgpt/gpt-5.5',
+      'chatgpt/gpt-5.6-luna',
+      'chatgpt/gpt-5.6-sol',
+      'chatgpt/gpt-5.6-terra',
+      'chatgpt/gpt-6-astra',
+    ]);
+    expect(
+      provider('openai').models.pi?.some((model) => model.id === 'chatgpt/gpt-6'),
+    ).toBe(false);
+    expect(provider('anthropic').models.pi).toHaveLength(14);
+  });
+
+  it('xai ships a static fallback list and Pi official metadata', () => {
     const xai = provider('xai');
     expect((xai.models['claude-code'] ?? []).map((m) => m.id)).toEqual(EXPECTED_XAI_IDS);
     expect((xai.models.codex ?? []).map((m) => m.id)).toEqual(EXPECTED_XAI_IDS);
+    expect((xai.models.pi ?? []).map((m) => m.id)).toEqual(EXPECTED_XAI_PI_IDS);
+    expect(xai.models.pi?.find((m) => m.id === 'grok-4.6')).toMatchObject({
+      piApi: 'openai-responses',
+      contextWindow: 500_000,
+      maxOutput: 500_000,
+      supportsImageInput: true,
+      efforts: ['low', 'medium', 'high', 'xhigh'],
+      defaultEffort: 'high',
+    });
+    expect(xai.models['claude-code']?.find((m) => m.id === 'xai/grok-4.6')).toMatchObject({
+      contextWindow: 500_000,
+      efforts: ['low', 'medium', 'high'],
+      defaultEffort: 'high',
+    });
   });
 
   it('xai ships both Grok Imagine subscription image models', () => {
     expect(provider('xai').imageModels).toEqual([
       { id: 'xai/grok-imagine-image', name: 'Grok Imagine Image' },
       { id: 'xai/grok-imagine-image-quality', name: 'Grok Imagine Image (Quality)' },
+    ]);
+  });
+
+  it('xai ships the Grok Imagine subscription video model', () => {
+    expect(provider('xai').videoModels).toEqual([
+      { id: 'xai/grok-imagine-video', name: 'Grok Imagine Video' },
     ]);
   });
 
@@ -135,6 +207,12 @@ describe('bundled catalog validity (dynamic-first contract)', () => {
         expect(Array.isArray(p.models[a]), `${p.id} models[${a}]`).toBe(true);
       }
     }
+  });
+
+  it('declares native Responses custom-tool support on each built-in Codex Responses route', () => {
+    expect(provider('openai').routing.codex?.supportsResponsesCustomTools).toBe(true);
+    expect(provider('xd').routing.codex?.supportsResponsesCustomTools).toBe(false);
+    expect(provider('xai').routing.codex?.supportsResponsesCustomTools).toBe(false);
   });
 
   it('declares access separately from model names', () => {
@@ -171,6 +249,25 @@ describe('bundled catalog validity (dynamic-first contract)', () => {
     expect(() => parseCatalog(bad)).toThrow(/icon/);
   });
 
+  it('accepts the four portable piApi values and rejects unknown PI protocols', () => {
+    for (const piApi of [
+      'anthropic-messages',
+      'openai-responses',
+      'openai-completions',
+      'google-generative-ai',
+    ] as const) {
+      const catalog = JSON.parse(JSON.stringify(BUNDLED_CATALOG)) as Catalog;
+      catalog.providers.find((provider) => provider.id === 'xai')!
+        .models['claude-code']![0]!.piApi = piApi;
+      expect(() => parseCatalog(catalog)).not.toThrow();
+    }
+
+    const bad = JSON.parse(JSON.stringify(BUNDLED_CATALOG)) as Catalog;
+    (bad.providers.find((provider) => provider.id === 'xai')!
+      .models['claude-code']![0] as unknown as Record<string, unknown>).piApi = 'claude-v1';
+    expect(() => parseCatalog(bad)).toThrow(/piApi/);
+  });
+
   it('ships custom-provider presets (OSS 热更的第三方模板)', () => {
     const presets = BUNDLED_CATALOG.presets ?? [];
     expect(presets.length).toBeGreaterThan(0);
@@ -195,13 +292,17 @@ describe('bundled catalog validity (dynamic-first contract)', () => {
       openrouter?.runtimes['claude-code']?.models.find((m) => m.id === 'deepseek/deepseek-v4-pro')
         ?.contextWindow,
     ).toBe(1_000_000);
+    expect(deepseek?.runtimes.pi).toMatchObject({
+      wireProtocol: 'openai-chat',
+      models: [
+        { id: 'deepseek-v4-flash' },
+        { id: 'deepseek-v4-flash-vision-exp' },
+        { id: 'deepseek-v4-pro' },
+      ],
+    });
   });
 
-  it('Kimi Code(编程计划)预设的每个模型都带 contextWindow(k3 缺失曾回落 200K)', () => {
-    // k3 此前没带 contextWindow → buildUserProvider 回落 200K 保守默认:选择器
-    // 显示 200K 且压缩阈值过早触发(用户反馈「动不动就压缩」)。取 262144 与同
-    // 套餐 kimi-for-coding 口径一致(K3 开放平台规格 1M,但编程计划端点是否限窗
-    // 无公开文档,保守取值;实测放开后可上调)。
+  it('Kimi Code(编程计划)按各 harness 的权威目录保留 contextWindow', () => {
     const presets = BUNDLED_CATALOG.presets ?? [];
     const kimiCode = presets.find((p) => p.id === 'moonshot-kimi-code');
     expect(kimiCode).toBeDefined();
@@ -212,14 +313,16 @@ describe('bundled catalog validity (dynamic-first contract)', () => {
           `${agent}/${m.id} 缺 contextWindow`,
         ).toBe(true);
       }
-      expect(rt!.models.find((m) => m.id === 'k3')?.contextWindow, `${agent}/k3`).toBe(262_144);
+      expect(rt!.models.find((m) => m.id === 'k3')?.contextWindow, `${agent}/k3`).toBe(
+        agent === 'pi' ? 1_048_576 : 262_144,
+      );
     }
   });
 
   it('ships Codex support metadata for the current XD gateway model set', () => {
     const expected = {
       'qwen/qwen3.7-max': 'Qwen 3.7 Max',
-      'moonshotai/kimi-k3': 'Kimi K3',
+      'moonshot/kimi-k3': 'Kimi K3',
       'z-ai/glm-5.2': 'GLM-5.2',
       'deepseek/deepseek-v4-pro': 'DeepSeek V4 Pro',
       'deepseek/deepseek-v4-flash': 'DeepSeek V4 Flash',
@@ -237,46 +340,44 @@ describe('bundled catalog validity (dynamic-first contract)', () => {
 
     expect(registryEntryForRoute('xd', 'bytedance-seed/seed-2.1-pro')).toMatchObject({
       efforts: ['minimal', 'low', 'medium', 'high'],
-      defaultEffort: 'minimal',
+      defaultEffort: 'medium',
       supportsFastMode: false,
       perAgent: {
         'claude-code': {
           efforts: ['low', 'medium', 'high'],
-          defaultEffort: 'low',
         },
       },
     });
-    expect(registryEntryForRoute('xd', 'moonshotai/kimi-k3')).toMatchObject({
-      efforts: ['low', 'high', 'max'],
-      defaultEffort: 'max',
+    expect(registryEntryForRoute('xd', 'moonshot/kimi-k3')).toMatchObject({
+      efforts: ['low', 'medium', 'high', 'max'],
+      defaultEffort: 'medium',
       supportsFastMode: false,
     });
     expect(registryEntryForRoute('xd', 'qwen/qwen3.8-max-preview')).toMatchObject({
       efforts: ['low', 'high', 'xhigh'],
-      defaultEffort: 'xhigh',
+      defaultEffort: 'high',
       supportsFastMode: false,
     });
     expect(registryEntryForRoute('xd', 'z-ai/glm-5.2')).toMatchObject({
       efforts: ['minimal', 'high', 'max'],
-      defaultEffort: 'max',
+      defaultEffort: 'high',
       supportsFastMode: false,
       perAgent: {
         'claude-code': {
           efforts: ['high', 'max'],
-          defaultEffort: 'max',
         },
       },
     });
     for (const id of ['deepseek/deepseek-v4-pro', 'deepseek/deepseek-v4-flash']) {
       expect(registryEntryForRoute('xd', id), id).toMatchObject({
-        efforts: ['high', 'max'],
+        efforts: ['low', 'high', 'max'],
         defaultEffort: 'high',
         supportsFastMode: false,
       });
     }
     for (const id of [
       'bytedance-seed/seed-2.1-pro',
-      'moonshotai/kimi-k3',
+      'moonshot/kimi-k3',
       'qwen/qwen3.8-max-preview',
     ]) {
       expect(registryEntryForRoute('xd', id), id).not.toHaveProperty('description');
@@ -469,7 +570,7 @@ describe('fast-mode per-provider resolution (model-level SSoT)', () => {
   });
 });
 
-describe('vendor grouping metadata (xai 静态清单)', () => {
+describe('vendor grouping metadata (xai fallback metadata)', () => {
   it('every static model carries group=grok + numeric sortOrder', () => {
     const xai = provider('xai');
     for (const agent of xai.agents) {
@@ -584,6 +685,49 @@ describe('provider OAuth and upstream URL validation', () => {
     const catalog = oauthCatalog();
     catalog.providers[0]!.routing.codex!.upstream = 'https://user:pass@api.example/v1';
     expect(() => parseCatalog(catalog)).toThrow(/upstream invalid/);
+  });
+
+  it('accepts a same-origin Responses model route', () => {
+    const catalog = oauthCatalog();
+    catalog.providers[0]!.models.codex![0] = model('m1', {
+      route: {
+        baseUrl: 'https://api.example/v1',
+        wireProtocol: 'openai-responses',
+        requestPath: '/responses',
+      },
+    });
+    expect(parseCatalog(catalog).providers[0]!.models.codex![0]!.route).toEqual({
+      baseUrl: 'https://api.example/v1',
+      wireProtocol: 'openai-responses',
+      requestPath: '/responses',
+    });
+  });
+
+  it.each([
+    ['non-object route', null],
+    ['missing base URL', { wireProtocol: 'openai-responses' }],
+    ['cross-origin base URL', { baseUrl: 'https://other.example/v1', wireProtocol: 'openai-responses' }],
+    ['embedded credentials', { baseUrl: 'https://user:pass@api.example/v1', wireProtocol: 'openai-responses' }],
+    ['invalid protocol', { baseUrl: 'https://api.example/v1', wireProtocol: 'invalid' }],
+    ['unsafe request path', { baseUrl: 'https://api.example/v1', wireProtocol: 'openai-responses', requestPath: '//other.example' }],
+    ['Claude-incompatible protocol', { baseUrl: 'https://api.example/v1', wireProtocol: 'openai-responses' }],
+  ])('rejects %s model routes', (_label, route) => {
+    const catalog = oauthCatalog();
+    if (_label === 'Claude-incompatible protocol') {
+      catalog.providers[0]!.agents = ['claude-code'];
+      catalog.providers[0]!.routing = {
+        'claude-code': {
+          upstream: 'https://api.example/v1',
+          authStrategy: 'oauth-token',
+        },
+      };
+      catalog.providers[0]!.models = {
+        'claude-code': [model('m1', { route: route as never })],
+      };
+    } else {
+      catalog.providers[0]!.models.codex![0] = model('m1', { route: route as never });
+    }
+    expect(() => parseCatalog(catalog)).toThrow(/model\.route invalid/);
   });
 });
 

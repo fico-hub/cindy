@@ -104,7 +104,7 @@ describe('mobile session header desktop-first surface', () => {
     expect(source).toContain('if (sessionListDrawerClosingRef.current || pendingDrawerNavigationRef.current) return;');
     expect(source).toContain('sessionListDrawerClosingRef.current = true;\n    pendingDrawerNavigationRef.current = action;');
     expect(source).toContain('const closeSessionListDrawer = useCallback(() => {\n    if (sessionListDrawerClosingRef.current) return;\n    sessionListDrawerClosingRef.current = true;');
-    expect(source).toContain('if (targetSession.id === sessionId) {\n      closeSessionListDrawer();');
+    expect(source).toContain('if (targetSession.id === sessionId && !focusClientId) {\n      closeSessionListDrawer();');
     expect(source).toContain('onClosed={handleSessionListDrawerClosed}');
     expect(source).toContain('const action = pendingDrawerNavigationRef.current;\n    sessionListDrawerClosingRef.current = false;\n    if (!action) returnDrawerFocusAfterCloseRef.current = true;\n    setSessionListDrawerOverlayMounted(false);');
     expect(source).toContain('pendingDrawerNavigationRef.current = null;\n    action();');
@@ -188,8 +188,8 @@ describe('mobile session header desktop-first surface', () => {
     expect(draftScopeEnd).toBeGreaterThan(draftScopeStart);
     expect(draftScope).toContain('if (composerDraftStateKey !== activeComposerDraftScopeKey) {');
     expect(draftScope).toContain('const nextScope = readImmediateComposerDraftScope(sessionId, routeDraft);');
-    expect(draftScope).toContain('setComposerDocumentState(nextScope.document);');
-    expect(draftScope).toContain('setDraft(nextDraft);');
+    expect(draftScope).toContain('setComposerDraftSource(createComposerDraftSource(nextScope.document));');
+    expect(draftScope).toContain('draftRef.current = nextDraft;');
     expect(draftScope).toContain('setComposerDraftHydrated(false);');
     expect(draftScope).toContain('appliedRouteDraftRef.current = null;');
     expect(draftScope).toContain('composerDocumentRef.current = nextScope.document;');

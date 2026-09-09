@@ -30,6 +30,10 @@ vi.mock('@/lib/sessionService', () => ({
 
 import { makerChatStore } from '@/lib/makerChatStore';
 import { remoteProjectsStore } from '@/features/device-link/remoteProjectsStore';
+import {
+  markSessionAutomaticHistoryLoadCompleted,
+  restoreSessionAutomaticHistoryLoadAttempts,
+} from '@/lib/sessionScrollStore';
 
 const DEVICE_ID = 'dev-A';
 const DEVICE_B_ID = 'dev-B';
@@ -509,6 +513,15 @@ describe('makerChatStore.reconcileRemoteMessages', () => {
       dbMessage(s, 'old-cache', 'old cached text', '2026-06-15T00:00:00.000Z'),
       dbMessage(s, 'cached-future', 'controller clock ahead text', '2026-06-16T00:00:00.000Z'),
     ]);
+    markSessionAutomaticHistoryLoadCompleted(s);
+    const completionAttemptsAtRebuildNotification: number[] = [];
+    const unsubscribe = makerChatStore.subscribe(s, () => {
+      if (makerChatStore.getSnapshot(s).messages[0]?.clientId === 'client-new-50') {
+        completionAttemptsAtRebuildNotification.push(
+          restoreSessionAutomaticHistoryLoadAttempts(s, 5),
+        );
+      }
+    });
 
     const remoteHistory = Array.from({ length: 550 }, (_, index) =>
       dbMessage(
@@ -522,6 +535,7 @@ describe('makerChatStore.reconcileRemoteMessages', () => {
 
     makerChatStore.reconcileRemoteMessages(s);
     await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+    unsubscribe();
 
     const snapshot = makerChatStore.getSnapshot(s);
     expect(snapshot.messages).toHaveLength(500);
@@ -531,6 +545,8 @@ describe('makerChatStore.reconcileRemoteMessages', () => {
     expect(snapshot.messages.at(-1)?.clientId).toBe('client-new-549');
     expect(snapshot.oldestMessageId).toBe('new-50');
     expect(snapshot.hasMoreMessages).toBe(true);
+    expect(restoreSessionAutomaticHistoryLoadAttempts(s, 5)).toBe(0);
+    expect(completionAttemptsAtRebuildNotification).toContain(0);
   });
 
   it('远程会话:无重叠对账保留分页期间新到的 remote push', async () => {
@@ -999,6 +1015,28 @@ describe('makerChatStore.reconcileRemoteMessages', () => {
     expect(ids).toContain('client-from-rerun');
     // 而且只补跑**一次**,不是每个被合并的触发各跑一次。
     expect(calls).toBe(2);
+  });
+
+  it.each([true, false])('returns the final applied result to coalesced callers (first stale=%s)', async (firstStale) => {
+    const s = sid();
+    const keep = dbMessage(s, 'keep', 'keep', '2026-06-15T00:00:00.000Z');
+    const cut = dbMessage(s, 'cut', 'cut', '2026-06-16T00:00:00.000Z');
+    await openRemoteWithHistory(s, [keep, cut]);
+    const first = deferred<Message[]>();
+    const trailing = deferred<Message[]>();
+    let calls = 0;
+    remoteListResolver = () => ++calls === 1 ? first.promise : trailing.promise;
+    const result = makerChatStore.reconcileRemoteMessages(s);
+    await flush();
+    const coalesced = makerChatStore.reconcileRemoteMessages(s);
+    if (firstStale) makerChatStore.dropMessagesFromClientId(s, 'client-cut');
+    first.resolve([keep, cut]);
+    await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+    expect(calls).toBe(2);
+    if (!firstStale) makerChatStore.dropMessagesFromClientId(s, 'client-cut');
+    trailing.resolve([keep]);
+    expect(await result).toBe(firstStale);
+    expect(await coalesced).toBe(firstStale);
   });
 
   it('远程会话:飞行期间窗口被重置(rewind)时,陈旧对账整体作废;尾随重跑照常补', async () => {

@@ -37,6 +37,15 @@
     "checkFailedDetail": "更新の確認に失敗しました：{{detail}}",
     "checkFailed": "更新の確認に失敗しました。しばらくしてからもう一度お試しください。"
   },
+  "betaChannel": {
+    "title": "Beta チャンネル",
+    "badge": "Beta",
+    "description": "Beta チャンネルに参加すると、今後のクライアント更新を先行して受け取れます。",
+    "restartHint": "Beta チャンネルは再起動後に反映されます。アプリを再起動してください。",
+    "ok": "わかりました",
+    "saveFailed": "Beta チャンネル設定の保存に失敗しました",
+    "unavailable": "Beta チャンネルは利用できません。Beta 更新サーバーに接続できませんでした。"
+  },
   "notifications": {
     "sectionTitle": "通知",
     "taskDone": "タスク完了通知",
@@ -49,9 +58,6 @@
     "deviceName": "デバイス名",
     "deviceNameDetail": "パソコン側の承認リストにこの名前が表示されます。",
     "platform": "プラットフォーム",
-    "remoteControl": "リモート制御権限",
-    "remoteControlValue": "パソコン側で管理",
-    "remoteControlDetail": "このスマートフォンは操作する側としてのみ動作します。被操作の許可・取り消し・復元はパソコン側の設定で行います。",
     "editAccessibility": "{{label}}を変更"
   },
   "relay": {
@@ -75,6 +81,21 @@
     "initializing": "初期化中",
     "authServer": "Auth Server",
     "authRegion": "ログインリージョン"
+  },
+  "devServerEnvironment": {
+    "title": "サーバー環境",
+    "description": "CindyDev が接続する業務サーバーにのみ影響します",
+    "accessibility": "サーバー環境を切り替える",
+    "options": {
+      "dev": "Dev",
+      "release": "Release"
+    },
+    "confirmTitle": "{{environment}} に切り替えますか？",
+    "confirmBody": "切り替えると現在のアカウントからログアウトし、App を再起動します。",
+    "cancel": "キャンセル",
+    "switchAction": "切り替える",
+    "switching": "切り替え中",
+    "switchFailed": "サーバー環境を切り替えられませんでした。もう一度お試しください。"
   },
   "updateInfo": {
     "embedded": "アプリ本体と同梱",
@@ -107,7 +128,7 @@
     "analyticsResetAction": "戻す"
   },
   "account": {
-    "logoutHint": "ログアウトすると、このスマートフォン上のログイン状態とローカルのリモートミラーだけが削除されます。パソコン側のセッションには影響しません。",
+    "logoutHint": "ログアウトすると、このスマートフォンに保存されたすべてのアカウントとローカルのリモートミラーが削除されます。パソコン側のセッションには影響しません。",
     "logout": "ログアウト",
     "loggingOut": "ログアウト中",
     "loggingOutAccessibility": "ログアウトしています"

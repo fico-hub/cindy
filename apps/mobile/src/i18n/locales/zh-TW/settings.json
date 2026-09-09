@@ -37,6 +37,15 @@
     "checkFailedDetail": "檢查更新失敗：{{detail}}",
     "checkFailed": "檢查更新失敗，請稍後重試"
   },
+  "betaChannel": {
+    "title": "Beta 測試管道",
+    "badge": "Beta",
+    "description": "加入 Beta 測試管道，提前接收即將發布的客戶端更新。",
+    "restartHint": "Beta 測試管道需要重新啟動客戶端後才能生效，請重新啟動應用。",
+    "ok": "我知道了",
+    "saveFailed": "儲存 Beta 測試管道設定失敗",
+    "unavailable": "Beta 測試管道暫不可用，無法連接到 Beta 更新伺服器。"
+  },
   "notifications": {
     "sectionTitle": "通知",
     "taskDone": "任務完成通知",
@@ -49,9 +58,6 @@
     "deviceName": "裝置名稱",
     "deviceNameDetail": "電腦端授權列表會顯示這個名稱。",
     "platform": "平臺",
-    "remoteControl": "被控權限",
-    "remoteControlValue": "電腦端管理",
-    "remoteControlDetail": "手機只作為控制端。允許被控、撤銷和恢復權限仍在電腦端設定裡完成。",
     "editAccessibility": "修改{{label}}"
   },
   "relay": {
@@ -75,6 +81,21 @@
     "initializing": "初始化中",
     "authServer": "Auth Server",
     "authRegion": "登入區域"
+  },
+  "devServerEnvironment": {
+    "title": "伺服器環境",
+    "description": "僅影響 CindyDev 連線的業務伺服器",
+    "accessibility": "切換伺服器環境",
+    "options": {
+      "dev": "Dev",
+      "release": "Release"
+    },
+    "confirmTitle": "切換至 {{environment}}？",
+    "confirmBody": "切換會登出目前帳號並重新啟動 App。",
+    "cancel": "取消",
+    "switchAction": "切換",
+    "switching": "切換中",
+    "switchFailed": "切換伺服器環境失敗，請再試一次。"
   },
   "updateInfo": {
     "embedded": "隨整包",
@@ -107,7 +128,7 @@
     "analyticsResetAction": "恢復"
   },
   "account": {
-    "logoutHint": "退出只會清除這臺手機上的登入態和本地遠端映象，不會影響電腦端任務。",
+    "logoutHint": "退出會清除這臺手機上儲存的全部帳號和本地遠端映象，不會影響電腦端任務。",
     "logout": "退出登入",
     "loggingOut": "退出中",
     "loggingOutAccessibility": "正在退出登入"

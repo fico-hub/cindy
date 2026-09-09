@@ -248,6 +248,82 @@ function header(srcLabel) {
  * src/shim/* for anything that can live at the adapter boundary.
  */
 const LOCAL_PATCHES = {
+  'extension/src/browser/chrome.executables.ts': [
+    {
+      desc: 'detect macOS Google Chrome Beta after stable Chromium-family browsers',
+      find: `    {
+      kind: "chromium",
+      path: path.join(os.homedir(), "Applications/Chromium.app/Contents/MacOS/Chromium"),
+    },
+    {
+      kind: "canary",`,
+      replace: `    {
+      kind: "chromium",
+      path: path.join(os.homedir(), "Applications/Chromium.app/Contents/MacOS/Chromium"),
+    },
+    {
+      kind: "chrome",
+      path: "/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta",
+    },
+    {
+      kind: "chrome",
+      path: path.join(
+        os.homedir(),
+        "Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta",
+      ),
+    },
+    {
+      kind: "canary",`,
+    },
+    {
+      desc: 'classify macOS Google Chrome Beta within the Chrome-only fallback',
+      find: `function findGoogleChromeExecutableMac(): BrowserExecutable | null {
+  return findFirstChromeExecutable([
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    path.join(os.homedir(), "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+    "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+    path.join(
+      os.homedir(),
+      "Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+    ),
+  ]);
+}`,
+      replace: `function findGoogleChromeExecutableMac(): BrowserExecutable | null {
+  return findFirstExecutable([
+    {
+      kind: "chrome",
+      path: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    },
+    {
+      kind: "chrome",
+      path: path.join(os.homedir(), "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+    },
+    {
+      kind: "chrome",
+      path: "/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta",
+    },
+    {
+      kind: "chrome",
+      path: path.join(
+        os.homedir(),
+        "Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta",
+      ),
+    },
+    {
+      kind: "canary",
+      path: "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+    },
+    {
+      kind: "canary",
+      path: path.join(
+        os.homedir(),
+        "Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+      ),
+    },
+  ]);
+}`,
+    },
+  ],
   'extension/src/browser/config.ts': [
     {
       desc: 'preserve narrow fake-IP SSRF allowances from the host config without enabling general private-network access',
@@ -357,6 +433,47 @@ const LOCAL_PATCHES = {
         '            legacyCdpUrl,\n' +
         '          ),\n' +
         '        );',
+    },
+  ],
+  'extension/src/browser/chrome.ts': [
+    {
+      desc: 'decorate Chrome chip with host displayName so Cindy-real stays disk-only',
+      find: `  fs.mkdirSync(userDataDir, { recursive: true });
+  await ensureOutputDirectory(DEFAULT_DOWNLOAD_DIR);
+
+  const needsDecorate = !isProfileDecorated(
+    userDataDir,
+    profile.name,
+    (profile.color ?? DEFAULT_OPENCLAW_BROWSER_COLOR).toUpperCase(),
+    DEFAULT_DOWNLOAD_DIR,
+  );`,
+      replace: `  fs.mkdirSync(userDataDir, { recursive: true });
+  await ensureOutputDirectory(DEFAULT_DOWNLOAD_DIR);
+
+  // LOCAL PATCH (Cindy, via sync.mjs): Chrome chip follows host displayName
+  // when set so the disk key (Cindy-real) never leaks into the profile button.
+  const chipName =
+    normalizeOptionalString(resolved.profiles[profile.name]?.displayName) ?? profile.name;
+
+  const needsDecorate = !isProfileDecorated(
+    userDataDir,
+    chipName,
+    (profile.color ?? DEFAULT_OPENCLAW_BROWSER_COLOR).toUpperCase(),
+    DEFAULT_DOWNLOAD_DIR,
+  );`,
+    },
+    {
+      desc: 'pass chipName into decorateOpenClawProfile instead of the disk key',
+      find: `      decorateOpenClawProfile(userDataDir, {
+        name: profile.name,
+        color: profile.color,
+        downloadDir: DEFAULT_DOWNLOAD_DIR,
+      });`,
+      replace: `      decorateOpenClawProfile(userDataDir, {
+        name: chipName,
+        color: profile.color,
+        downloadDir: DEFAULT_DOWNLOAD_DIR,
+      });`,
     },
   ],
 };

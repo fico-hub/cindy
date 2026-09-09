@@ -35,6 +35,36 @@ export function isSubscriptionDirectModel(model: string | null | undefined): boo
   return SUBSCRIPTION_DIRECT_MODEL_PREFIXES.some((prefix) => model.startsWith(prefix));
 }
 
+/**
+ * xAI / SuperGrok 的独占户口:只能走 SuperGrok,不能 fail-open 进 Cindy LiteLLM。
+ *
+ * - `xai/grok-*` 已是订阅前缀
+ * - 裸 `grok-*` 是官方 / Pi 目录 id
+ * - `x-ai/grok-*` 是网关/OpenRouter 命名空间,Cindy 网关可能认,不算独占
+ */
+export function isExclusiveXaiModelId(model: string | null | undefined): boolean {
+  if (!model) return false;
+  const id = model.trim().replace(/\[1m\]$/i, '');
+  if (!id) return false;
+  if (id.startsWith(XAI_MODEL_PREFIX)) {
+    return id.slice(XAI_MODEL_PREFIX.length).startsWith('grok');
+  }
+  if (id.includes('/')) return false;
+  return id.startsWith('grok');
+}
+
+/** 订阅前缀 ∪ xAI 独占裸 id。compat-proxy 与记账必须共用,避免路由当订阅、账单当网关。 */
+export function isSubscriptionDirectRoute(model: string | null | undefined): boolean {
+  return isSubscriptionDirectModel(model) || isExclusiveXaiModelId(model);
+}
+
+/** 独占 Grok 的目录/报价身份:裸 grok-4.6 → xai/grok-4.6。非独占返回 null。 */
+export function exclusiveXaiCatalogModelId(model: string | null | undefined): string | null {
+  if (!isExclusiveXaiModelId(model) || !model) return null;
+  const id = model.trim().replace(/\[1m\]$/i, '');
+  return id.startsWith(XAI_MODEL_PREFIX) ? id : `${XAI_MODEL_PREFIX}${id}`;
+}
+
 // 仅用于分组展示, 不参与持久化或 onModelChange 数据流。
 // 对话厂商组(anthropic..ungrouped)在前;非对话类型组(image/tts/stt/realtime/video/embedding/
 // compression/other)在后——后者收纳网关多出的图像/语音/视频/向量/压缩等模型(它们默认关、
@@ -339,8 +369,8 @@ export function isChatEligible(model: { id: string; group?: string; mode?: strin
  * 不让 groupOf 的未知组回退吃 id 启发式 —— 否则 `gpt-4o-audio-preview` 这类合法
  * 自定义对话模型会被误判成能力模型而从全部对话清单消失(PR #744 review)。
  *
- * 例外**只限用户供应商**:网关条目缺 group 时 active-catalog 会补 `custom:xd`
- * (active-catalog.ts),若无条件放行未知组,无分组下发的网关图像/音频/向量模型会
+ * 例外**只限用户供应商**:内置网关即使显式下发未知 group（如历史 `custom:xd`），
+ * 若无条件放行未知组,无分组下发的网关图像/音频/向量模型会
  * 绕过能力分类、重新漏进对话清单 —— 正是本过滤要堵的洞(PR #744 review 第二轮)。
  * 非用户供应商一律走 isChatEligible(mode 权威、id 正则兜底)。
  */
@@ -366,12 +396,14 @@ export function isModelSelectableForNewRoute(
     mode?: string;
     disabled?: boolean;
     status?: string;
+    availability?: 'available' | 'requires_payment';
   },
   opts?: { userProvider?: boolean },
 ): boolean {
   return (
     model.disabled !== true &&
     model.status !== 'retired' &&
+    model.availability !== 'requires_payment' &&
     isAgentSelectableModel(model, opts)
   );
 }

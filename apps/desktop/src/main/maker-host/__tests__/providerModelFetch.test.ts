@@ -21,6 +21,16 @@ function fakeResponse(status: number, body: string): Response {
 }
 
 describe('buildModelsFetchRequest', () => {
+  it.each(
+    (['baseUrl', 'modelsUrl'] as const).flatMap((field) =>
+      ['user@', ':secret@', 'user:secret@', 'us%65r:s%65cret@'].map((userinfo) => ({ field, userinfo })),
+    ),
+  )('rejects credentials in $field before building a request: $userinfo', ({ field, userinfo }) => {
+    expect(() => buildModelsFetchRequest(spec({
+      [field]: `https://${userinfo}api.acme.example/anthropic/v1/models`,
+    }))).toThrow('model discovery requires HTTP(S) URLs without embedded credentials');
+  });
+
   it('derives {base}/v1/models for non-/vN baseUrl; appends /models when baseUrl ends with /vN', () => {
     expect(buildModelsFetchRequest(spec()).url).toBe('https://api.acme.example/anthropic/v1/models');
     expect(
@@ -116,6 +126,24 @@ describe('buildModelsFetchRequest', () => {
 });
 
 describe('fetchProviderModels', () => {
+  it.each(
+    (['baseUrl', 'modelsUrl'] as const).flatMap((field) =>
+      ['user@', ':secret@', 'user:secret@', 'us%65r:s%65cret@'].map((userinfo) => ({ field, userinfo })),
+    ),
+  )('does not dispatch a request with credentials in $field: $userinfo', async ({ field, userinfo }) => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    const result = await fetchProviderModels(spec({
+      [field]: `https://${userinfo}api.acme.example/anthropic/v1/models`,
+      authMethod: 'apiKey',
+    }), fetchImpl);
+    expect(result).toEqual({
+      ok: false,
+      code: 'UNKNOWN',
+      detail: 'model discovery requires HTTP(S) URLs without embedded credentials',
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it.each([
     {
       baseUrl: 'https://remote.example/v1',
@@ -178,6 +206,23 @@ describe('fetchProviderModels', () => {
     expect(b.models).toEqual([
       { id: 'm1', name: 'm1' },
       { id: 'm2', name: 'm2' },
+    ]);
+  });
+
+  it('parses GLM Responses catalog entries keyed by slug', async () => {
+    const result = await fetchProviderModels(spec({ agent: 'codex' }), async () =>
+      fakeResponse(
+        200,
+        JSON.stringify({
+          models: [
+            { slug: 'glm-5.3', display_name: 'GLM-5.3', context_window: 202_752 },
+          ],
+        }),
+      ),
+    );
+
+    expect(result.models).toEqual([
+      { id: 'glm-5.3', name: 'GLM-5.3', contextWindow: 202_752 },
     ]);
   });
 

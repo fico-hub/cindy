@@ -39,15 +39,29 @@ import Animated, {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTranslation } from 'react-i18next';
 import { Text } from '@/components/AppText';
+import { ConversationSearchFilterSheet } from '@/session/ConversationSearchFilterSheet';
+import { HomeSearchBar } from '@/session/HomeSearchBar';
+import {
+  conversationSearchOriginsFromDeviceModels,
+  listConversationSearchProjects,
+  shouldReplaceListWithSearchResults,
+  type ConversationSearchDeviceModel,
+  type ConversationSearchDeviceOrigin,
+} from '@/session/conversationSearch';
+import { useConversationSearch } from '@/session/useConversationSearch';
+import { useUnresponsiveDevices } from '@/device-link/unresponsiveDevicesStore';
 import { Gesture, GestureDetector } from '@/platform/gestureHandler';
 import { useReduceMotionEnabled } from '@/hooks/useReduceMotion';
 import { buildHomeSections, type HomeRow, type HomeSection } from '@/session/homeSections';
 import { buildMobileHomePresentation, excludeOrcaWorkerSessions } from '@/session/mobileHome';
 import {
   remoteSessionStore,
+  useRemoteConversationSearchDeviceModels,
+  useRemoteDeviceIdentity,
+  useRemoteHomeStatusVersion,
   useRemoteMessageVersion,
+  useRemoteSessionMessagePreview,
   useRemoteSessions,
-  useRemoteSessionStoreVersion,
   useSessionRunning,
 } from '@/session/remoteSessionStore';
 import type { RemoteSessionLiveActivity } from '@/session/sessionList';
@@ -237,22 +251,81 @@ export function SessionListDrawer({
   // 与首页同一套展示模型(排序 / 置顶区 / 自动化折叠);未挂载时跳过重建,
   // 常驻宽屏页面时不为收起的抽屉付 presentation 成本。
   const sessions = useRemoteSessions();
-  // storeVersion / messageVersion:pending 交互、liveActivity、消息镜像都不在 sessions
-  // 数组身份里,靠版本号驱动重算(与首页三个 index 的依赖口径一致);未挂载时 memo
-  // 早退,不为收起的抽屉付这份成本。
-  const storeVersion = useRemoteSessionStoreVersion();
-  const messageVersion = useRemoteMessageVersion();
+  // pending/live/running 才重建分组；普通消息预览由可见行按 session 订阅。
+  const homeStatusVersion = useRemoteHomeStatusVersion();
+  // 设备身份和搜索可达性可单独变化，不能依赖 sessions 数组顺便触发刷新。
+  const devices = useRemoteDeviceIdentity();
+  const searchDeviceModels = useRemoteConversationSearchDeviceModels() as readonly ConversationSearchDeviceModel[];
+  const unresponsiveDevices = useUnresponsiveDevices();
+  const searchOrigins = useMemo(() => {
+    if (searchDeviceModels.length > 0) {
+      return conversationSearchOriginsFromDeviceModels(searchDeviceModels, {
+        unresponsiveDeviceIds: unresponsiveDevices,
+      });
+    }
+    if (devices.length > 0) {
+      return devices.map((device) => ({
+        deviceId: device.deviceId,
+        deviceName: device.name,
+        reachable: false,
+      }));
+    }
+    const byId = new Map<string, ConversationSearchDeviceOrigin>();
+    for (const session of sessions) {
+      const id = session.canonicalDeviceId ?? session.deviceLinkDeviceId;
+      if (!id || byId.has(id)) continue;
+      byId.set(id, {
+        deviceId: id,
+        deviceName: session.deviceLinkDeviceName ?? id,
+        reachable: false,
+      });
+    }
+    return [...byId.values()];
+  }, [devices, searchDeviceModels, sessions, unresponsiveDevices]);
+  const searchProjects = useMemo(
+    () => listConversationSearchProjects(excludeOrcaWorkerSessions(sessions)),
+    [sessions],
+  );
+  const indexedSearch = useConversationSearch({
+    enabled: mounted,
+    origins: searchOrigins,
+    projects: searchProjects,
+  });
+  const searchQuery = indexedSearch.query;
+  // 索引搜索就绪前的本地搜索仍须匹配已加载消息；普通列表不订阅全局消息版本。
+  const messageSearchVersion = useRemoteMessageVersion(mounted && searchQuery.trim().length > 0);
+  const [searchFilterOpen, setSearchFilterOpen] = useState(false);
+  const searchFilterA11y = t('devices.list.search.filterAria', {
+    agent: t(`devices.list.search.filter.agent.${indexedSearch.agentFilter}`),
+    lastActivity: t(`devices.list.search.filter.lastActivity.${indexedSearch.lastActivityFilter}`),
+    projects: indexedSearch.projectSelection === 'all'
+      ? t('devices.list.search.filter.allProjects')
+      : t('devices.list.search.filter.selectedProjects', { count: indexedSearch.projectSelection.length }),
+    sort: t(`devices.list.search.filter.sort.${indexedSearch.sortBy}`),
+    status: t(`devices.list.search.filter.status.${indexedSearch.statusFilter}`),
+  });
   const sections = useMemo<HomeSection[]>(() => {
     if (!mounted) return [];
-    void storeVersion;
-    void messageVersion;
-    // 已 load 会话的预览走消息镜像(applyRemotePush 只追加镜像、不回写 session.preview,
-    // 缺这个索引会让「坐在会话页期间别的任务来了新消息」的摘要停在旧值);未打开过的
-    // 会话由 presentation 内部回退 session.preview,与首页同一套兜底链。
-    const messagePreviewIndex = buildSessionMessagePreviewIndex(
-      sessions.map((session) => session.id),
-      (sessionId) => remoteSessionStore.getMessages(sessionId),
-    );
+    if (shouldReplaceListWithSearchResults(searchQuery, indexedSearch.status)) {
+      return [{
+        data: indexedSearch.results.map((item) => ({
+          item,
+          key: `search:${(item.session as { deviceLinkDeviceId?: string | null }).deviceLinkDeviceId ?? 'local'}:${item.session.id}`,
+          kind: 'session' as const,
+          source: 'search' as const,
+        })),
+        key: 'search',
+        title: null,
+      }];
+    }
+    void homeStatusVersion;
+    void messageSearchVersion;
+    const messagePreviewIndex = searchQuery.trim()
+      ? buildSessionMessagePreviewIndex(
+          sessions.map((session) => session.id),
+          (sessionId) => remoteSessionStore.getMessages(sessionId),
+        )
+      : undefined;
     // 与首页同口径的行内状态输入:等待授权/回复(awaiting)与 live error/done 都来自
     // 这两个 index,缺了会全部退化成普通时间行。
     const pendingInteractionIndex = new Map(
@@ -266,11 +339,11 @@ export function SessionListDrawer({
       if (liveActivity) liveActivityEntries.push([session.id, liveActivity]);
     }
     const home = buildMobileHomePresentation({
+      searchQuery,
       // 权威设备身份必须随会话一起进 presentation:canonicalizeSessionDevice 会按传入
       // devices 重算并覆盖 canonicalDeviceId,空列表会把 store 已认领好的规范 id 打回
-      // 弱推断(re-link 后点行路由到旧物理设备)。store 身份变化会触发 sessions 重算,
-      // 本 memo 以 sessions 为依赖即可保持同步。
-      devices: remoteSessionStore.getDeviceIdentity(),
+      // 弱推断(re-link 后点行路由到旧物理设备)。
+      devices,
       liveActivityIndex: new Map(liveActivityEntries),
       messagePreviewIndex,
       pendingInteractionIndex,
@@ -286,7 +359,7 @@ export function SessionListDrawer({
       unnamedLabel: t('session.menu.unnamedTitle'),
     });
     return buildHomeSections(home, false, false);
-  }, [messageVersion, mounted, sessions, storeVersion, t]);
+  }, [devices, homeStatusVersion, indexedSearch.results, indexedSearch.status, messageSearchVersion, mounted, searchQuery, sessions, t]);
   const hasRows = useMemo(
     () => sections.some((section) => section.data.length > 0),
     [sections],
@@ -303,6 +376,7 @@ export function SessionListDrawer({
           active={active}
           item={item.item}
           onSelect={onSelectSession}
+          searchResult={item.source === 'search'}
         />
       );
     },
@@ -359,6 +433,22 @@ export function SessionListDrawer({
               />
             </Pressable>
           </View>
+          <View style={styles.drawerSearchRow}>
+            <HomeSearchBar
+              autoFocus={false}
+              filterA11y={searchFilterA11y}
+              filterActive={indexedSearch.activeFilterCount > 0}
+              onChangeQuery={indexedSearch.setQuery}
+              onOpenFilter={() => setSearchFilterOpen(true)}
+              padded={false}
+              query={searchQuery}
+              testIDs={{
+                filter: 'sessionDrawer.searchFilterButton',
+                input: 'sessionDrawer.searchInput',
+                row: 'sessionDrawer.searchRow',
+              }}
+            />
+          </View>
           {hasRows ? (
             <SectionList
               contentContainerStyle={styles.listContent}
@@ -399,6 +489,25 @@ export function SessionListDrawer({
           </View>
         </Animated.View>
       </GestureDetector>
+      <ConversationSearchFilterSheet
+        activeCount={indexedSearch.activeFilterCount}
+        agentKind={indexedSearch.agentFilter}
+        lastActivity={indexedSearch.lastActivityFilter}
+        lockedProjects={false}
+        onAgentKindChange={indexedSearch.setAgentFilter}
+        onClose={() => setSearchFilterOpen(false)}
+        onLastActivityChange={indexedSearch.setLastActivityFilter}
+        onProjectsChange={indexedSearch.setProjectSelection}
+        onReset={indexedSearch.resetFilters}
+        onSortChange={indexedSearch.setSortBy}
+        onStatusChange={indexedSearch.setStatusFilter}
+        projectSelection={indexedSearch.projectSelection}
+        projects={searchProjects}
+        sortBy={indexedSearch.sortBy}
+        status={indexedSearch.statusFilter}
+        topOffset={insets.top + spacing.sm}
+        visible={searchFilterOpen}
+      />
     </View>
   );
 }
@@ -407,16 +516,19 @@ const DrawerSessionRow = memo(function DrawerSessionRow({
   active,
   item,
   onSelect,
+  searchResult,
 }: {
   active: boolean;
   item: RemoteSessionListItem;
   onSelect(item: RemoteSessionListItem): void;
+  searchResult: boolean;
 }) {
   const styles = useThemedStyles(makeStyles);
   const { colors } = useTheme();
   const { t } = useTranslation();
   // 运行态走订阅(行 memo 化后命令式读取会 stale,与首页行同一取舍)。
   const sessionIsRunning = useSessionRunning(item.session.id);
+  const loadedMessagePreview = useRemoteSessionMessagePreview(item.session.id);
   const running = sessionIsRunning || !!item.scheduleInfo?.running;
   const rightStatus = resolveMobileSessionRightStatus({
     liveAttention: item.liveActivity?.attention === true,
@@ -425,7 +537,13 @@ const DrawerSessionRow = memo(function DrawerSessionRow({
     running,
     scheduleUnreadCount: item.scheduleInfo?.unreadCount ?? 0,
   });
-  const preview = buildRemoteSessionCardPreview(item, { running });
+  // 索引搜索展示命中摘要；普通行（含自动化代表行）才使用自己的最新消息预览。
+  const preview = buildRemoteSessionCardPreview(
+    searchResult || loadedMessagePreview === undefined || loadedMessagePreview === item.messagePreview
+      ? item
+      : { ...item, messagePreview: loadedMessagePreview },
+    { running },
+  );
   return (
     <Pressable
       accessibilityLabel={t('devices.list.a11y.openConversation', { title: item.title })}
@@ -559,6 +677,23 @@ const makeStyles = (colors: ThemeColors) =>
       justifyContent: 'space-between',
       paddingHorizontal: spacing.lg,
       paddingVertical: spacing.sm,
+    },
+    drawerSearchRow: {
+      alignItems: 'center',
+      borderBottomColor: colors.border,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      flexDirection: 'row',
+      gap: spacing.sm,
+      minHeight: 44,
+      paddingHorizontal: spacing.lg,
+      paddingVertical: spacing.xs,
+    },
+    drawerSearchInput: {
+      color: colors.textPrimary,
+      flex: 1,
+      fontSize: typeScale.body,
+      minWidth: 0,
+      paddingVertical: spacing.xs,
     },
     panelTitle: {
       color: colors.textPrimary,
