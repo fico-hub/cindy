@@ -4,7 +4,6 @@ import { customProviderSecretStorageKey } from '@/../shared/providerSecrets';
 
 import {
   appendDiscoveredCustomProviderModels,
-  clearCustomProviderModelPiApiOverrides,
   createCustomProvider,
   customProviderModelConfigFromCatalogModel,
   customProviderWireProtocolForSave,
@@ -13,6 +12,7 @@ import {
   providerViewToCustomProviderConfig,
   readCustomProviderKey,
   replaceCustomProviderModelId,
+  setCustomProviderModelPiApi,
   setCustomProviderModelReasoning,
   setCustomProviderModelReasoningEffort,
   setCustomProviderModelSupportsImageInput,
@@ -86,7 +86,7 @@ describe('piCatalogProviderIdAfterRouteEdit', () => {
     ).toBeUndefined();
   });
 
-  it('treats an omitted Pi protocol as the effective openai-chat default', () => {
+  it('treats an omitted Pi protocol as a configuration change, not Chat', () => {
     const openAiChat = {
       ...official,
       wireProtocol: 'openai-chat' as const,
@@ -96,7 +96,7 @@ describe('piCatalogProviderIdAfterRouteEdit', () => {
         ...openAiChat,
         wireProtocol: undefined,
       }),
-    ).toBe('example');
+    ).toBeUndefined();
     expect(
       piCatalogProviderIdAfterRouteEdit(
         'pi',
@@ -106,7 +106,7 @@ describe('piCatalogProviderIdAfterRouteEdit', () => {
         },
         openAiChat,
       ),
-    ).toBe('example');
+    ).toBeUndefined();
     expect(
       piCatalogProviderIdAfterRouteEdit('pi', openAiChat, {
         ...openAiChat,
@@ -244,8 +244,14 @@ describe('replaceCustomProviderModelId', () => {
 });
 
 describe('PI custom-provider protocol overrides', () => {
-  it('drops preset piApi metadata and persists an explicit Chat selection', () => {
+  it.each([
+    [undefined, undefined],
+    ['anthropic-messages', 'anthropic-messages'],
+    ['openai-completions', 'openai-completions'],
+    ['openai-responses', 'openai-responses'],
+  ] as const)('sets the selected model override to %s', (piApi, expected) => {
     const models: ProviderRuntimeModelConfig[] = [
+      { id: 'unchanged', name: 'Unchanged', piApi: 'anthropic-messages' },
       {
         id: 'deepseek-v4-pro',
         name: 'DeepSeek V4 Pro',
@@ -254,13 +260,59 @@ describe('PI custom-provider protocol overrides', () => {
       },
     ];
 
-    expect(clearCustomProviderModelPiApiOverrides(models)).toEqual([
-      {
-        id: 'deepseek-v4-pro',
-        name: 'DeepSeek V4 Pro',
-        contextWindow: 1_000_000,
+    const updated = setCustomProviderModelPiApi(models, 1, piApi);
+    expect(updated[0]).toBe(models[0]);
+    expect(updated[1]).toEqual({
+      id: 'deepseek-v4-pro',
+      name: 'DeepSeek V4 Pro',
+      contextWindow: 1_000_000,
+      ...(expected ? { piApi: expected } : {}),
+    });
+  });
+
+  it.each([
+    [undefined, undefined],
+    ['openai-completions', 'openai-completions'],
+    ['openai-responses', 'openai-responses'],
+    ['google-generative-ai', 'google-generative-ai'],
+  ] as const)(
+    'drops a stale Messages route when switching the model override to %s',
+    (piApi, expected) => {
+      const models: ProviderRuntimeModelConfig[] = [
+        {
+          id: 'routed-model',
+          name: 'Routed model',
+          piApi: 'anthropic-messages',
+          route: {
+            baseUrl: 'https://provider.example/anthropic',
+            wireProtocol: 'anthropic-messages',
+          },
+        },
+      ];
+
+      expect(setCustomProviderModelPiApi(models, 0, piApi)[0]).toEqual({
+        id: 'routed-model',
+        name: 'Routed model',
+        ...(expected ? { piApi: expected } : {}),
+      });
+    },
+  );
+
+  it('retains a model route when the selected override still uses its protocol', () => {
+    const model: ProviderRuntimeModelConfig = {
+      id: 'routed-model',
+      name: 'Routed model',
+      piApi: 'anthropic-messages',
+      route: {
+        baseUrl: 'https://provider.example/anthropic',
+        wireProtocol: 'anthropic-messages',
       },
-    ]);
+    };
+
+    expect(setCustomProviderModelPiApi([model], 0, 'anthropic-messages')[0]).toEqual(model);
+  });
+
+  it('persists the Pi provider default without rewriting model overrides', () => {
     expect(customProviderWireProtocolForSave('pi', 'openai-chat', 'openai-chat')).toBe(
       'openai-chat',
     );
@@ -298,7 +350,9 @@ describe('Pi custom-provider reasoning controls', () => {
         reasoningEfforts: ['minimal', 'low', 'medium', 'high'],
       },
     ]);
-    expect(setCustomProviderModelReasoning(enabled, 0, false)).toEqual(models);
+    expect(setCustomProviderModelReasoning(enabled, 0, false)).toEqual(
+      models.map((model) => ({ ...model, reasoning: false })),
+    );
   });
 
   it('keeps canonical order and refuses to remove the final supported effort', () => {
@@ -595,6 +649,43 @@ describe('providerViewToCustomProviderConfig', () => {
     ]);
   });
 
+  it('round-trips Codex image generation independently from image input', () => {
+    const provider = {
+      id: 'image-provider',
+      name: 'Image Provider',
+      source: 'user',
+      agents: ['codex'],
+      auth: { method: 'apiKey' },
+      access: { kind: 'api' },
+      routing: {
+        codex: {
+          upstream: 'https://image.example/v1',
+          authStrategy: 'api-key-header',
+          wireProtocol: 'openai-responses',
+          supportsImageGeneration: true,
+        },
+      },
+      models: {
+        codex: [
+          {
+            id: 'image-model',
+            name: 'Image Model',
+            contextWindow: 200_000,
+            efforts: [],
+            defaultEffort: null,
+            supportsImageInput: false,
+          },
+        ],
+      },
+      connected: true,
+    } satisfies ProviderView;
+
+    expect(providerViewToCustomProviderConfig(provider).runtimes.codex).toMatchObject({
+      supportsImageGeneration: true,
+      models: [{ id: 'image-model', name: 'Image Model' }],
+    });
+  });
+
   it('round-trips Pi reasoning efforts from a provider view', () => {
     const provider = {
       id: 'local-reasoning',
@@ -682,8 +773,8 @@ describe('appendDiscoveredCustomProviderModels', () => {
     );
     expect(result).toEqual({
       models: [
-        { id: 'kept', name: 'Kept' },
-        { id: 'new', name: 'New', defaultEnabled: false },
+        { id: 'kept', name: 'Kept', nameExplicit: true, discoveredMetadata: { name: 'New name' } },
+        { id: 'new', name: 'New', defaultEnabled: false, discoveredMetadata: { name: 'New' } },
       ],
       addedIds: ['new'],
     });
@@ -699,10 +790,15 @@ describe('appendDiscoveredCustomProviderModels', () => {
       ],
     );
     expect(result.models).toEqual([
-      { id: 'big', name: 'Big', contextWindow: 1_000_000, defaultEnabled: false },
-      { id: 'plain', name: 'Plain', defaultEnabled: false },
+      {
+        id: 'big',
+        name: 'Big',
+        discoveredMetadata: { name: 'Big', contextWindow: 1_000_000 },
+        defaultEnabled: false,
+      },
+      { id: 'plain', name: 'Plain', discoveredMetadata: { name: 'Plain' }, defaultEnabled: false },
       // 非法值不落盘,回落保守默认
-      { id: 'bogus', name: 'Bogus', defaultEnabled: false },
+      { id: 'bogus', name: 'Bogus', discoveredMetadata: { name: 'Bogus' }, defaultEnabled: false },
     ]);
   });
 });
@@ -764,6 +860,34 @@ describe('custom provider credential lifecycle', () => {
     await createCustomProvider(config, keys);
 
     expect(create).toHaveBeenCalledWith(config, keys);
+  });
+
+  it('forwards the explicit manual create restart policy through the same mutation', async () => {
+    const create = vi.fn(async () => ({ ok: true as const }));
+    vi.stubGlobal('window', {
+      electronAPI: {
+        maker: { createCustomProvider: create },
+      },
+    });
+    const config = {
+      id: 'new-image-provider',
+      name: 'New image provider',
+      runtimes: {
+        codex: {
+          baseUrl: 'https://api.example/v1',
+          supportsImageGeneration: true,
+          models: [{ id: 'model', name: 'Model' }],
+        },
+      },
+    };
+    const options = {
+      source: 'manual-settings' as const,
+      codexImageGenerationRestartPolicy: 'interrupt' as const,
+    };
+
+    await createCustomProvider(config, {}, options);
+
+    expect(create).toHaveBeenCalledWith(config, {}, options);
   });
 
   it('surfaces an atomic main-process create failure', async () => {

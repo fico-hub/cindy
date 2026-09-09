@@ -17,11 +17,13 @@
 import { app, net } from 'electron';
 import * as canaryFlagStore from './canaryFlagStore';
 
-import { resolveUpdateChannel } from '@cindy/maker-shared/update-channel';
+import { resolveUpdateChannel, type UpdateChannel } from '@cindy/maker-shared/update-channel';
 
+import { supportsBetaUpdateChannel } from '../shared/updateChannelCapability';
 import { createLogger } from './logger';
 import { getClientEndpoint } from './clientEndpointsService';
 import { isBetaChannelEnabled } from './updateChannelStore';
+import { parseAppUpdateVersion } from './updateVersionPolicy';
 
 const log = createLogger('manifestService');
 
@@ -90,6 +92,7 @@ export interface Manifest {
   /** Linux manifests omit agent assets; packaged Linux uses its official runtime fallback. */
   claudeCode?: ClaudeCodeManifest;
   codex?: CodexManifest;
+  codexPackage?: CodexManifest;
   ripgrep?: RipgrepManifest;
   pi?: PiManifest;
 }
@@ -101,12 +104,18 @@ const REQUEST_TIMEOUT_MS = 30_000;
 // ── State ──────────────────────────────────────────────────────────────────
 
 let cached: Manifest | null = null;
+/** 当前缓存对应的发布通道。读取时跟磁盘对账,共库另一实例切过渠道就丢掉。 */
+let cachedChannel: UpdateChannel | null = null;
 /**
  * manifest 代际:切渠道(clearCachedManifest)时 +1。fetchManifest 发起时快照,
  * 响应完成写 cached 前核对——若期间切了渠道,这次 in-flight 的旧渠道响应直接作废,
  * 不写缓存、返回 null,让调用方(agent prepare / 更新轮询)下次按新渠道重新 fetch。
  */
 let manifestEpoch = 0;
+
+function currentUpdateChannel(): UpdateChannel {
+  return resolveUpdateChannel(canaryFlagStore.read(), isBetaChannelEnabled());
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -158,10 +167,7 @@ export async function fetchManifest(
   if (isDev()) return null;
   if (signal?.aborted) return null;
 
-  const channel = resolveUpdateChannel(
-    canaryFlagStore.read(),
-    isBetaChannelEnabled(),
-  );
+  const channel = currentUpdateChannel();
   const channelSuffix = channel === 'release' ? '' : `-${channel}`;
   // Cache-bust: append timestamp to prevent Chromium / CDN serving stale manifest
   const url = `${getBaseUrl()}/manifest-${getPlatformKey()}${channelSuffix}.json?t=${Date.now()}`;
@@ -205,12 +211,14 @@ export async function fetchManifest(
             const json = JSON.parse(body) as Manifest;
             // 响应回来前切了渠道:这是旧渠道的 manifest,不作废会污染 cached,
             // 让后续 agent prepare 装旧渠道资产。返回 null 让调用方下次按新渠道重取。
-            if (epochAtStart !== manifestEpoch) {
+            // 共库另一实例改开关不会推进本进程 epoch,所以还要再对一次当前通道。
+            if (epochAtStart !== manifestEpoch || currentUpdateChannel() !== channel) {
               log.info('manifest channel changed during fetch — discarding stale response');
               finish(null);
               return;
             }
             cached = json;
+            cachedChannel = channel;
             log.info('Fetched OK: app.version=%s, hotfix=%s', json.app?.version, json.app?.hotfix?.file ?? 'none');
             finish(json);
           } catch (err) {
@@ -236,8 +244,15 @@ export async function fetchManifest(
 
 /**
  * Return the in-memory cached manifest (may be null if never fetched or dev mode).
+ * 读取时跟当前发布通道对账:共库另一实例切过渠道后,旧缓存不能再给 agent prepare 用。
  */
 export function getCachedManifest(): Manifest | null {
+  if (!cached) return null;
+  if (cachedChannel !== currentUpdateChannel()) {
+    log.info('cached manifest channel is stale — discarding');
+    clearCachedManifest();
+    return null;
+  }
   return cached;
 }
 
@@ -251,6 +266,7 @@ export function getCachedManifest(): Manifest | null {
  */
 export function clearCachedManifest(): void {
   cached = null;
+  cachedChannel = null;
   manifestEpoch += 1;
 }
 
@@ -264,15 +280,35 @@ export function clearCachedManifest(): void {
  * 「manifest 之后才判 isInstalled」顺序)——所以「能不能开」必须提前探明,
  * 而不是等用户重启后才发现坏了。
  *
- * 只判 HTTP 200 可达,不解析正文、不写 cache、不改当前发布通道。dev 不联网,
- * 直接返回 true(dev 不消费远程 manifest,无需预检)。
+ * HTTP 200 之后还要能解析出 app.version；Linux 还必须带完整可信的 .deb 元数据。
+ * 截断 JSON / 错误页 / 不完整安装清单都不能当成渠道可用。
+ * 不写 cache、不改当前发布通道。dev 不联网,直接返回 true。
  */
+function isUsableBetaManifest(manifest: Manifest): boolean {
+  if (!parseAppUpdateVersion(manifest.app?.version)) return false;
+  if (process.platform !== 'linux') return true;
+
+  const installer = manifest.app.installer;
+  return Boolean(
+    installer &&
+      typeof installer.file === 'string' &&
+      installer.file.endsWith('.deb') &&
+      typeof installer.sha256 === 'string' &&
+      /^[a-f0-9]{64}$/i.test(installer.sha256) &&
+      typeof installer.size === 'number' &&
+      Number.isFinite(installer.size) &&
+      installer.size > 0,
+  );
+}
+
 export function probeBetaManifest(timeoutMs = 8_000): Promise<boolean> {
+  if (!supportsBetaUpdateChannel(process.platform, process.arch)) return Promise.resolve(false);
   if (isDev()) return Promise.resolve(true);
   const url = `${getBaseUrl()}/manifest-${getPlatformKey()}-beta.json?t=${Date.now()}`;
   return new Promise<boolean>((resolve) => {
     try {
       const request = net.request(url);
+      let body = '';
       let settled = false;
       let timeout: ReturnType<typeof setTimeout> | undefined;
       const finish = (value: boolean, abortRequest = false): void => {
@@ -284,9 +320,23 @@ export function probeBetaManifest(timeoutMs = 8_000): Promise<boolean> {
       };
       timeout = setTimeout(() => finish(false, true), timeoutMs);
       request.on('response', (response) => {
-        // 读完响应体以正确触发流结束、避免连接泄漏(内容不关心)。
-        response.on('data', () => {});
-        response.on('end', () => finish(response.statusCode === 200));
+        if (response.statusCode !== 200) {
+          response.on('data', () => {});
+          response.on('end', () => finish(false));
+          response.on('error', () => finish(false));
+          return;
+        }
+        response.on('data', (chunk) => {
+          body += chunk.toString();
+        });
+        response.on('end', () => {
+          try {
+            const json = JSON.parse(body) as Manifest;
+            finish(isUsableBetaManifest(json));
+          } catch {
+            finish(false);
+          }
+        });
         response.on('error', () => finish(false));
       });
       request.on('error', () => finish(false));

@@ -11,7 +11,8 @@ import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
 import { Session } from './session.js';
-import type { AgentSessionHandle } from './agents/base-agent.js';
+import { AUTO_REVIEW_SOURCE_CONTENT, AUTO_REVIEW_USER_INTENT, MAIN_OWNED_SEND_CONTEXT, type AgentSessionHandle, type SendOptions } from './agents/base-agent.js';
+import { appendAutoReviewUserIntent } from './agents/shared/auto-review-decision.js';
 import type { UserMessage } from './types/common.js';
 import type { VisionBridgeHook } from './types/vision-bridge.js';
 
@@ -70,6 +71,49 @@ function makeSession(
 }
 
 describe('Session.send vision bridge hook', () => {
+  it('preserves Host authorization through a decorated handoff before the adapter sees it', async () => {
+    const { handle } = makeRecordingHandle();
+    const send = vi.fn(async (msg: UserMessage, opts?: SendOptions) => {
+      expect(opts?.[AUTO_REVIEW_SOURCE_CONTENT]).toBe('修吧。');
+      expect(appendAutoReviewUserIntent('obsolete grant', msg.content, opts)).toBe('Fix the unread bug. Do not deploy. 修吧。');
+    });
+    handle.send = send;
+    const session = makeSession(handle);
+    await session.send({ type: 'user', content: 'handoff '.repeat(1000) + '修吧。' }, {
+      [AUTO_REVIEW_SOURCE_CONTENT]: '修吧。',
+      [AUTO_REVIEW_USER_INTENT]: 'Fix the unread bug. Do not deploy. 修吧。',
+    });
+    expect(send).toHaveBeenCalledOnce();
+    await session.close();
+  });
+  it.each(['send', 'steer'] as const)('keeps original approval evidence through the %s vision bridge', async (method) => {
+    for (const text of ['', 'Continue.', 'Send this image to Alex.']) {
+      const { handle } = makeRecordingHandle();
+      const dispatch = vi.fn(async (msg: UserMessage, opts?: SendOptions) => {
+        expect(JSON.stringify(msg.content)).toContain('Generated image description: send it');
+        expect(appendAutoReviewUserIntent('Send the old report to Alex.', msg.content, opts)).toBe(text);
+        // Preserving attachment evidence does not mint Main-origin authority.
+        expect(opts?.[MAIN_OWNED_SEND_CONTEXT]).toBeUndefined();
+      });
+      handle[method] = dispatch;
+      handle.isTurnRunning = () => method === 'steer';
+      const session = new Session({
+        id: `approval-${method}`, agentKind: 'claude-code', workDir: path.join('workspace', 'repo'),
+        handle, capabilities: { sameTurnSteer: { supported: true } } as never,
+        logger: createLogger() as never,
+        visionBridge: async () => ({ applied: true, message: {
+          type: 'user', content: [{ type: 'text', text: 'Generated image description: send it' }],
+        } }),
+      });
+      await session[method]({ type: 'user', content: [
+        { type: 'text', text },
+        { type: 'image', path: '/tmp/new.png', managedUrl: `cindy-media://blobs/${'a'.repeat(64)}.png` },
+      ] });
+      expect(dispatch).toHaveBeenCalledOnce();
+      await session.close();
+    }
+  });
+
   it('replaces the message with the bridged message when applied', async () => {
     const { handle, sent } = makeRecordingHandle();
     const hook: VisionBridgeHook = async (msg, ctx) => {
@@ -87,6 +131,33 @@ describe('Session.send vision bridge hook', () => {
     expect(sent).toHaveLength(1);
     // 派发给 handle 的是替换后的消息（无 image block）。
     expect(sent[0].content).toEqual([{ type: 'text', text: '[desc] the image shows a red button' }]);
+  });
+
+  it('preserves Host-managed image references after the bridge replaces image blocks', async () => {
+    const managedUrl = `cindy-media://blobs/${'a'.repeat(64)}.png`;
+    const { handle, sent } = makeRecordingHandle();
+    const hook: VisionBridgeHook = async () => ({
+      applied: true,
+      message: {
+        type: 'user',
+        content: [{ type: 'text', text: '[desc] the image shows a red button' }],
+      },
+    });
+    const session = makeSession(handle, hook);
+
+    await session.send({
+      type: 'user',
+      content: [{ type: 'image', path: '/tmp/ui.png', managedUrl }],
+    });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0].content).toEqual([
+      { type: 'text', text: '[desc] the image shows a red button' },
+      {
+        type: 'text',
+        text: expect.stringContaining(JSON.stringify({ image: 1, uri: managedUrl })),
+      },
+    ]);
   });
 
   it('passes through unchanged when applied=false with note (note not blocking)', async () => {
@@ -275,6 +346,56 @@ describe('Session.steer vision bridge hook', () => {
     // 视觉桥把 image block 替换为描述文本后交给 handle.steer。
     expect(steered).toHaveLength(1);
     expect(steered[0].content).toEqual([{ type: 'text', text: '[desc] the image shows a chat list' }]);
+  });
+
+  it('preserves Host-managed image references when steering through the vision bridge', async () => {
+    const managedUrl = 'xdt-image://vision-steer/screenshot.png';
+    const steered: UserMessage[] = [];
+    const handle = {
+      id: 'thread-1',
+      agentKind: 'claude-code',
+      model: 'deepseek-v4',
+      async send() {},
+      async steer(msg: UserMessage) {
+        steered.push(msg);
+      },
+      async abort() {},
+      async close() {},
+      async *events() {},
+      getUsageSnapshot: () => ({ tokenUsage: 0, contextTokens: 0, contextWindow: 0, costUsd: 0 }),
+      setInteractionResolver: () => undefined,
+      isTurnRunning: () => true,
+    } as unknown as AgentSessionHandle;
+    const hook: VisionBridgeHook = async () => ({
+      applied: true,
+      message: {
+        type: 'user',
+        content: [{ type: 'text', text: '[desc] bridged screenshot' }],
+      },
+    });
+    const session = new Session({
+      id: 'session-vb-steer-reference',
+      agentKind: 'claude-code',
+      workDir: path.join('workspace', 'repo'),
+      handle,
+      capabilities: { sameTurnSteer: { supported: true } } as never,
+      logger: createLogger() as never,
+      visionBridge: hook,
+    });
+
+    await session.steer({
+      type: 'user',
+      content: [{ type: 'image', path: '/tmp/a.png', managedUrl }],
+    });
+
+    expect(steered).toHaveLength(1);
+    expect(steered[0].content).toEqual([
+      { type: 'text', text: '[desc] bridged screenshot' },
+      {
+        type: 'text',
+        text: expect.stringContaining(JSON.stringify({ image: 1, uri: managedUrl })),
+      },
+    ]);
   });
 
   it('does not steer when the turn ends during async vision conversion', async () => {

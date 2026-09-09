@@ -13,7 +13,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { ProviderView } from '@cindy/model-providers';
+import { buildUserProvider, BUNDLED_CATALOG, type ProviderView } from '@cindy/model-providers';
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key, i18n: { language: 'zh-CN' } }),
@@ -50,7 +50,7 @@ vi.mock('@/components/icons/ProviderLogoMark', () => ({
   ProviderLogoMark: () => null,
 }));
 
-import { AddProviderWizard } from '@/components/settings/AddProviderWizard';
+import { AddProviderWizard, OFFICIAL_API_PRESETS } from '@/components/settings/AddProviderWizard';
 import { createCustomProvider } from '@/lib/customProviders';
 
 const anthropicProvider = {
@@ -174,6 +174,7 @@ const piReasoningPreset = {
   runtimes: {
     pi: {
       baseUrl: 'https://pi.example/v1',
+      wireProtocol: 'openai-chat' as const,
       models: [
         {
           id: 'reasoning-model',
@@ -215,6 +216,17 @@ const claudeRequestPathPreset = {
   },
 };
 
+const claudeOnlyPreset = {
+  id: 'claude-only',
+  name: 'Claude Only',
+  runtimes: {
+    'claude-code': {
+      baseUrl: 'https://claude-only.example/anthropic',
+      models: [{ id: 'claude-only-model', name: 'Claude Only Model' }],
+    },
+  },
+};
+
 function renderWizard(presetId: string) {
   return render(
     React.createElement(AddProviderWizard, {
@@ -230,6 +242,12 @@ function renderWizard(presetId: string) {
 beforeEach(() => {
   (window as unknown as { electronAPI: unknown }).electronAPI = {
     maker: {
+      localModelList: vi.fn(async () => ({
+        status: { runtime: 'ollama', kind: 'absent', appInstalled: false },
+        models: [],
+        memoryGb: 0,
+      })),
+      scanLocalCli: vi.fn(async () => ({ detections: [] })),
       listProviderPresets: vi.fn(async () => ({
         presets: [
           deepseekPreset,
@@ -242,6 +260,7 @@ beforeEach(() => {
           piReasoningPreset,
           explicitPiPreset,
           claudeRequestPathPreset,
+          claudeOnlyPreset,
         ],
       })),
       // 列模型失败场景兜底(Greptile P1 回归):官方 API 预设必须靠推荐模型仍可完成。
@@ -256,6 +275,12 @@ afterEach(() => {
 });
 
 describe('AddProviderWizard — preset 直达', () => {
+  it('官方 API 入口逐一显式声明 Pi 协议，不依赖 Claude runtime 派生', () => {
+    expect(OFFICIAL_API_PRESETS.anthropic?.runtimes.pi?.wireProtocol).toBe('anthropic-messages');
+    expect(OFFICIAL_API_PRESETS.openai?.runtimes.pi?.wireProtocol).toBe('openai-responses');
+    expect(OFFICIAL_API_PRESETS.xai?.runtimes.pi?.wireProtocol).toBe('openai-chat');
+  });
+
   it('presets 载入后直达表单步:名称预填预设名,出现 API Key 输入', async () => {
     renderWizard('deepseek');
 
@@ -317,7 +342,7 @@ describe('AddProviderWizard — preset 直达', () => {
       expect(screen.getByText('settings.providers.wizard.nameLabel')).not.toBeNull(),
     );
     expect(screen.getByDisplayValue('Anthropic API')).not.toBeNull();
-    expect(screen.getAllByText(/api\.anthropic\.com/)).toHaveLength(2);
+    expect(screen.getAllByText(/api\.anthropic\.com/)).toHaveLength(3);
   });
 
   it('官方 API 预设:列模型失败 → 第三步仍有推荐模型预勾,可完成(Greptile P1 回归)', async () => {
@@ -351,7 +376,7 @@ describe('AddProviderWizard — preset 直达', () => {
     ).toBe(false);
   });
 
-  it('官方 API 预设:完成保存 → 模型带目录口径 contextWindow(Codex P1 回归)', async () => {
+  it('官方 API 预设保存引用，解析后继承目录窗口', async () => {
     render(
       React.createElement(AddProviderWizard, {
         providers: [anthropicProvider],
@@ -371,16 +396,15 @@ describe('AddProviderWizard — preset 直达', () => {
     await waitFor(() => expect(screen.getByText('Claude Opus 5')).not.toBeNull());
     fireEvent.click(screen.getByText('settings.providers.wizard.finish'));
 
-    // 保存产物必须带预设声明的 contextWindow:它是唯一窗口来源,缺省会落
-    // 200k 默认导致 1M 模型丢 [1m] 路由(toSdkModelString 按窗口剥后缀)。
+    // 默认资料保持继承；保存引用后仍解析出目录窗口。
     await waitFor(() => expect(createCustomProvider).toHaveBeenCalledTimes(1));
     const config = vi.mocked(createCustomProvider).mock.calls[0][0];
     const models = config.runtimes['claude-code']?.models ?? [];
     expect(models).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ id: 'claude-opus-5', contextWindow: 1_000_000 }),
-        expect.objectContaining({ id: 'claude-sonnet-5', contextWindow: 1_000_000 }),
-        expect.objectContaining({ id: 'claude-haiku-4-5', contextWindow: 200_000 }),
+        expect.objectContaining({ id: 'claude-opus-5', discoveredMetadata: {} }),
+        expect.objectContaining({ id: 'claude-sonnet-5', discoveredMetadata: {} }),
+        expect.objectContaining({ id: 'claude-haiku-4-5', discoveredMetadata: {} }),
       ]),
     );
     const codex = config.runtimes.codex;
@@ -388,26 +412,41 @@ describe('AddProviderWizard — preset 直达', () => {
     expect(codex?.baseUrl).toBe('https://api.anthropic.com');
     expect(codex?.models).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ id: 'claude-opus-5', contextWindow: 1_000_000 }),
-        expect.objectContaining({ id: 'claude-sonnet-5', contextWindow: 1_000_000 }),
-        expect.objectContaining({ id: 'claude-haiku-4-5', contextWindow: 200_000 }),
+        expect.objectContaining({ id: 'claude-opus-5', discoveredMetadata: {} }),
+        expect.objectContaining({ id: 'claude-sonnet-5', discoveredMetadata: {} }),
+        expect.objectContaining({ id: 'claude-haiku-4-5', discoveredMetadata: {} }),
       ]),
     );
     const keys = vi.mocked(createCustomProvider).mock.calls[0][1];
     expect(keys).toMatchObject({ 'claude-code': 'sk-test', codex: 'sk-test' });
     expect(config.runtimes.pi).toEqual({
+      catalogPresetId: 'anthropic-api',
       baseUrl: 'https://api.anthropic.com',
       wireProtocol: 'anthropic-messages',
       models: expect.arrayContaining([
-        expect.objectContaining({ id: 'claude-opus-5', contextWindow: 1_000_000 }),
-        expect.objectContaining({ id: 'claude-sonnet-5', contextWindow: 1_000_000 }),
-        expect.objectContaining({ id: 'claude-haiku-4-5', contextWindow: 200_000 }),
+        expect.objectContaining({ id: 'claude-opus-5', discoveredMetadata: {} }),
+        expect.objectContaining({ id: 'claude-sonnet-5', discoveredMetadata: {} }),
+        expect.objectContaining({ id: 'claude-haiku-4-5', discoveredMetadata: {} }),
       ]),
     });
     expect(keys.pi).toBe('sk-test');
+    const { presets } = await window.electronAPI.maker.listProviderPresets();
+    const projected = buildUserProvider(config, {
+      presets,
+      modelRegistry: BUNDLED_CATALOG.modelRegistry,
+    });
+    expect(projected.models['claude-code']).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'claude-opus-5', contextWindow: 1_000_000 }),
+        expect.objectContaining({ id: 'claude-haiku-4-5', contextWindow: 200_000 }),
+      ]),
+    );
+    expect(
+      config.runtimes['claude-code']?.models.every((model) => model.contextWindow === undefined),
+    ).toBe(true);
   });
 
-  it('Pi 预设保存时保留显式 reasoning 能力与支持档位', async () => {
+  it('Pi 预设通过引用继承 reasoning 能力与支持档位', async () => {
     renderWizard('pi-reasoning');
 
     await waitFor(() => expect(screen.getByDisplayValue('Pi Reasoning')).not.toBeNull());
@@ -420,11 +459,16 @@ describe('AddProviderWizard — preset 直达', () => {
     expect(vi.mocked(createCustomProvider).mock.calls[0][0].runtimes.pi?.models).toEqual([
       expect.objectContaining({
         id: 'reasoning-model',
-        reasoning: true,
-        reasoningEfforts: ['low', 'high'],
-        reasoningDefaultEffort: 'high',
+        discoveredMetadata: {},
       }),
     ]);
+    const config = vi.mocked(createCustomProvider).mock.calls[0][0];
+    const { presets } = await window.electronAPI.maker.listProviderPresets();
+    expect(config.runtimes.pi?.catalogPresetId).toBe('pi-reasoning');
+    expect(buildUserProvider(config, { presets }).models.pi?.[0]).toMatchObject({
+      efforts: ['low', 'high'],
+      defaultEffort: 'high',
+    });
   });
 
   it('预设已有显式 Pi runtime 时不被 Claude 自动初始化覆盖', async () => {
@@ -439,9 +483,10 @@ describe('AddProviderWizard — preset 直达', () => {
     await waitFor(() => expect(createCustomProvider).toHaveBeenCalledTimes(1));
     const [config, keys] = vi.mocked(createCustomProvider).mock.calls[0];
     expect(config.runtimes.pi).toEqual({
+      catalogPresetId: 'explicit-pi',
       baseUrl: 'https://explicit.example/pi',
       wireProtocol: 'openai-chat',
-      models: [{ id: 'pi-model', name: 'Pi Model' }],
+      models: [{ id: 'pi-model', name: 'Pi Model', discoveredMetadata: {} }],
     });
     expect(keys.pi).toBe('sk-test');
   });
@@ -459,8 +504,9 @@ describe('AddProviderWizard — preset 直达', () => {
     await waitFor(() => expect(createCustomProvider).toHaveBeenCalledTimes(1));
     const [config, keys] = vi.mocked(createCustomProvider).mock.calls[0];
     expect(config.runtimes['claude-code']).toEqual({
+      catalogPresetId: 'explicit-pi',
       baseUrl: 'https://explicit.example/anthropic',
-      models: [{ id: 'claude-model', name: 'Claude Model' }],
+      models: [{ id: 'claude-model', name: 'Claude Model', discoveredMetadata: {} }],
     });
     expect(config.runtimes.pi).toBeUndefined();
     expect(keys.pi).toBeUndefined();
@@ -484,6 +530,24 @@ describe('AddProviderWizard — preset 直达', () => {
     expect(keys.pi).toBeUndefined();
   });
 
+  it('缺少显式 Pi runtime 的预设不会从 Claude runtime 静默派生', async () => {
+    renderWizard('claude-only');
+
+    await waitFor(() => expect(screen.getByDisplayValue('Claude Only')).not.toBeNull());
+    fireEvent.change(screen.getByPlaceholderText('sk-…'), { target: { value: 'sk-test' } });
+    fireEvent.click(screen.getByText('settings.providers.wizard.next'));
+    await waitFor(() => expect(screen.getByText('Claude Only Model')).not.toBeNull());
+    fireEvent.click(screen.getByText('settings.providers.wizard.finish'));
+
+    await waitFor(() => expect(createCustomProvider).toHaveBeenCalledTimes(1));
+    const [config, keys] = vi.mocked(createCustomProvider).mock.calls[0];
+    expect(config.runtimes['claude-code']?.models).toEqual([
+      { id: 'claude-only-model', name: 'Claude Only Model', discoveredMetadata: {} },
+    ]);
+    expect(config.runtimes.pi).toBeUndefined();
+    expect(keys.pi).toBeUndefined();
+  });
+
   it('editable preset saves the edited base URL and exact request path', async () => {
     const editablePreset = {
       id: 'local-gateway',
@@ -497,8 +561,9 @@ describe('AddProviderWizard — preset 直达', () => {
         },
       },
     };
-    vi.mocked(window.electronAPI.maker.listProviderPresets)
-      .mockResolvedValueOnce({ presets: [editablePreset] });
+    vi.mocked(window.electronAPI.maker.listProviderPresets).mockResolvedValueOnce({
+      presets: [editablePreset],
+    });
     renderWizard('local-gateway');
 
     const baseUrl = await screen.findByDisplayValue('http://127.0.0.1:4000/v1');
@@ -558,7 +623,7 @@ describe('AddProviderWizard — preset 直达', () => {
           codex: expect.objectContaining({
             baseUrl: 'http://localhost:4100/v1',
             requestPath: '/tenant/acme/infer',
-            models: [{ id: 'local-model', name: 'local-model' }],
+            models: [{ id: 'local-model', name: 'local-model', discoveredMetadata: {} }],
           }),
         },
       }),
@@ -572,7 +637,8 @@ describe('AddProviderWizard — preset 直达', () => {
     await waitFor(() =>
       expect(screen.getByDisplayValue('Unsafe no-auth discovery')).not.toBeNull(),
     );
-    const next = screen.getByText('settings.providers.wizard.next')
+    const next = screen
+      .getByText('settings.providers.wizard.next')
       .closest('button') as HTMLButtonElement;
     expect(next.disabled).toBe(true);
     expect(window.electronAPI.maker.fetchProviderModels).not.toHaveBeenCalled();
@@ -583,7 +649,7 @@ describe('AddProviderWizard — preset 直达', () => {
       ok: true,
       models: [
         { id: 'minimax-m3', name: 'MiniMax M3' },
-        { id: 'glm-5.2', name: 'GLM-5.2' },
+        { id: 'glm-5.2', name: 'GLM-5.2', discoveredMetadata: {} },
       ],
     });
     renderWizard('opencode-go');
@@ -621,7 +687,10 @@ describe('AddProviderWizard — preset 直达', () => {
     await waitFor(() => expect(createCustomProvider).toHaveBeenCalledTimes(1));
     const config = vi.mocked(createCustomProvider).mock.calls[0][0];
     expect(config.runtimes['claude-code']?.models).toEqual([
-      expect.objectContaining({ id: 'deepseek-v4', contextWindow: 262_144 }),
+      expect.objectContaining({
+        id: 'deepseek-v4',
+        discoveredMetadata: expect.objectContaining({ contextWindow: 262_144 }),
+      }),
     ]);
   });
 
@@ -653,10 +722,16 @@ describe('AddProviderWizard — preset 直达', () => {
     await waitFor(() => expect(createCustomProvider).toHaveBeenCalledTimes(1));
     const config = vi.mocked(createCustomProvider).mock.calls[0][0];
     expect(config.runtimes['claude-code']?.models).toEqual([
-      expect.objectContaining({ id: 'shared-model', contextWindow: 1_000_000 }),
+      expect.objectContaining({
+        id: 'shared-model',
+        discoveredMetadata: expect.objectContaining({ contextWindow: 1_000_000 }),
+      }),
     ]);
     expect(config.runtimes.codex?.models).toEqual([
-      expect.objectContaining({ id: 'shared-model', contextWindow: 272_000 }),
+      expect.objectContaining({
+        id: 'shared-model',
+        discoveredMetadata: expect.objectContaining({ contextWindow: 272_000 }),
+      }),
     ]);
   });
 
@@ -665,7 +740,7 @@ describe('AddProviderWizard — preset 直达', () => {
       async ({ baseUrl }: { baseUrl: string }) =>
         baseUrl === 'https://open.bigmodel.cn/api/v1'
           ? { ok: true, models: [{ id: 'glm-5.3', name: 'GLM-5.3' }] }
-          : { ok: true, models: [{ id: 'glm-5.2', name: 'GLM-5.2' }] },
+          : { ok: true, models: [{ id: 'glm-5.2', name: 'GLM-5.2', discoveredMetadata: {} }] },
     );
     renderWizard('zhipu-coding-plan-cn');
 
@@ -697,7 +772,7 @@ describe('AddProviderWizard — preset 直达', () => {
       baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
       wireProtocol: 'openai-chat',
       models: [
-        { id: 'glm-5.2', name: 'GLM-5.2' },
+        { id: 'glm-5.2', name: 'GLM-5.2', discoveredMetadata: {} },
         {
           id: 'glm-5.3',
           name: 'GLM-5.3',
@@ -718,7 +793,7 @@ describe('AddProviderWizard — preset 直达', () => {
           ? {
               ok: true,
               models: [
-                { id: 'glm-5.2', name: 'GLM-5.2' },
+                { id: 'glm-5.2', name: 'GLM-5.2', discoveredMetadata: {} },
                 { id: 'glm-5.3', name: 'GLM-5.3' },
               ],
             }
@@ -738,7 +813,7 @@ describe('AddProviderWizard — preset 直达', () => {
       baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
       wireProtocol: 'openai-chat',
     });
-    expect(runtime?.models).toEqual([{ id: 'glm-5.2', name: 'GLM-5.2' }]);
+    expect(runtime?.models).toEqual([{ id: 'glm-5.2', name: 'GLM-5.2', discoveredMetadata: {} }]);
   });
 
   it('可编辑预设改为同源 endpoint 后继续合并 Responses 目录', async () => {
@@ -746,7 +821,10 @@ describe('AddProviderWizard — preset 直达', () => {
       async ({ baseUrl }: { baseUrl: string }) =>
         baseUrl === 'https://editable.example/api/v1'
           ? { ok: true, models: [{ id: 'responses-model', name: 'Responses Model' }] }
-          : { ok: true, models: [{ id: 'chat-model', name: 'Chat Model' }] },
+          : {
+              ok: true,
+              models: [{ id: 'chat-model', name: 'Chat Model', discoveredMetadata: {} }],
+            },
     );
     renderWizard('editable-discovery');
 
@@ -773,8 +851,9 @@ describe('AddProviderWizard — preset 直达', () => {
       }),
     );
     expect(vi.mocked(createCustomProvider).mock.calls[0][0].runtimes.codex?.models).toEqual([
-      { id: 'chat-model', name: 'Chat Model' },
+      { id: 'chat-model', name: 'Chat Model', discoveredMetadata: {} },
       {
+        discoveredMetadata: { name: 'Responses Model' },
         id: 'responses-model',
         name: 'Responses Model',
         route: {
@@ -813,7 +892,7 @@ describe('AddProviderWizard — preset 直达', () => {
     expect(vi.mocked(createCustomProvider).mock.calls[0][0].runtimes.codex).toMatchObject({
       baseUrl: 'https://self-hosted.example/v4',
       models: [
-        { id: 'chat-model', name: 'Chat Model' },
+        { id: 'chat-model', name: 'Chat Model', discoveredMetadata: {} },
         { id: 'self-hosted-model', name: 'Self-hosted Model' },
       ],
     });
@@ -825,7 +904,8 @@ describe('AddProviderWizard — preset 直达', () => {
     const endpoint = await screen.findByDisplayValue('http://127.0.0.1:4000/v1');
     fireEvent.change(endpoint, { target: { value: '   ' } });
 
-    const next = screen.getByText('settings.providers.wizard.next')
+    const next = screen
+      .getByText('settings.providers.wizard.next')
       .closest('button') as HTMLButtonElement;
     expect(next.disabled).toBe(true);
     expect(window.electronAPI.maker.fetchProviderModels).not.toHaveBeenCalled();

@@ -342,17 +342,19 @@ export function PinnedSection({
             图标 = 当前选中的显示模式(2026-08-12 用户裁决),不再恒为网格。 */}
         <div className={cn(HEADER_HOVER_ACTION_CLASS, 'flex items-center gap-0.5')}>
           <ViewStyleMenu mode={mode} setMode={setMode}>
-            <button
-              type="button"
-              aria-label={t('ccAgent.sidebar.viewStyle')}
-              className={cn(
-                'flex h-5 w-5 shrink-0 items-center justify-center rounded-md',
-                'text-[var(--sidebar-list-muted)]',
-                'transition-colors hover:text-[var(--sidebar-nav-text)]',
-              )}
-            >
-              <ViewStyleTriggerIcon size={13} strokeWidth={2} />
-            </button>
+            <Tip text={t('ccAgent.sidebar.viewStyle')} side="bottom">
+              <button
+                type="button"
+                aria-label={t('ccAgent.sidebar.viewStyle')}
+                className={cn(
+                  'flex h-5 w-5 shrink-0 items-center justify-center rounded-md',
+                  'text-[var(--sidebar-list-muted)]',
+                  'transition-colors hover:text-[var(--sidebar-nav-text)]',
+                )}
+              >
+                <ViewStyleTriggerIcon size={13} strokeWidth={2} />
+              </button>
+            </Tip>
           </ViewStyleMenu>
         </div>
       </div>
@@ -362,7 +364,7 @@ export function PinnedSection({
           scrollbar-gutter:stable 预留的 12px(= pl-3,与全局 12px 滚动条等宽)补齐,
           两侧视觉对称。卡片模式原先用 px-[11px],右侧在 gutter 之外又叠了 11px padding,
           导致右留白(~23px)明显宽于左(11px)——改为 pr-0 后两侧都≈12px 且更窄。 */}
-      {/* 段级收起走 SectionCollapse 高度动画(内容保持挂载)。 */}
+      {/* 段级收起走 SectionCollapse 高度动画,播完卸载子树。 */}
       <SectionCollapse collapsed={collapsed}>
         <div className={cn('flex flex-col gap-0.5', isCardLike ? 'pr-0 pl-3' : 'pt-1 pr-0 pl-3')}>
           {/* 三种显示模式:

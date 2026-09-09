@@ -6,6 +6,10 @@
  *   3. 只有提权 / 系统控制 / 凭证 / 系统级破坏 / 任意代码执行等极高风险边界才
  *      prompt-each-time；可证明受限于工作区子目录的清理进入灰区，避免 Auto 无意义打扰。
  */
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -30,6 +34,14 @@ describe('reviewAction — 非 shell 动作', () => {
     expect(reviewAction({ kind: 'other', description: 'unmapped', requireConsent: true }, roots))
       .toBe('prompt-each-time');
   });
+  it('动态 provider 目录范围收紧后，区外读取逐次确认', () => {
+    expect(reviewAction({
+      kind: 'read',
+      path: '/revoked/file.txt',
+      scope: 'file',
+      requireWorkspaceBoundary: true,
+    }, roots)).toBe('prompt-each-time');
+  });
 });
 
 describe('reviewAction — file-write 工作区边界', () => {
@@ -40,6 +52,104 @@ describe('reviewAction — file-write 工作区边界', () => {
   it('额外只读引用目录(非首 root)写 → prompt(additionalDirectories 可读不可写)', () => {
     // /extra 是只读引用目录,写入须升级,不能因它在 workspaceRoots 里就当可写(codex 报)。
     expect(reviewAction({ kind: 'file-write', path: '/extra/y.ts' }, roots)).toBe('prompt');
+  });
+  it('用户显式授权的附加可写根允许结构化写，但不放宽其它只读根', () => {
+    const allRoots = ['/repo', '/reference', '/shared-output'];
+    const opts = { writableRoots: ['/repo', '/shared-output'] };
+    expect(reviewAction({ kind: 'file-write', path: '/shared-output/result.txt' }, allRoots, opts))
+      .toBe('auto-approve');
+    expect(reviewAction({ kind: 'file-write', path: '/reference/spec.md' }, allRoots, opts))
+      .toBe('prompt');
+    expect(reviewAction({ kind: 'file-write', path: '/shared-output/../outside.txt' }, allRoots, opts))
+      .toBe('prompt');
+  });
+  it('对 harness 提供的真实写目标重新应用授权、系统与凭证边界', () => {
+    const allRoots = ['/repo', '/reference', '/shared-output'];
+    const opts = { writableRoots: ['/repo', '/shared-output'] };
+    expect(reviewAction({
+      kind: 'file-write',
+      path: '/shared-output/link/result.txt',
+      resolvedPath: '/shared-output/real/result.txt',
+    }, allRoots, opts)).toBe('auto-approve');
+    expect(reviewAction({
+      kind: 'file-write',
+      path: '/shared-output/link/result.txt',
+      resolvedPath: '/outside/result.txt',
+    }, allRoots, opts)).toBe('prompt-each-time');
+    expect(reviewAction({
+      kind: 'file-write',
+      path: '/shared-output/link/hosts',
+      resolvedPath: '/etc/hosts',
+    }, allRoots, opts)).toBe('prompt-each-time');
+    expect(reviewAction({
+      kind: 'file-write',
+      path: '/shared-output/link/key',
+      resolvedPath: '/Users/me/.ssh/id_rsa',
+    }, allRoots, opts)).toBe('prompt-each-time');
+    expect(reviewAction({
+      kind: 'file-write',
+      path: '/shared-output/unresolved/result.txt',
+      resolvedPath: null,
+    }, allRoots, opts)).toBe('prompt-each-time');
+    // 原始路径本就在授权外时保留既有灰区语义，不能被真实目标反向洗成绿灯。
+    expect(reviewAction({
+      kind: 'file-write',
+      path: '/outside/alias.txt',
+      resolvedPath: '/shared-output/result.txt',
+    }, allRoots, opts)).toBe('prompt');
+  });
+  it('用 canonical 可写根验证真实目标，同时保留词法授权边界', () => {
+    const allRoots = ['/repo-link', '/output-link'];
+    const opts = { writableRoots: ['/repo-link', '/output-link'] };
+    const resolvedWritableRoots = ['/repo-real', '/output-real'];
+    expect(reviewAction({
+      kind: 'file-write',
+      path: '/output-link/result.txt',
+      resolvedPath: '/output-real/result.txt',
+      resolvedWritableRoots,
+    }, allRoots, opts)).toBe('auto-approve');
+    expect(reviewAction({
+      kind: 'file-write',
+      path: '/output-link/nested/result.txt',
+      resolvedPath: '/outside/result.txt',
+      resolvedWritableRoots,
+    }, allRoots, opts)).toBe('prompt-each-time');
+    expect(reviewAction({
+      kind: 'file-write',
+      path: '/output-link/hosts',
+      resolvedPath: '/etc/hosts',
+      resolvedWritableRoots,
+    }, allRoots, opts)).toBe('prompt-each-time');
+    expect(reviewAction({
+      kind: 'file-write',
+      path: '/output-link/key',
+      resolvedPath: '/Users/me/.ssh/id_rsa',
+      resolvedWritableRoots,
+    }, allRoots, opts)).toBe('prompt-each-time');
+    expect(reviewAction({
+      kind: 'file-write',
+      path: '/outside/alias.txt',
+      resolvedPath: '/output-real/result.txt',
+      resolvedWritableRoots,
+    }, allRoots, opts)).toBe('prompt');
+    expect(reviewAction({
+      kind: 'file-write',
+      path: '/output-link/result.txt',
+      resolvedPath: '/output-real/result.txt',
+      resolvedWritableRoots: null,
+    }, allRoots, opts)).toBe('prompt-each-time');
+  });
+  it('恶意或失效的目录授权不能覆盖凭证与系统路径红线', () => {
+    expect(reviewAction(
+      { kind: 'file-write', path: '/etc/hosts' },
+      ['/repo', '/etc'],
+      { writableRoots: ['/repo', '/etc'] },
+    )).toBe('prompt-each-time');
+    expect(reviewAction(
+      { kind: 'file-write', path: '/shared-output/.aws/credentials' },
+      ['/repo', '/shared-output'],
+      { writableRoots: ['/repo', '/shared-output'] },
+    )).toBe('prompt-each-time');
   });
   it('区外(非系统)/ .. 逃逸 / 前缀不整段 → prompt(灰区,交 reviewer)', () => {
     expect(reviewAction({ kind: 'file-write', path: '/outside/x' }, roots)).toBe('prompt');
@@ -76,27 +186,148 @@ describe('reviewAction — exec 实际 cwd 边界', () => {
     expect(reviewAction({ kind: 'exec', command: 'pwd', cwd: '/Users/me' }, roots)).toBe('prompt');
     expect(reviewAction({ kind: 'exec', command: 'rm -rf build', cwd: '/Users/me' }, roots)).toBe('prompt-each-time');
   });
+  it('显式可写目录中的 cwd 保留命令分类，仍拒绝只读目录与整根破坏', () => {
+    const allRoots = ['/repo', '/reference', '/shared-output'];
+    const opts = { writableRoots: ['/repo', '/shared-output'] };
+    expect(reviewAction({ kind: 'exec', command: 'pwd', cwd: '/shared-output/sub' }, allRoots, opts))
+      .toBe('auto-approve');
+    expect(reviewAction({ kind: 'exec', command: 'pwd', cwd: '/reference' }, allRoots, opts))
+      .toBe('prompt');
+    expect(reviewAction({ kind: 'exec', command: 'rm -rf .', cwd: '/shared-output' }, allRoots, opts))
+      .toBe('prompt-each-time');
+    expect(reviewAction({ kind: 'exec', command: 'rm -rf build', cwd: '/shared-output' }, allRoots, opts))
+      .toBe('prompt');
+    expect(reviewAction({ kind: 'exec', command: 'mkdir generated', cwd: '/shared-output' }, allRoots, opts))
+      .toBe('prompt');
+  });
+  it('删除目标按真实路径复核：链接逃逸/凭证/无法解析必问，链接授权根内正常清理保留灰区', () => {
+    const fixture = mkdtempSync(join(tmpdir(), 'cindy-destructive-realpath-'));
+    const grant = join(fixture, 'grant');
+    const outside = join(fixture, 'outside');
+    const realGrant = join(fixture, 'real-grant');
+    const grantAlias = join(fixture, 'grant-alias');
+    const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+    mkdirSync(join(grant, 'build'), { recursive: true });
+    mkdirSync(join(outside, '.ssh'), { recursive: true });
+    mkdirSync(join(outside, 'subdir'), { recursive: true });
+    mkdirSync(join(realGrant, 'build'), { recursive: true });
+    symlinkSync(outside, join(grant, 'outside-link'), linkType);
+    symlinkSync(join(outside, '.ssh'), join(grant, 'credential-link'), linkType);
+    symlinkSync(realGrant, grantAlias, linkType);
+    const protectedRoot = process.platform === 'win32' ? process.env.SystemRoot : '/etc';
+    if (protectedRoot && existsSync(protectedRoot)) {
+      symlinkSync(protectedRoot, join(grant, 'system-link'), linkType);
+    }
+    const danglingTarget = join(fixture, 'missing-target');
+    symlinkSync(danglingTarget, join(grant, 'dangling-link'), linkType);
+
+    try {
+      const opts = { writableRoots: [grant] };
+      expect(reviewAction({
+        kind: 'exec',
+        command: `rm -rf ${join(grant, 'outside-link', 'subdir')}`,
+        cwd: grant,
+      }, [grant], opts)).toBe('prompt-each-time');
+      expect(reviewAction({
+        kind: 'exec',
+        command: `find ${join(grant, 'outside-link')} -delete`,
+        cwd: grant,
+      }, [grant], opts)).toBe('prompt-each-time');
+      for (const command of [
+        `echo owned > ${join(grant, 'outside-link', 'result.txt')}`,
+        `cp payload ${join(grant, 'outside-link', 'result.txt')}`,
+        `tee ${join(grant, 'outside-link', 'result.txt')}`,
+        `sed -i 's/a/b/' ${join(grant, 'outside-link', 'result.txt')}`,
+        `Set-Content -Path ${join(grant, 'outside-link', '*.txt')} -Value owned`,
+        `Get-ChildItem ${join(grant, 'outside-link', 'subdir')} | Remove-Item -Recurse`,
+      ]) {
+        expect(reviewAction({ kind: 'exec', command, cwd: grant }, [grant], opts), command)
+          .toBe('prompt-each-time');
+      }
+      expect(reviewAction({
+        kind: 'exec',
+        command: `rm -rf ${join(grant, 'credential-link', 'id_rsa')}`,
+        cwd: grant,
+      }, [grant], opts)).toBe('prompt-each-time');
+      if (protectedRoot && existsSync(protectedRoot)) {
+        expect(reviewAction({
+          kind: 'exec',
+          command: `rm -rf ${join(grant, 'system-link', 'hosts')}`,
+          cwd: grant,
+        }, [grant], opts)).toBe('prompt-each-time');
+      }
+      expect(reviewAction({
+        kind: 'exec',
+        command: `rm -rf ${join(grant, 'dangling-link', 'subdir')}`,
+        cwd: grant,
+      }, [grant], opts)).toBe('prompt-each-time');
+      expect(reviewAction({
+        kind: 'exec',
+        command: `echo owned > ${join(grant, 'dangling-link')}`,
+        cwd: grant,
+      }, [grant], opts)).toBe('prompt-each-time');
+      expect(reviewAction({
+        kind: 'exec',
+        command: `rm -rf ${join(grant, 'build')}`,
+        cwd: grant,
+      }, [grant], opts)).toBe('prompt');
+      expect(reviewAction({
+        kind: 'exec',
+        command: `cp payload ${join(grant, 'build', 'result.txt')}`,
+        cwd: grant,
+      }, [grant], opts)).toBe('prompt');
+      expect(reviewAction({
+        kind: 'exec',
+        command: `rm -rf ${join(grantAlias, 'build')}`,
+        cwd: grantAlias,
+      }, [grantAlias], { writableRoots: [grantAlias] })).toBe('prompt');
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+    }
+  });
+  it('远端执行端无法提供真实路径证据时，破坏性目标 fail closed', () => {
+    expect(reviewAction({
+      kind: 'exec',
+      command: 'rm -rf build',
+      cwd: '/remote/repo',
+      destructivePathResolution: 'unavailable',
+    }, ['/remote/repo'])).toBe('prompt-each-time');
+    expect(reviewAction({
+      kind: 'exec',
+      command: 'cp payload build/result.txt',
+      cwd: '/remote/repo',
+      destructivePathResolution: 'unavailable',
+    }, ['/remote/repo'])).toBe('prompt-each-time');
+  });
 });
 
 describe('classifyShellCommand — 只读放行', () => {
+  it('bounds direct parser inputs before scanning and preserves trailing-root semantics', () => {
+    expect(classifyShellCommand('echo ' + ' '.repeat(50_000) + '!', roots)).toBe('prompt');
+    for (const root of ['/repo', '/repo/', '/repo////']) {
+      expect(reviewAction({ kind: 'file-write', path: 'file.txt' }, [root])).toBe('auto-approve');
+      expect(classifyShellCommand('find . -name build -exec rm -rf {} +', [root]))
+        .toBe(classifyShellCommand('find . -name build -exec rm -rf {} +', ['/repo']));
+    }
+  });
   it('常见只读命令 / git 只读 / curl GET', () => {
-    for (const c of ['ls -la', 'cat f', 'grep -rn x .', 'rg TODO', 'git status', 'git log', 'curl -sS https://x.com', 'env FOO=1 ls', 'timeout 5 grep x f']) {
+    for (const c of ['ls -la', 'cat f', 'grep -rn x . --include="[b]ook.ts"', 'rg TODO', 'git status', 'git log', 'curl -sS https://x.com', 'env FOO=1 ls', 'timeout 5 grep x f']) {
       expect(classifyShellCommand(c, roots)).toBe('auto-approve');
     }
   });
   it('git 全局目录选项后仍识别工作区内的真实只读子命令', () => {
     for (const c of [
       'git -C /repo status',
-      'git -C /repo show HEAD',
+      'git -C /repo show HEAD:README.md',
       'git -C/repo log --oneline',
-      'git --namespace=review -C /repo diff HEAD',
+      'git --namespace=review -C /repo diff --stat',
     ]) {
       expect(classifyShellCommand(c, roots), c).toBe('auto-approve');
     }
   });
-  it('子命令自身的 -c 参数不被当作危险全局选项', () => {
-    for (const c of ['git diff -c', 'git show -c']) {
-      expect(classifyShellCommand(c, roots), c).toBe('auto-approve');
+  it('子命令自身的 -c 参数不被当作危险全局选项，内容输出仍进入凭证门', () => {
+    for (const c of ['git diff -c -- README.md', 'git show -c']) {
+      expect(classifyShellCommand(c, roots), c).toBe('prompt-each-time');
     }
   });
   it('git 仓库路径选项只放行工作区内的静态路径', () => {
@@ -526,10 +757,10 @@ describe('reviewAction / classifyShellCommand — agent OAuth 凭证文件', () 
 });
 
 describe('classifyShellCommand — git --output 写文件 / curl SSRF 改路由 / wget 一律升级', () => {
-  it('git diff --output 写文件(无 shell >)→ prompt;普通 git diff 仍放行', () => {
+  it('git diff --output 写文件(无 shell >)→ prompt;metadata-only diff 仍放行', () => {
     expect(classifyShellCommand('git diff --output ~/.bashrc HEAD^ HEAD', roots)).toBe('prompt');
     expect(classifyShellCommand('git diff --output=/tmp/x HEAD', roots)).toBe('prompt');
-    expect(classifyShellCommand('git diff HEAD', roots)).toBe('auto-approve');
+    expect(classifyShellCommand('git diff --stat -- README.md', roots)).toBe('auto-approve');
   });
   it('curl 改路由 flag(--resolve/--connect-to/--unix-socket/-x/--proxy)→ prompt(SSRF 绕过)', () => {
     for (const c of [
@@ -575,11 +806,11 @@ describe('classifyShellCommand — procfs / 短选项绕过 / 反斜杠 / git RC
   it('反斜杠转义拆分 flag(find -ex\\ec)去转义后命中', () => {
     expect(classifyShellCommand("find . -ex\\ec sh -c 'x' {} +", roots)).toBe('prompt');
   });
-  it('git --ext-diff / 内联 -c(core.pager/diff.external)→ prompt(RCE);普通 git diff 仍放行', () => {
+  it('git --ext-diff / 内联 -c(core.pager/diff.external)→ prompt(RCE);metadata-only diff 仍放行', () => {
     expect(classifyShellCommand('git diff --ext-diff', roots)).toBe('prompt');
     expect(classifyShellCommand('git -c core.pager=evil show HEAD', roots)).toBe('prompt');
     expect(classifyShellCommand('git -c diff.external=evil diff', roots)).toBe('prompt');
-    expect(classifyShellCommand('git diff HEAD', roots)).toBe('auto-approve');
+    expect(classifyShellCommand('git diff --stat -- README.md', roots)).toBe('auto-approve');
   });
 });
 
@@ -778,10 +1009,10 @@ describe('复审第三批:env 注入 / 显式路径 / file:// / 缩写 IP / git 
     // 反例:公网十进制不误伤(0251 之外的规范公网)。
     expect(classifyShellCommand('curl http://93.184.216.34/', roots)).toBe('auto-approve');
   });
-  it('git cat-file --filters/--textconv 跑 filter(RCE)→ prompt;cat-file -p 只读放行', () => {
+  it('git cat-file --filters/--textconv 跑 filter(RCE)→ prompt;显式普通对象路径仍放行', () => {
     expect(classifyShellCommand('git cat-file --filters HEAD:path', roots)).toBe('prompt');
     expect(classifyShellCommand('git cat-file --textconv HEAD:path', roots)).toBe('prompt');
-    expect(classifyShellCommand('git cat-file -p HEAD', roots)).toBe('auto-approve');
+    expect(classifyShellCommand('git cat-file -p HEAD:README.md', roots)).toBe('auto-approve');
   });
 });
 
@@ -860,8 +1091,8 @@ describe('classifyShellCommand — 第三轮 bot 审查回归护栏', () => {
     for (const c of ['git grep --open-files-in-pager=./payload pattern', 'git grep -O./payload pattern']) {
       expect(classifyShellCommand(c, roots)).toBe('prompt');
     }
-    // 反例:普通 git grep 仍放行。
-    expect(classifyShellCommand('git grep pattern', roots)).toBe('auto-approve');
+    // 反例:files-only git grep 仍放行。
+    expect(classifyShellCommand('git grep -l pattern', roots)).toBe('auto-approve');
   });
 
   it('git 子命令前内联 config 的等号形式(--config-env=…)升级 —— 防 core.pager RCE', () => {
@@ -1016,7 +1247,7 @@ describe('classifyShellCommand — 第三轮 bot 审查回归护栏', () => {
     expect(classifyShellCommand('{c..c}at notes.txt', roots)).toBe('prompt');
     // 反例:位置参数里的 brace 只影响文件名 → 不升级;find 占位符 {} 不算展开。
     expect(classifyShellCommand('ls dir/{a,b}', roots)).toBe('auto-approve');
-    expect(classifyShellCommand('grep -rn foo src/{a,b}', roots)).toBe('auto-approve');
+    expect(classifyShellCommand('grep -rn foo src/{a,b} --include="[b]ook.ts"', roots)).toBe('auto-approve');
     expect(classifyShellCommand('find . -maxdepth 0 -print', roots)).toBe('auto-approve'); // {} 占位符另测,这里确认普通 find 放行
   });
 
@@ -4124,7 +4355,7 @@ describe('伪设备白名单:静音重定向不得打断(实机语料探针发�
 
   it('日常命令语料整体不被硬拦(尽量不打扰的回归护栏)', () => {
     for (const c of [
-      'ls -la', 'git status', 'cat package.json', 'grep -rn TODO src',
+      'ls -la', 'git status', 'cat package.json', 'grep -rn TODO src --include="[b]ook.ts"',
       'pnpm install', 'npx tsc --noEmit', 'rm -rf node_modules', 'rm -rf build',
       'git add .', 'git commit -m "fix: x"', 'git push origin feature/x',
       'env NODE_ENV=test npx vitest run', 'timeout 60 pnpm test', 'nohup pnpm dev',

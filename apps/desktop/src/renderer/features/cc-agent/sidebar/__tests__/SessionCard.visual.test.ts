@@ -65,6 +65,7 @@ vi.mock('react-i18next', () => ({
 }));
 
 vi.mock('@/components/ui/tooltip', () => ({
+  Tip: ({ children }: { children: ReactNode }) => children,
   Tooltip: {
     Provider: ({ children }: { children: ReactNode }) => children,
     Root: ({ children }: { children: ReactNode }) => children,
@@ -95,6 +96,14 @@ vi.mock('@/components/sidebar/WorktreeBadge', () => ({
       ? createElement('span', { 'data-testid': 'worktree-badge' }, 'WT')
       : null,
 }));
+
+vi.mock('@/contexts/WorktreeContext', () => {
+  const reportLiveness = vi.fn();
+  return {
+    useWorktreeForSession: () => null,
+    useReportWorktreeLiveness: () => reportLiveness,
+  };
+});
 
 vi.mock('@/state/agentIslandActivity', () => ({
   useAgentIslandActivity: (sessionId: string) => {
@@ -149,6 +158,7 @@ vi.mock('@/features/scheduler/lib/scheduleSessionBinding', () => ({
 
 vi.mock('@/features/scheduler/lib/scheduleSidebarIndexRuns', () => ({
   loadScheduleSidebarIndexRuns: async () => [],
+  findLatestSidebarIndexRunForSession: () => undefined,
 }));
 
 function scheduleForCase(id: string, status: 'active' | 'paused') {
@@ -421,9 +431,7 @@ describe('SessionCard visual cases', () => {
 
   it('uses the unified Timer for automation cases without a bound schedule', () => {
     renderCase('automation-timer');
-    expect(screen.getByRole('button', { name: '查看自动化任务' }).getAttribute('title')).toBe(
-      '由自动化创建',
-    );
+    expect(screen.getByRole('button', { name: '查看自动化任务' }).getAttribute('title')).toBeNull();
     expect(
       screen.getByRole('button', { name: '查看自动化任务' }).querySelector('.lucide-timer'),
     ).not.toBeNull();

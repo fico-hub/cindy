@@ -16,6 +16,8 @@ vi.mock('electron', () => ({
   ipcMain: { handle: vi.fn(), removeHandler: vi.fn() },
   app: { getVersion: () => '1.0.0' },
 }));
+// This suite exercises dispatch authorization, not authenticated ICE HTTP setup.
+vi.mock('../remote-desktop/iceConfig', () => ({ loadDesktopIceServers: vi.fn(async () => []) }));
 // media:fetch 拦截走 mediaFetch.fetchLocalMediaToOss;mock 掉避免拉起 OSS/cache-store 真实依赖。
 const fetchLocalMediaToOssMock = vi.hoisted(() => vi.fn());
 vi.mock('../device-link/mediaFetch', () => ({ fetchLocalMediaToOss: fetchLocalMediaToOssMock }));
@@ -43,6 +45,7 @@ import {
   isDeviceLinkInvoke,
 } from '../device-link/invoke-context';
 import * as subscriptions from '../device-link/subscriptions';
+import { createDesktopOnlyConfirmationRequestId } from '../cindy-brain/desktopOnlyConfirmationProjection';
 
 beforeEach(() => {
   remoteControlEnabled = true;
@@ -2448,7 +2451,7 @@ describe('被控端订阅 registry + topic 转发', () => {
     'issue_confirm',
     'rename_sessions_confirm',
     'ghost_grant_confirm',
-  ])('device-link does not forward Desktop-only %s live pushes', (kind) => {
+  ])('device-link forwards a redacted Desktop-only %s live status', (kind) => {
     remoteControlEnabled = true;
     const { client, calls, feed } = makeFakeClient();
     wireInboundDispatch(client);
@@ -2464,7 +2467,46 @@ describe('被控端订阅 registry + topic 转发', () => {
       },
     });
 
-    expect(calls.push).toEqual([]);
+    expect(calls.push).toHaveLength(1);
+    expect(calls.push[0]).toMatchObject({
+      dst: 'ctrl-a',
+      channel: MAKER_PUSH.INTERACTION_REQUEST,
+      payload: {
+        sessionId: 's1',
+        request: { kind, requestId: expect.stringMatching(/^desktop-confirm-/) },
+      },
+    });
+    expect(JSON.stringify(calls.push[0].payload)).not.toContain('private');
+    expect(JSON.stringify(calls.push[0].payload)).not.toContain(`${kind}-1`);
+  });
+
+  it('device-link dismisses a Desktop-only status with its opaque request id', () => {
+    remoteControlEnabled = true;
+    const { client, calls, feed } = makeFakeClient();
+    wireInboundDispatch(client);
+    feed(subFrame('ctrl-a', SUB, ['session:s1']));
+
+    const sourceRequestId = createDesktopOnlyConfirmationRequestId();
+    tapWindowBroadcast(MAKER_PUSH.INTERACTION_REQUEST, {
+      sessionId: 's1',
+      request: { kind: 'issue_confirm', requestId: sourceRequestId, draft: { title: 'private' } },
+    });
+    const remoteRequestId = (calls.push[0].payload as {
+      request: { requestId: string };
+    }).request.requestId;
+
+    tapWindowBroadcast(MAKER_PUSH.INTERACTION_DISMISSED, {
+      sessionId: 's1',
+      requestId: sourceRequestId,
+      reason: 'resolved',
+    });
+
+    expect(calls.push[1]).toMatchObject({
+      dst: 'ctrl-a',
+      channel: MAKER_PUSH.INTERACTION_DISMISSED,
+      payload: { sessionId: 's1', requestId: remoteRequestId, reason: 'resolved' },
+    });
+    expect(JSON.stringify(calls.push[1].payload)).not.toContain(sourceRequestId);
   });
 
   it('explicit unsubscribe removes the final remembered topic and stops the tap', () => {
@@ -2546,6 +2588,43 @@ describe('远程 set-* 持久化回流', () => {
     expect(persist).toHaveBeenCalledWith('sess-1', { model: 'claude-x' });
   });
 
+  it('set-model 最终窗口待确认时不提前持久化 model/provider', async () => {
+    const persist = vi.fn();
+    setRemoteSettingsPersist(persist);
+    const confirmation = {
+      deferred: false,
+      superseded: false,
+      contextWindowConfirmationRequired: 272_000,
+      contextTokensForConfirmation: 244_800,
+    };
+    registry.register('maker:set-model', () => confirmation);
+
+    const r = await runInvoke('ctrl-a', {
+      channel: 'maker:set-model',
+      args: ['sess-1', 'small-pi-model', 'pi-provider'],
+    });
+
+    expect(r).toEqual({ ok: true, result: confirmation });
+    expect(persist).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{ contextTokensForConfirmation: 244_800 }],
+    [{ contextWindowConfirmationRequired: '272000' }],
+  ])('set-model 最终窗口确认字段不完整时也不得提前持久化 %#', async (confirmation) => {
+    const persist = vi.fn();
+    setRemoteSettingsPersist(persist);
+    registry.register('maker:set-model', () => confirmation);
+
+    const r = await runInvoke('ctrl-a', {
+      channel: 'maker:set-model',
+      args: ['sess-1', 'small-pi-model', 'pi-provider'],
+    });
+
+    expect(r).toEqual({ ok: true, result: confirmation });
+    expect(persist).not.toHaveBeenCalled();
+  });
+
   it('set-model 持久化 trim 后的 providerId', async () => {
     const persist = vi.fn();
     setRemoteSettingsPersist(persist);
@@ -2580,8 +2659,12 @@ describe('远程 set-* 持久化回流', () => {
   it('set-model handler 已在 session 锁内持久化时 dispatch 不重复回流', async () => {
     const persist = vi.fn();
     setRemoteSettingsPersist(persist);
-    const handlerResult = { deferred: false, superseded: false };
-    markRemoteSettingPersistedInsideHandler(handlerResult);
+    const response = { deferred: false, superseded: false };
+    markRemoteSettingPersistedInsideHandler(response);
+    const handlerResult = Object.assign(response, {
+      generation: 2,
+      effectiveProviderId: 'anthropic',
+    });
     registry.register('maker:set-model', () => handlerResult);
 
     const r = await runInvoke('ctrl-a', {

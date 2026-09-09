@@ -147,6 +147,9 @@ function validateModel(
 ): void {
   assert(typeof m.id === 'string' && m.id.length > 0, `model.id missing in provider '${providerId}'`);
   assert(typeof m.name === 'string' && m.name.length > 0, `model.name missing for '${m.id}'`);
+  if (m.nativeApi !== undefined && m.nativeApi !== null) {
+    assert(isPiModelApi(m.nativeApi), `model.nativeApi invalid for '${m.id}'`);
+  }
   if (m.piApi !== undefined) {
     assert(isPiModelApi(m.piApi), `model.piApi invalid for '${m.id}'`);
   }
@@ -338,6 +341,12 @@ function validateProvider(p: Provider): void {
         `provider '${p.id}' routing[${agent}].requestPath invalid`,
       );
     }
+    if (routing.supportsResponsesCustomTools !== undefined) {
+      assert(
+        typeof routing.supportsResponsesCustomTools === 'boolean',
+        `provider '${p.id}' routing[${agent}].supportsResponsesCustomTools must be boolean`,
+      );
+    }
     // modelPrefixes（路由服务范围）提供了就必须是命名空间前缀形态（`xai/` 这类,以 `/` 结尾）——
     // 结构上保证 claude-* 等裸 wire model 永远不会命中,防止把 scope 声明成误伤辅助请求的形状。
     if (routing.modelPrefixes !== undefined) {
@@ -358,11 +367,13 @@ function validateProvider(p: Provider): void {
   }
   // 约束：若声明了 titleModel（标题 oneShot 用的最经济模型），它必须存在于本供应商任一
   // agent 的模型清单里 —— 防把不存在 / 拼错的 id 配进去导致运行时静默起不出标题。
-  // 豁免:动态清单供应商(全部 models 数组为空,清单运行时注入——2026-07-19 统一重构后
-  // 的 anthropic/openai/xd)无静态清单可校验,titleModel 指向的是运行时会出现的 id。
+  // 豁免:Claude/Codex 动态清单供应商在这两个 harness 下都为空时无静态清单可校验；
+  // 独立的 Pi 原生名单不应把它误判为静态 root，也不要求沿用同一 model id 命名空间。
   if (p.titleModel !== undefined) {
     assert(typeof p.titleModel === 'string' && p.titleModel.length > 0, `provider '${p.id}' titleModel must be a non-empty string`);
-    const hasStaticModels = p.agents.some((agent) => (p.models[agent] ?? []).length > 0);
+    const hasStaticModels = p.agents.some(
+      (agent) => agent !== 'pi' && (p.models[agent] ?? []).length > 0,
+    );
     if (hasStaticModels) {
       const known = p.agents.some((agent) => (p.models[agent] ?? []).some((m) => m.id === p.titleModel));
       assert(known, `provider '${p.id}' titleModel '${p.titleModel}' not found in any agent's models`);
@@ -392,7 +403,12 @@ function validateProvider(p: Provider): void {
 function validateMediaModels(
   providerId: string,
   modelsField: string,
-  models: { id: string; name: string }[] | undefined,
+  models: Array<{
+    id: string;
+    name: string;
+    modalities?: { input: string[]; output: string[] };
+    officialDocs?: string;
+  }> | undefined,
   defaultsField: string,
   defaults: { standard: string; draft?: string; best?: string } | undefined,
 ): void {
@@ -405,6 +421,44 @@ function validateMediaModels(
       assert(typeof m.name === 'string' && m.name.length > 0, `provider '${providerId}' ${modelsField} '${m.id}' missing name`);
       assert(!seen.has(m.id), `provider '${providerId}' ${modelsField} has duplicate id '${m.id}'`);
       seen.add(m.id);
+      if (m.modalities !== undefined) {
+        assert(
+          m.modalities && typeof m.modalities === 'object' && !Array.isArray(m.modalities),
+          `provider '${providerId}' ${modelsField} '${m.id}' modalities must be an object`,
+        );
+        for (const key of ['input', 'output'] as const) {
+          const values = m.modalities[key];
+          assert(
+            Array.isArray(values) && values.length > 0 && values.length <= 16,
+            `provider '${providerId}' ${modelsField} '${m.id}' modalities.${key} must be a non-empty bounded array`,
+          );
+          assert(
+            values.every(
+              (value) =>
+                typeof value === 'string' &&
+                value.length > 0 &&
+                value.length <= 64 &&
+                value.trim() === value,
+            ) && new Set(values).size === values.length,
+            `provider '${providerId}' ${modelsField} '${m.id}' modalities.${key} contains invalid values`,
+          );
+        }
+      }
+      if (m.officialDocs !== undefined) {
+        let valid = false;
+        if (typeof m.officialDocs === 'string' && m.officialDocs.length <= 2_048) {
+          try {
+            const url = new URL(m.officialDocs);
+            valid = url.protocol === 'https:' && !url.username && !url.password;
+          } catch {
+            valid = false;
+          }
+        }
+        assert(
+          valid,
+          `provider '${providerId}' ${modelsField} '${m.id}' officialDocs must be https`,
+        );
+      }
     }
   }
   if (defaults !== undefined) {
@@ -496,6 +550,24 @@ function isValidPreset(v: unknown): v is ProviderPreset {
     }
     if (r.wireProtocol !== undefined && !isWireProtocol(r.wireProtocol)) return false;
     if (agent === 'claude-code' && r.wireProtocol === 'openai-chat') return false;
+    if (
+      r.supportsImageGeneration !== undefined &&
+      typeof r.supportsImageGeneration !== 'boolean'
+    ) {
+      return false;
+    }
+    if (r.supportsImageGeneration === true && agent !== 'codex') return false;
+    const defaultWireProtocol = r.wireProtocol ?? (agent === 'codex' ? 'openai-responses' : undefined);
+    const hasResponsesRoute =
+      defaultWireProtocol === 'openai-responses' ||
+      r.models.some((model) => {
+        if (!model || typeof model !== 'object') return false;
+        const route = (model as Record<string, unknown>).route;
+        return route && typeof route === 'object' && !Array.isArray(route)
+          ? (route as Record<string, unknown>).wireProtocol === 'openai-responses'
+          : false;
+      });
+    if (r.supportsImageGeneration === true && !hasResponsesRoute) return false;
     if (r.headers !== undefined) {
       if (!r.headers || typeof r.headers !== 'object' || Array.isArray(r.headers)) return false;
       if (Object.values(r.headers as Record<string, unknown>).some((x) => typeof x !== 'string')) return false;
@@ -510,12 +582,12 @@ function isValidPreset(v: unknown): v is ProviderPreset {
   return true;
 }
 
-/** 是否合法 http(s) URL（modelsUrl 归一化用）。 */
+/** 是否为不含内嵌凭据的 http(s) URL（模型发现地址归一化用）。 */
 function isHttpUrl(v: unknown): boolean {
   if (typeof v !== 'string' || v.length === 0) return false;
   try {
     const u = new URL(v);
-    return u.protocol === 'https:' || u.protocol === 'http:';
+    return (u.protocol === 'https:' || u.protocol === 'http:') && !u.username && !u.password;
   } catch {
     return false;
   }
@@ -526,8 +598,37 @@ function httpUrl(v: unknown): URL | null {
   return new URL(v as string);
 }
 
+function normalizedEndpointUrl(value: unknown): string | null {
+  const url = httpUrl(value);
+  if (!url) return null;
+  url.hash = '';
+  url.pathname = url.pathname.replace(/\/+$/, '') || '/';
+  return url.toString();
+}
+
 /**
- * runtime.modelsUrl 非法（非 http(s) URL）时剥掉该字段、保留预设本体——OSS 推错一个
+ * Compatibility for catalog data generated before explicit Pi wireProtocol was shipped.
+ * Those entries copied the exact Claude/Anthropic endpoint into runtimes.pi. Equality with the
+ * Claude runtime is the authority here; a different Pi URL remains unconfigured and fail-closed.
+ */
+function isLegacyAnthropicPiRuntime(
+  preset: ProviderPreset,
+  agent: AgentKind,
+  runtime: NonNullable<ProviderPreset['runtimes'][AgentKind]>,
+): boolean {
+  if (agent !== 'pi' || runtime.wireProtocol !== undefined) return false;
+  const claudeRuntime = preset.runtimes['claude-code'];
+  if (
+    !claudeRuntime ||
+    (claudeRuntime.wireProtocol !== undefined &&
+      claudeRuntime.wireProtocol !== 'anthropic-messages')
+  ) return false;
+  const piEndpoint = normalizedEndpointUrl(runtime.baseUrl);
+  return piEndpoint !== null && piEndpoint === normalizedEndpointUrl(claudeRuntime.baseUrl);
+}
+
+/**
+ * runtime.modelsUrl 非法（非 http(s) URL 或含内嵌凭据）时剥掉该字段、保留预设本体——OSS 推错一个
  * 不可见字段不该让整条预设消失，更不该让用户保存时撞 main 侧 URL 校验无法自助修复。
  */
 function normalizePresetRuntimeOptions(p: ProviderPreset): ProviderPreset {
@@ -535,6 +636,10 @@ function normalizePresetRuntimeOptions(p: ProviderPreset): ProviderPreset {
   const runtimes: ProviderPreset['runtimes'] = {};
   for (const [agent, rt] of Object.entries(p.runtimes) as [AgentKind, ProviderPreset['runtimes'][AgentKind] & object][]) {
     let next = rt;
+    if (isLegacyAnthropicPiRuntime(p, agent, next)) {
+      next = { ...next, wireProtocol: 'anthropic-messages' };
+      changed = true;
+    }
     const models = next.models.map((model) => {
       if (model.route === undefined || isValidModelRoute(agent, next.baseUrl, model.route)) {
         return model;

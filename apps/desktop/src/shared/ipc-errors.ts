@@ -1,3 +1,5 @@
+import type { BrowserOpenForLoginErrorCode } from './browserBackend';
+
 /** main / preload / renderer 共用的 IPC 错误类型。 */
 
 export type IpcErrorCode =
@@ -7,6 +9,16 @@ export type IpcErrorCode =
   | 'INTERNAL'
   | 'ALREADY_EXISTS'
   | 'PRECONDITION_FAILED'
+  // 本地模型切换窗口保护的可行动失败原因。device-link 继续降级为
+  // PRECONDITION_FAILED，避免把新增 Electron IPC code 变成跨版本 wire 契约。
+  | 'MODEL_CONTEXT_USAGE_UNKNOWN'
+  | 'MODEL_VISIBILITY_NOT_READY'
+  | 'MODEL_WINDOW_CURRENT_CONTEXT_UNKNOWN'
+  | 'MODEL_WINDOW_TARGET_CONTEXT_UNKNOWN'
+  | 'MODEL_WINDOW_REMOTE_REBUILD_UNSUPPORTED'
+  | 'MODEL_WINDOW_PROTECTION_UNAVAILABLE'
+  | 'MODEL_SWITCH_TASK_RUNNING'
+  | 'MODEL_WINDOW_PREPARATION_IN_PROGRESS'
   | 'MAKER_MEMORY_NOT_READY'
   | 'SCHEDULER_NOT_READY'
   | 'PERMISSION_DENIED'
@@ -18,6 +30,8 @@ export type IpcErrorCode =
   // 分开:后者是"本会话在跑"的短时状态;混用会让「新建会话/切模型」场景弹出误导性的
   // "会话运行中"文案(实际是别的会话挡住了凭证切换)。
   | 'CREDENTIAL_SWITCH_BUSY'
+  // Pi 热切 SuperGrok 时 switch_session 未确认，任务已终止。
+  | 'PI_CATALOG_RELOAD_UNCONFIRMED'
   // 远端 Claude 路由 materialization 失败(remote-claude-route.ts):
   // 供应商凭证 mutation 窗口(稍后重试)/ 远端不可表达(换来源)/ 订阅未连接(连接 Claude.ai)。
   | 'REMOTE_PROVIDER_UPDATING'
@@ -29,9 +43,20 @@ export type IpcErrorCode =
   // 远端 Pi 会话选了 baseUrl 指向本机 loopback 的 BYOM provider(Ollama 等):
   // 远端进程连不到本机服务, 创建时拒绝并引导换网关/远端可达 BYOM。
   | 'REMOTE_LOCAL_ONLY_PROVIDER'
+  // 本机托管 Ollama sidecar 尚未就绪:引导去设置 → 模型供应商 → Ollama。
+  | 'LOCAL_OLLAMA_NOT_READY'
   // 远端切模/切来源需要不同路由(claude-code setModel 守卫):提示重建会话。
   | 'REMOTE_MODEL_SWITCH_ROUTE_CHANGE'
   | 'NO_LIVE_QUERY'
+  // 已保存账号切换 / 同步 / 新增账号。保留 auth 业务码跨 Electron IPC，
+  // renderer 才能区分重新登录、区域不匹配与本地凭证库故障。
+  | 'INVALID_AUTH_ACTION'
+  | 'PASSIVE_AUTH_MUTATION_BLOCKED'
+  | 'ACCOUNT_NOT_FOUND'
+  | 'ACCOUNT_REAUTH_REQUIRED'
+  | 'REGION_MISMATCH'
+  | 'CREDENTIAL_STORE_UNAVAILABLE'
+  | 'AUTH_FLOW_SUPERSEDED'
   // 智能通讯录: (platform, value) 身份已属于另一个联系人 — message 里带占用者 id
   | 'IDENTITY_CONFLICT'
   // domain-specific
@@ -71,6 +96,12 @@ export type IpcErrorCode =
   | 'SSH_CONNECT_FAILED'
   | 'SSH_AUTH_FAILED'
   | 'SSH_CONFIG_IO_FAILED'
+  | 'SSH_CONFIG_CONCURRENT_MODIFICATION'
+  | 'SSH_CONFIG_OWNERSHIP_REQUIRED'
+  | 'SSH_CONFIG_RELOAD_REQUIRED'
+  | 'SSH_CONFIG_AUTH_UNSUPPORTED'
+  | 'SSH_AGENT_UNAVAILABLE'
+  | 'SSH_HOST_PREFS_WRITE_FAILED'
   | 'SSH_HOST_NOT_FOUND'
   // remote-ssh：配置的私钥文件在磁盘上不存在/不可读。与 SSH_CONNECT_FAILED 分开——
   // 这是本机路径问题（缺失 / ~ 未展开 / 路径被改写），不是网络或服务器错误，renderer
@@ -121,6 +152,10 @@ export type IpcErrorCode =
   | 'RIGHT_SIDEBAR_STATE_TOO_LARGE' // 单 tab state JSON 序列化 > 16KB
   // iOS Simulator Host。code 是可跨 IPC 暴露的稳定业务分类；底层命令、路径和
   // subprocess message 必须只留在 Main 日志，不能作为 IpcError.message 返回。
+  | 'IOS_SIMULATOR_PLUGIN_REQUIRED'
+  | 'IOS_SIMULATOR_PLUGIN_DISABLED'
+  | 'IOS_SIMULATOR_DISABLED'
+  | 'IOS_SIMULATOR_PLUGIN_SESSION_UNAVAILABLE'
   | 'INVALID_ARGUMENT'
   | 'INSTANCE_NOT_FOUND'
   | 'INSTANCE_NOT_OWNED'
@@ -130,6 +165,8 @@ export type IpcErrorCode =
   | 'DEVICE_BUSY'
   | 'AGENT_MUTATION_PAUSED'
   | 'MUTATION_CANCELLED'
+  | 'PI_PACKAGE_LIST_FAILED'
+  | 'PI_PACKAGE_MUTATION_FAILED'
   | 'LEASE_EXPIRED'
   | 'STALE_GENERATION'
   | 'STALE_UI_SNAPSHOT'
@@ -148,6 +185,7 @@ export type IpcErrorCode =
   | 'AMBIGUOUS_XCODE_PROJECT'
   | 'APP_BUILD_FAILED'
   | 'APP_ARTIFACT_INVALID'
+  | 'APP_ARCH_MISMATCH'
   | 'APP_INSTALL_FAILED'
   | 'APP_LAUNCH_FAILED'
   | 'METRO_NOT_READY'
@@ -166,9 +204,11 @@ export type IpcErrorCode =
   | 'TERMINAL_ALREADY_DISPOSED' // 在已 dispose 的 session 上调 restart 等操作
   // 意识(.cindy 装入)
   | 'GHOST_FILE_INVALID' // 不是合法 zip / 缺 ghost.json / 清单不合格 / 超限
-  | 'GHOST_HOST_UNSUPPORTED' // 插件包合法，但当前 Cindy 不认识其 schema / capability slot
+  | 'GHOST_HOST_UNSUPPORTED' // 插件包使用了当前 Cindy 不认识的未来 schema
   | 'GHOST_COMMAND_CONFLICT' // 显式指令与已装意识撞名(装入拒绝)
-  | 'GHOST_ID_RESERVED' // id 属官方保留前缀(cindy-),用户通道拒装(防抢注蹭凭证别名)
+  | 'GHOST_ID_RESERVED' // id 属 shared/ghost.ts 登记的官方保留前缀,用户通道拒装(防抢注蹭凭证别名)
+  | 'GHOST_BROKER_MANUAL_INSTALL_NOT_AUTHORIZED' // 本地 .cindy 来源无权使用授权 broker
+  | 'GHOST_BROKER_REDIRECT_PORT_REQUIRED' // 新包声明授权 broker 时缺少本机回跳端口
   // 自定义插件市场源(Git / 本地文件夹)
   | 'MARKET_SOURCE_INVALID' // 来源格式非法 / 本地路径不是目录 / 参数组合不允许
   | 'MARKET_GIT_UNAVAILABLE' // 未安装 Git 或版本 < 2.25(稀疏检出下限)
@@ -190,6 +230,8 @@ export type IpcErrorCode =
   // 个人资料自助修改(settings → 用户卡片;服务端直写)
   | 'PROFILE_AVATAR_UPLOAD_FAILED' // 头像经 oss-server 预签名直传失败(presign 或 PUT 阶段)
   | 'PROFILE_UPDATE_FAILED' // PATCH /api/me/profile 失败(网络 / 服务端拒绝)
+  // 打开 Agent 专用浏览器：只跨 IPC 暴露受控原因，不暴露路径或底层异常。
+  | BrowserOpenForLoginErrorCode
   // 本机 HTML 页面打开到系统浏览器
   | 'BROWSER_FILE_INVALID_TARGET'
   | 'BROWSER_FILE_PATH_NOT_ALLOWED'
@@ -234,6 +276,14 @@ const IPC_ERROR_CODES: ReadonlySet<IpcErrorCode> = new Set<IpcErrorCode>([
   'ALREADY_EXISTS',
   'IDENTITY_CONFLICT',
   'PRECONDITION_FAILED',
+  'MODEL_CONTEXT_USAGE_UNKNOWN',
+  'MODEL_VISIBILITY_NOT_READY',
+  'MODEL_WINDOW_CURRENT_CONTEXT_UNKNOWN',
+  'MODEL_WINDOW_TARGET_CONTEXT_UNKNOWN',
+  'MODEL_WINDOW_REMOTE_REBUILD_UNSUPPORTED',
+  'MODEL_WINDOW_PROTECTION_UNAVAILABLE',
+  'MODEL_SWITCH_TASK_RUNNING',
+  'MODEL_WINDOW_PREPARATION_IN_PROGRESS',
   'MAKER_MEMORY_NOT_READY',
   'SCHEDULER_NOT_READY',
   'PERMISSION_DENIED',
@@ -241,13 +291,23 @@ const IPC_ERROR_CODES: ReadonlySet<IpcErrorCode> = new Set<IpcErrorCode>([
   'APP_SHORTCUTS_WRITE_FAILED',
   'NO_ACTIVE_TURN',
   'SESSION_RUNNING',
+  'CREDENTIAL_SWITCH_BUSY',
+  'PI_CATALOG_RELOAD_UNCONFIRMED',
   'REMOTE_PROVIDER_UPDATING',
   'REMOTE_PROVIDER_UNSUPPORTED',
   'REMOTE_NATIVE_OAUTH_UNAVAILABLE',
   'REMOTE_GATEWAY_ENDPOINT_UNAVAILABLE',
   'REMOTE_LOCAL_ONLY_PROVIDER',
+  'LOCAL_OLLAMA_NOT_READY',
   'REMOTE_MODEL_SWITCH_ROUTE_CHANGE',
   'NO_LIVE_QUERY',
+  'INVALID_AUTH_ACTION',
+  'PASSIVE_AUTH_MUTATION_BLOCKED',
+  'ACCOUNT_NOT_FOUND',
+  'ACCOUNT_REAUTH_REQUIRED',
+  'REGION_MISMATCH',
+  'CREDENTIAL_STORE_UNAVAILABLE',
+  'AUTH_FLOW_SUPERSEDED',
   'STALE_DIFF',
   'PUSH_LEASE_EXPIRED',
   'PUSH_NO_REMOTE',
@@ -279,6 +339,12 @@ const IPC_ERROR_CODES: ReadonlySet<IpcErrorCode> = new Set<IpcErrorCode>([
   'SSH_CONNECT_FAILED',
   'SSH_AUTH_FAILED',
   'SSH_CONFIG_IO_FAILED',
+  'SSH_CONFIG_CONCURRENT_MODIFICATION',
+  'SSH_CONFIG_OWNERSHIP_REQUIRED',
+  'SSH_CONFIG_RELOAD_REQUIRED',
+  'SSH_CONFIG_AUTH_UNSUPPORTED',
+  'SSH_AGENT_UNAVAILABLE',
+  'SSH_HOST_PREFS_WRITE_FAILED',
   'SSH_HOST_NOT_FOUND',
   'SSH_KEY_FILE_NOT_FOUND',
   'SSH_NOT_CONNECTED',
@@ -312,6 +378,10 @@ const IPC_ERROR_CODES: ReadonlySet<IpcErrorCode> = new Set<IpcErrorCode>([
   'RIGHT_SIDEBAR_TOO_MANY_TABS',
   'RIGHT_SIDEBAR_UNKNOWN_KIND',
   'RIGHT_SIDEBAR_STATE_TOO_LARGE',
+  'IOS_SIMULATOR_PLUGIN_REQUIRED',
+  'IOS_SIMULATOR_PLUGIN_DISABLED',
+  'IOS_SIMULATOR_DISABLED',
+  'IOS_SIMULATOR_PLUGIN_SESSION_UNAVAILABLE',
   'INVALID_ARGUMENT',
   'INSTANCE_NOT_FOUND',
   'INSTANCE_NOT_OWNED',
@@ -321,6 +391,8 @@ const IPC_ERROR_CODES: ReadonlySet<IpcErrorCode> = new Set<IpcErrorCode>([
   'DEVICE_BUSY',
   'AGENT_MUTATION_PAUSED',
   'MUTATION_CANCELLED',
+  'PI_PACKAGE_LIST_FAILED',
+  'PI_PACKAGE_MUTATION_FAILED',
   'LEASE_EXPIRED',
   'STALE_GENERATION',
   'STALE_UI_SNAPSHOT',
@@ -339,6 +411,7 @@ const IPC_ERROR_CODES: ReadonlySet<IpcErrorCode> = new Set<IpcErrorCode>([
   'AMBIGUOUS_XCODE_PROJECT',
   'APP_BUILD_FAILED',
   'APP_ARTIFACT_INVALID',
+  'APP_ARCH_MISMATCH',
   'APP_INSTALL_FAILED',
   'APP_LAUNCH_FAILED',
   'METRO_NOT_READY',
@@ -358,6 +431,8 @@ const IPC_ERROR_CODES: ReadonlySet<IpcErrorCode> = new Set<IpcErrorCode>([
   'GHOST_HOST_UNSUPPORTED',
   'GHOST_COMMAND_CONFLICT',
   'GHOST_ID_RESERVED',
+  'GHOST_BROKER_MANUAL_INSTALL_NOT_AUTHORIZED',
+  'GHOST_BROKER_REDIRECT_PORT_REQUIRED',
   'MARKET_SOURCE_INVALID',
   'MARKET_GIT_UNAVAILABLE',
   'MARKET_CLONE_AUTH_FAILED',
@@ -375,6 +450,15 @@ const IPC_ERROR_CODES: ReadonlySet<IpcErrorCode> = new Set<IpcErrorCode>([
   'DINGTALK_STREAM_CONNECTION_FAILED',
   'PROFILE_AVATAR_UPLOAD_FAILED',
   'PROFILE_UPDATE_FAILED',
+  'PROFILE_LOCKED',
+  'REAL_PROFILE_READ_DENIED',
+  'NO_CHROMIUM',
+  'NO_AUTH_DB',
+  'COPY_FAILED',
+  'HEADLESS_FORBIDDEN',
+  'STOP_FAILED',
+  'FOREIGN_AGENT_BROWSER',
+  'APP_BOUND_ENCRYPTION_UNSUPPORTED',
   'BROWSER_FILE_INVALID_TARGET',
   'BROWSER_FILE_PATH_NOT_ALLOWED',
   'BROWSER_FILE_UNSUPPORTED_TYPE',

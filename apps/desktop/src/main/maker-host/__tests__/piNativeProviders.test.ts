@@ -2,14 +2,12 @@
  * BYOM host 解析 —— 自定义 provider(pi runtime)→ pi 原生 provider spec + env。
  * 覆盖:wire protocol → pi api 映射、apiKey/none/oauth 三态、缺 key 跳过、env key 名。
  */
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { existsSync } from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 
 import { BUNDLED_CATALOG, type Catalog } from '@cindy/model-providers';
-
-import { derivePiRuntimeFromClaudeRuntime } from '../../../shared/piRuntimeInitialization.js';
 
 vi.mock('../grok-oauth-login.js', () => ({
   hasGrokOAuthLogin: () => true,
@@ -39,13 +37,29 @@ import {
   readPiBundledModels,
   resolvePiBundledApiByModelId,
   resolvePiBundledModelById,
+  resolvePiCindyGatewayModelApi,
+  resolvePiCindyGatewayModelSpec,
   type PiBundledModelInfo,
 } from '../pi-host.js';
+import { getActiveCatalog, setActiveCatalog, setDiscoveredCodexModels, setXdGatewayModels } from '../active-catalog.js';
+import { deriveAvailableModels } from '../catalog-to-descriptors.js';
 
 type Cfg = Parameters<typeof buildPiNativeProvidersFromConfigs>[0][number];
 
+it.each(['google/gemini-3.8-flash', 'google/gemini-99-pro-preview'])(
+  'does not pass a misleading Gateway Responses hint to Pi for %s',
+  (id) => {
+    setActiveCatalog(BUNDLED_CATALOG);
+    setXdGatewayModels([{ id, agents: ['pi'], perAgent: { pi: { wireProtocol: 'openai-responses' } } }]);
+    expect(resolvePiCindyGatewayModelApi('xd', id)).toBe('google-generative-ai');
+    expect(resolvePiCindyGatewayModelSpec('xd', id)).toMatchObject({ api: 'google-generative-ai' });
+    expect(resolvePiCindyGatewayModelSpec('xd', id, { remote: true })).toMatchObject({ api: 'google-generative-ai' });
+  },
+);
+
 const piRuntime = (over: Partial<NonNullable<Cfg['runtimes']['pi']>> = {}) => ({
   baseUrl: 'http://127.0.0.1:11434/v1',
+  wireProtocol: 'openai-chat' as const,
   models: [{ id: 'qwen3:8b', name: 'Qwen3 8B' }],
   ...over,
 });
@@ -65,7 +79,238 @@ const piBundledModel = (
   ...over,
 });
 
+afterEach(() => {
+  setActiveCatalog(BUNDLED_CATALOG);
+  setDiscoveredCodexModels([]);
+  setXdGatewayModels([]);
+});
+
+describe('ChatGPT image capability authority (#2674)', () => {
+  it.each(['gpt-5.6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra'])(
+    'keeps %s visual through the independent Pi catalog despite text-only Codex discovery',
+    (id) => {
+      setActiveCatalog(BUNDLED_CATALOG);
+      setDiscoveredCodexModels([{
+        id, name: id, contextWindow: 272_000, efforts: [], defaultEffort: null,
+        supportsImageInput: false,
+      }]);
+      const catalog = getActiveCatalog();
+      expect(deriveAvailableModels(catalog, 'pi').find((model) => model.id === `chatgpt/${id}`))
+        .toMatchObject({ supportsImageInput: true });
+      const native = piBundledModel(id, 'openai-codex-responses', { input: ['text', 'image'] });
+      for (const probe of [undefined, new Map([['openai-codex', new Map([[id, native]])]])]) {
+        const provider = buildPiSubscriptionNativeProviders(catalog, 'http://127.0.0.1:4567/', probe)
+          .providers.find((candidate) => candidate.id === 'openai-codex');
+        expect(provider?.models.find((model) => model.id === `chatgpt/${id}`))
+          .toMatchObject({ wireId: id, api: 'openai-codex-responses', input: ['text', 'image'] });
+      }
+    },
+  );
+
+  it.each([true, false, undefined])(
+    'preserves explicit image capability %s with and without a native probe',
+    (supportsImageInput) => {
+      const catalog = structuredClone(BUNDLED_CATALOG);
+      const id = 'gpt-5.6-sol';
+      catalog.providers.find((provider) => provider.id === 'openai')!.models.pi = [{
+        id: `chatgpt/${id}`, name: id, contextWindow: 272_000, efforts: [], defaultEffort: null,
+        supportsImageInput,
+      }];
+      const native = piBundledModel(id, 'openai-codex-responses', { input: ['text', 'image'] });
+      for (const probe of [undefined, new Map([['openai-codex', new Map([[id, native]])]])]) {
+        const model = buildPiSubscriptionNativeProviders(catalog, 'http://127.0.0.1:4567/', probe)
+          .providers.find((provider) => provider.id === 'openai-codex')?.models[0];
+        expect(model?.input).toEqual(supportsImageInput === false ? ['text'] : ['text', 'image']);
+      }
+    },
+  );
+});
+
+describe('resolvePiCindyGatewayModelApi', () => {
+  it('keeps a Registry-linked Cindy Server protocol above local and Gateway metadata', () => {
+    const catalog = JSON.parse(JSON.stringify(BUNDLED_CATALOG)) as Catalog;
+    catalog.presets = [
+      ...(catalog.presets ?? []),
+      {
+        id: 'server-moonshot-test',
+        name: 'Server Moonshot Test',
+        runtimes: {
+          pi: {
+            baseUrl: 'https://server.example/anthropic',
+            wireProtocol: 'anthropic-messages',
+            models: [{ id: 'kimi-k3', name: 'Kimi K3' }],
+          },
+        },
+      },
+    ];
+    catalog.modelRegistry = {
+      schemaVersion: 3,
+      updatedAt: '2026-08-29T00:00:00.000Z',
+      models: [
+        {
+          id: 'canonical/kimi-k3',
+          nativeApi: 'anthropic-messages',
+          name: 'Kimi K3',
+          routes: [
+            { providerId: 'xd', modelId: 'moonshot/kimi-k3', agents: ['claude-code', 'codex'] },
+            {
+              providerId: 'server-moonshot-test',
+              modelId: 'kimi-k3',
+              agents: ['claude-code', 'codex'],
+            },
+          ],
+        },
+      ],
+    };
+    setActiveCatalog(catalog, { authorityCatalog: catalog });
+    setXdGatewayModels([
+      {
+        id: 'moonshot/kimi-k3',
+        agents: ['pi'],
+        perAgent: { pi: { wireProtocol: 'openai-responses' } },
+      },
+    ]);
+
+    expect(resolvePiCindyGatewayModelApi('xd', 'moonshot/kimi-k3')).toBe(
+      'anthropic-messages',
+    );
+    expect(resolvePiCindyGatewayModelSpec('xd', 'moonshot/kimi-k3')).toEqual({
+      api: 'anthropic-messages',
+    });
+  });
+
+  it('uses the exact local Pi API regardless of Gateway hints or selected BYOM provider', () => {
+    setXdGatewayModels([
+      {
+        id: 'claude-opus-5',
+        agents: ['pi'],
+        perAgent: { pi: { wireProtocol: 'openai-responses' } },
+      },
+      {
+        id: 'gpt-5.6-sol',
+        agents: ['pi'],
+        perAgent: { pi: { wireProtocol: 'anthropic-messages' } },
+      },
+    ]);
+
+    expect(resolvePiCindyGatewayModelApi('third-party-byom', 'claude-opus-5')).toBe(
+      'anthropic-messages',
+    );
+    expect(resolvePiCindyGatewayModelApi('third-party-byom', 'gpt-5.6-sol')).toBe(
+      'openai-responses',
+    );
+  });
+
+  it('uses static client config, but never Desktop-probed metadata, for a remote Pi executable', () => {
+    setXdGatewayModels([
+      {
+        id: 'moonshot/kimi-k3',
+        agents: ['pi'],
+        perAgent: { pi: { wireProtocol: 'openai-responses' } },
+      },
+    ]);
+
+    expect(resolvePiCindyGatewayModelApi('xd', 'moonshot/kimi-k3', { remote: true })).toBe(
+      'openai-completions',
+    );
+    expect(resolvePiCindyGatewayModelSpec('xd', 'moonshot/kimi-k3', { remote: true })).toMatchObject({
+      api: 'openai-completions',
+      compat: {
+        maxTokensField: 'max_tokens',
+        thinkingFormat: 'openai',
+        requiresReasoningContentOnAssistantMessages: true,
+        deferredToolsMode: 'kimi',
+      },
+    });
+  });
+
+  it('keeps local Kimi Completions authoritative over the Gateway hint', () => {
+    setXdGatewayModels([
+      {
+        id: 'moonshot/kimi-k3',
+        agents: ['claude-code', 'codex', 'pi'],
+        perAgent: { pi: { wireProtocol: 'openai-responses' } },
+      },
+    ]);
+
+    expect(resolvePiCindyGatewayModelApi('xd', 'moonshot/kimi-k3')).toBe(
+      'openai-completions',
+    );
+    expect(resolvePiCindyGatewayModelSpec('xd', 'moonshot/kimi-k3')).toMatchObject({
+      api: 'openai-completions',
+      compat: {
+        maxTokensField: 'max_tokens',
+        thinkingFormat: 'openai',
+        requiresReasoningContentOnAssistantMessages: true,
+        deferredToolsMode: 'kimi',
+      },
+    });
+  });
+
+  it.each([undefined, 'openai-completions'] as const)(
+    'uses local Kimi compat when the Gateway hint is %s',
+    (wireProtocol) => {
+      setXdGatewayModels([
+        {
+          id: 'moonshot/kimi-k3',
+          agents: ['claude-code', 'codex', 'pi'],
+          ...(wireProtocol ? { perAgent: { pi: { wireProtocol } } } : {}),
+        },
+      ]);
+
+      expect(resolvePiCindyGatewayModelSpec('xd', 'moonshot/kimi-k3')).toMatchObject({
+        api: 'openai-completions',
+        compat: {
+          maxTokensField: 'max_tokens',
+          thinkingFormat: 'openai',
+          requiresReasoningContentOnAssistantMessages: true,
+          deferredToolsMode: 'kimi',
+        },
+      });
+    },
+  );
+});
+
 describe('buildPiNativeProvidersFromConfigs', () => {
+  it.each([
+    { baseUrl: 'https://api.openai.com/v1', wireProtocol: 'openai-responses' as const, expected: true },
+    { baseUrl: 'https://private.example/v1', wireProtocol: 'openai-responses' as const, expected: false },
+    { baseUrl: 'https://api.openai.com/v1', wireProtocol: 'openai-chat' as const, expected: false },
+  ])('Astra API metadata requires the matching endpoint and protocol: $baseUrl $wireProtocol', ({ baseUrl, wireProtocol, expected }) => {
+    const { providers } = buildPiNativeProvidersFromConfigs([{
+      id: 'manual-openai', name: 'Manual OpenAI', auth: { method: 'apiKey' },
+      runtimes: { pi: piRuntime({ baseUrl, wireProtocol, models: [{ id: 'gpt-6-astra', name: 'Astra' }] }) },
+    }], () => 'test-key');
+    const model = providers[0]?.models[0];
+    if (expected) {
+      expect(model).toMatchObject({
+        contextWindow: 1_050_000, maxTokens: 128_000, reasoning: true,
+        input: ['text', 'image'], thinkingLevelMap: { off: 'low', max: 'max' },
+        cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
+      });
+      expect(model?.baseUrl).toBeUndefined();
+    } else {
+      expect(model?.thinkingLevelMap).toBeUndefined();
+      expect(model?.contextWindow).toBeUndefined();
+    }
+  });
+
+  it('adds missing Astra subscription metadata and preserves native transport compatibility', () => {
+    const catalog = structuredClone(BUNDLED_CATALOG);
+    const build = (native?: PiBundledModelInfo) => buildPiSubscriptionNativeProviders(
+      catalog, 'http://127.0.0.1:4567/',
+      new Map([['openai-codex', new Map(native ? [['gpt-6-astra', native]] : [])]]),
+    ).providers.find((provider) => provider.id === 'openai-codex')?.models.find((model) => model.wireId === 'gpt-6-astra');
+    expect(build()).toMatchObject({
+      id: 'chatgpt/gpt-6-astra', api: 'openai-codex-responses', catalogAddition: true,
+      contextWindow: 272_000, input: ['text', 'image'], thinkingLevelMap: { max: 'max' },
+    });
+    expect(build()?.baseUrl).toBeUndefined();
+    const native = piBundledModel('gpt-6-astra', 'openai-codex-responses', { compat: { supportsStore: false } });
+    expect(build(native)).toMatchObject({ api: 'openai-codex-responses', compat: { supportsStore: false } });
+    expect(build(native)?.catalogAddition).toBeUndefined();
+  });
+
   it('keeps a legacy custom xai endpoint separate from the official SuperGrok provider', () => {
     const { providers, env } = buildPiNativeProvidersFromConfigs(
       [
@@ -130,7 +375,195 @@ describe('buildPiNativeProvidersFromConfigs', () => {
       id: 'models-url-only',
       name: 'Models URL Only',
       contextWindow: 64_000,
+      // 无目录元数据的 Chat Completions 模型默认收敛 system role(#3832)。
+      compat: { supportsDeveloperRole: false },
     });
+  });
+
+  it('同源本地 Pi 元数据补齐能力，但不覆盖下发文件的上下文', () => {
+    const bundled = new Map([
+      [
+        'bundled-provider',
+        new Map([
+          [
+            'server-model',
+            piBundledModel('server-model', 'openai-completions', {
+              baseUrl: 'https://api.example/v1',
+              contextWindow: 272_000,
+              maxTokens: 128_000,
+              input: ['text', 'image'],
+            }),
+          ],
+        ]),
+      ],
+    ]);
+    const { providers } = buildPiNativeProvidersFromConfigs(
+      [
+        {
+          id: 'server-models',
+          name: 'Server Models',
+          auth: { method: 'none' },
+          runtimes: {
+            pi: piRuntime({
+              baseUrl: 'https://api.example/v1',
+              wireProtocol: 'openai-chat',
+              models: [{ id: 'server-model', name: 'Server Model', contextWindow: 64_000 }],
+            }),
+          },
+        },
+      ],
+      () => null,
+      undefined,
+      bundled,
+    );
+
+    expect(providers[0]?.models[0]).toMatchObject({
+      id: 'server-model',
+      contextWindow: 64_000,
+      maxTokens: 128_000,
+      input: ['text', 'image'],
+      reasoning: true,
+    });
+  });
+
+  it('同 origin 的 bundled 元数据不能把用户代理路径改回原生路径', () => {
+    const bundled = new Map([
+      [
+        'bundled-provider',
+        new Map([
+          [
+            'server-model',
+            piBundledModel('server-model', 'openai-completions', {
+              baseUrl: 'https://api.example/native/v1',
+              contextWindow: 272_000,
+              maxTokens: 128_000,
+            }),
+          ],
+        ]),
+      ],
+    ]);
+    const { providers } = buildPiNativeProvidersFromConfigs(
+      [
+        {
+          id: 'proxied-models',
+          name: 'Proxied Models',
+          auth: { method: 'none' },
+          runtimes: {
+            pi: piRuntime({
+              baseUrl: 'https://api.example/user-proxy/v1',
+              wireProtocol: 'openai-chat',
+              models: [{ id: 'server-model', name: 'Server Model' }],
+            }),
+          },
+        },
+      ],
+      () => null,
+      undefined,
+      bundled,
+    );
+
+    expect(providers[0]).toMatchObject({
+      baseUrl: 'https://api.example/user-proxy/v1',
+      api: 'openai-completions',
+    });
+    expect(providers[0]?.models[0]).toMatchObject({
+      id: 'server-model',
+      contextWindow: 272_000,
+      maxTokens: 128_000,
+    });
+    expect(providers[0]?.models[0]).not.toHaveProperty('baseUrl');
+  });
+
+  it('下发协议与本地 Pi 元数据冲突时不借用本地能力', () => {
+    const bundled = new Map([
+      [
+        'bundled-provider',
+        new Map([['server-model', piBundledModel('server-model', 'anthropic-messages')]]),
+      ],
+    ]);
+    const { providers } = buildPiNativeProvidersFromConfigs(
+      [
+        {
+          id: 'server-models',
+          name: 'Server Models',
+          auth: { method: 'none' },
+          runtimes: {
+            pi: piRuntime({
+              wireProtocol: 'openai-responses',
+              models: [{ id: 'server-model', name: 'Server Model' }],
+            }),
+          },
+        },
+      ],
+      () => null,
+      undefined,
+      bundled,
+    );
+
+    expect(providers[0]?.models[0]).toMatchObject({ id: 'server-model', name: 'Server Model' });
+    expect(providers[0]?.models[0]).not.toHaveProperty('reasoning');
+    expect(providers[0]?.models[0]).not.toHaveProperty('input');
+  });
+
+  it('defaults unknown custom Chat Completions models to system role (#3832)', () => {
+    const { providers } = buildPiNativeProvidersFromConfigs(
+      [
+        {
+          id: 'volcengine',
+          name: 'Volcengine Ark',
+          auth: { method: 'apiKey' },
+          runtimes: {
+            pi: piRuntime({
+              baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+              wireProtocol: 'openai-chat',
+              models: [{ id: 'doubao-seed-2-0', name: 'Doubao Seed 2.0' }],
+            }),
+          },
+        },
+      ],
+      () => 'ark-key',
+    );
+    expect(providers[0]?.models[0]).toMatchObject({
+      id: 'doubao-seed-2-0',
+      compat: { supportsDeveloperRole: false },
+    });
+  });
+
+  it('does not inject the system-role fallback for non-Chat protocols (#3832)', () => {
+    const { providers } = buildPiNativeProvidersFromConfigs(
+      [
+        {
+          id: 'custom-anthropic',
+          name: 'Custom Anthropic Compatible',
+          auth: { method: 'apiKey' },
+          runtimes: {
+            pi: piRuntime({
+              baseUrl: 'https://compat.example/v1',
+              wireProtocol: 'anthropic-messages',
+              models: [{ id: 'compat-model' }],
+            }),
+          },
+        },
+        {
+          id: 'custom-responses',
+          name: 'Custom Responses Compatible',
+          auth: { method: 'apiKey' },
+          runtimes: {
+            pi: piRuntime({
+              baseUrl: 'https://responses.example/v1',
+              wireProtocol: 'openai-responses',
+              models: [{ id: 'responses-model' }],
+            }),
+          },
+        },
+      ],
+      () => 'key',
+    );
+    for (const provider of providers) {
+      for (const model of provider.models) {
+        expect(model).not.toHaveProperty('compat');
+      }
+    }
   });
 
   it('does not apply official per-model routing after the user changes endpoint or protocol', () => {
@@ -181,8 +614,9 @@ describe('buildPiNativeProvidersFromConfigs', () => {
     );
     expect(providers[0]?.models[0]).toMatchObject({
       id: 'k3',
-      headers: { 'User-Agent': 'KimiCLI/1.5' },
+      compat: expect.objectContaining({ forceAdaptiveThinking: true }),
     });
+    expect(providers[0]?.models[0]).not.toHaveProperty('headers');
   });
 
   it('preserves explicit overrides for an exact official model after the catalog marker is cleared', () => {
@@ -226,6 +660,8 @@ describe('buildPiNativeProvidersFromConfigs', () => {
         xhigh: null,
         max: null,
       },
+      // 目录标记清除后无同源元数据,Chat Completions 默认收敛 system role(#3832)。
+      compat: { supportsDeveloperRole: false },
     });
   });
 
@@ -240,8 +676,8 @@ describe('buildPiNativeProvidersFromConfigs', () => {
     expect(providers).toHaveLength(1);
     expect(providers[0]).toMatchObject({
       id: 'xai',
-      baseUrl: 'http://127.0.0.1:18765',
-      api: 'anthropic-messages',
+      baseUrl: 'http://127.0.0.1:18765/v1',
+      api: 'openai-responses',
       apiKeyEnvVar: 'CINDY_PI_XAI_PROXY_API_KEY',
       headers: {
         'x-cindy-pi-session-id': '$CINDY_PI_SESSION_ID',
@@ -251,15 +687,20 @@ describe('buildPiNativeProvidersFromConfigs', () => {
       modelIdAliases: { 'grok-4.6': 'xai/grok-4.6' },
     });
     expect(providers[0]?.models.find((model) => model.id === 'xai/grok-4.6')).toMatchObject({
-      api: 'anthropic-messages',
+      wireId: 'grok-4.6',
+      api: 'openai-responses',
       contextWindow: 500_000,
       maxTokens: 500_000,
       input: ['text', 'image'],
       reasoning: true,
+      thinkingLevelMap: {
+        low: 'low',
+        medium: 'medium',
+        high: 'high',
+        xhigh: 'xhigh',
+      },
       compat: {
-        supportsStore: false,
-        supportsDeveloperRole: false,
-        supportsReasoningEffort: false,
+        supportsReasoningEffort: true,
       },
     });
     expect(env).toEqual({
@@ -271,8 +712,8 @@ describe('buildPiNativeProvidersFromConfigs', () => {
     const { providers } = await buildXaiPiNativeProvider('grok-4.6', false, true);
     expect(providers[0]).toMatchObject({
       id: 'xai',
-      baseUrl: `http://127.0.0.1:${PI_XAI_COMPAT_FORWARD_PORT}`,
-      api: 'anthropic-messages',
+      baseUrl: `http://127.0.0.1:${PI_XAI_COMPAT_FORWARD_PORT}/v1`,
+      api: 'openai-responses',
       headers: {
         'x-cindy-pi-session-id': '$CINDY_PI_SESSION_ID',
         'x-cindy-pi-session-token': '$CINDY_PI_SESSION_TOKEN',
@@ -283,6 +724,10 @@ describe('buildPiNativeProvidersFromConfigs', () => {
         remotePort: PI_XAI_COMPAT_FORWARD_PORT,
       },
     });
+    expect(providers[0]?.models.find((model) => model.id === 'xai/grok-4.6')).toMatchObject({
+      wireId: 'grok-4.6',
+      api: 'openai-responses',
+    });
   });
 
   it('adds a private conservative xAI descriptor only when resuming a historical namespaced id', async () => {
@@ -290,8 +735,9 @@ describe('buildPiNativeProvidersFromConfigs', () => {
     const { providers } = await buildXaiPiNativeProvider('xai/grok-retired', true);
     expect(providers[0]?.models.find((model) => model.id === 'xai/grok-retired')).toEqual({
       id: 'xai/grok-retired',
+      wireId: 'grok-retired',
       name: 'xai/grok-retired',
-      api: 'anthropic-messages',
+      api: 'openai-responses',
     });
     expect(providers[0]?.modelIdAliases?.['grok-retired']).toBe('xai/grok-retired');
   });
@@ -309,16 +755,16 @@ describe('buildPiNativeProvidersFromConfigs', () => {
   });
 
   const bundledPiPath = path.join(process.cwd(), 'apps/pi-bin/darwin-arm64/pi');
-  it('caches a null fallback when the PI probe temp directory cannot be created', async () => {
+  it('retries a transient null PI probe instead of caching it for the process lifetime', async () => {
     const binaryPath = path.join(process.cwd(), 'pi-temp-dir-probe-failure');
     const mkdtempSpy = vi
       .spyOn(fsp, 'mkdtemp')
-      .mockRejectedValueOnce(new Error('temporary directory unavailable'));
+      .mockRejectedValue(new Error('temporary directory unavailable'));
 
     try {
       await expect(readPiBundledModels(binaryPath)).resolves.toBeNull();
       await expect(readPiBundledModels(binaryPath)).resolves.toBeNull();
-      expect(mkdtempSpy).toHaveBeenCalledTimes(1);
+      expect(mkdtempSpy).toHaveBeenCalledTimes(2);
     } finally {
       mkdtempSpy.mockRestore();
     }
@@ -330,16 +776,41 @@ describe('buildPiNativeProvidersFromConfigs', () => {
     const catalog = await readPiBundledModels(bundledPiPath);
     expect(catalog?.get('openai-codex')?.get('gpt-5.6-sol')?.api).toBe('openai-codex-responses');
     expect(catalog?.get('xai')?.get('grok-4.5')?.api).toBe('openai-responses');
-    expect(catalog?.get('xai')?.get('grok-build-0.1')?.api).toBe('openai-completions');
+    expect(catalog?.get('xai')?.get('grok-build-0.1')?.api).toBe('openai-responses');
     const anthropicModels = [...(catalog?.get('anthropic')?.values() ?? [])];
     expect(anthropicModels.length).toBeGreaterThan(0);
     expect(anthropicModels.every((model) => model.api === 'anthropic-messages')).toBe(true);
-    expect(resolvePiBundledApiByModelId(catalog ?? undefined, 'glm-5.2')).toBe(
-      'openai-completions',
-    );
+    expect(resolvePiBundledApiByModelId(catalog ?? undefined, 'glm-5.2')).toBe('openai-completions');
     expect(catalog?.get('zai')?.get('glm-5.2')).toMatchObject({
       api: 'openai-completions',
       baseUrl: 'https://api.z.ai/api/coding/paas/v4',
+    });
+  });
+
+  it.skipIf(
+    process.platform !== 'darwin' || process.arch !== 'arm64' || !existsSync(bundledPiPath),
+  )('uses the exact Pi binary to enrich first-party Gateway profiles without remote API input', async () => {
+    await readPiBundledModels(bundledPiPath);
+    setXdGatewayModels([
+      { id: 'claude-opus-5', agents: ['pi'] },
+      { id: 'gpt-5.6-sol', agents: ['pi'] },
+      { id: 'google/gemini-3.7-flash', agents: ['pi'] },
+    ]);
+
+    expect(resolvePiCindyGatewayModelSpec('xd', 'claude-opus-5')).toMatchObject({
+      api: 'anthropic-messages',
+      compat: { forceAdaptiveThinking: true, supportsStrictTools: true },
+    });
+    expect(resolvePiCindyGatewayModelSpec('xd', 'gpt-5.6-sol')).toMatchObject({
+      api: 'openai-responses',
+      compat: {
+        supportsOpenAIGrammarTools: true,
+        supportsAdditionalTools: true,
+        supportsToolSearch: true,
+      },
+    });
+    expect(resolvePiCindyGatewayModelSpec('xd', 'google/gemini-3.7-flash')).toMatchObject({
+      api: 'google-generative-ai',
     });
   });
 
@@ -407,7 +878,16 @@ describe('buildPiNativeProvidersFromConfigs', () => {
           'openai-codex',
           new Map([['gpt-5.6-sol', piBundledModel('gpt-5.6-sol', 'openai-codex-responses')]]),
         ],
-        ['xai', new Map([['grok-4.5', piBundledModel('grok-4.5', 'openai-responses')]])],
+        ['xai', new Map([['grok-4.5', piBundledModel('grok-4.5', 'openai-responses', {
+          thinkingLevelMap: {
+            minimal: null,
+            low: 'low',
+            medium: 'medium',
+            high: 'high',
+            xhigh: null,
+            max: null,
+          },
+        })]])],
       ]),
     );
 
@@ -416,8 +896,12 @@ describe('buildPiNativeProvidersFromConfigs', () => {
       sourceProviderId: 'anthropic',
       baseUrl: 'http://127.0.0.1:4567/',
       inheritModels: true,
+      apiKeyEnvVar: 'CINDY_PI_ANTHROPIC_PROXY_KEY',
       models: [{ id: 'claude-opus-5', wireId: 'claude-opus-5' }],
     });
+    // Pi 按 `sk-ant-oat` 前缀识别 OAuth 形态,才会自己拼 claude-code/oauth/server-side-fallback
+    // 等 beta 头与 Claude Code 身份;占位值不能是真 token 形态之外的普通字串。
+    expect(env.CINDY_PI_ANTHROPIC_PROXY_KEY).toContain('sk-ant-oat');
     expect(providers[1]).toMatchObject({
       sourceProviderId: 'openai',
       baseUrl: 'http://127.0.0.1:4567/',
@@ -426,6 +910,7 @@ describe('buildPiNativeProvidersFromConfigs', () => {
         {
           id: 'chatgpt/gpt-5.6-sol',
           wireId: 'gpt-5.6-sol',
+          api: 'openai-codex-responses',
         },
         {
           id: 'chatgpt/gpt-5.7',
@@ -434,8 +919,11 @@ describe('buildPiNativeProvidersFromConfigs', () => {
         },
       ],
     });
-    expect(providers[1]?.models[0]?.api).toBeUndefined();
     expect(providers[1]?.models[0]?.catalogAddition).toBeUndefined();
+    expect(providers[1]?.models[0]).toMatchObject({
+      api: 'openai-codex-responses',
+      contextWindow: 272_000,
+    });
     expect(providers[2]).toMatchObject({
       sourceProviderId: 'xai',
       baseUrl: 'http://127.0.0.1:4567/v1',
@@ -456,6 +944,283 @@ describe('buildPiNativeProvidersFromConfigs', () => {
         'x-cindy-pi-provider-id': provider.sourceProviderId,
       });
     }
+  });
+
+  it('publishes a distinct Pi 1M profile while inheriting the bundled ChatGPT adapter', () => {
+    const catalog = JSON.parse(JSON.stringify(BUNDLED_CATALOG)) as Catalog;
+    const openai = catalog.providers.find((provider) => provider.id === 'openai')!;
+    openai.models.pi = [
+      {
+        id: 'chatgpt/gpt-5.6-sol',
+        name: 'GPT-5.6-Sol',
+        contextWindow: 272_000,
+        maxOutput: 128_000,
+        efforts: ['low', 'medium', 'high', 'xhigh'],
+        defaultEffort: 'medium',
+      },
+      {
+        id: 'chatgpt/gpt-5.6-sol[1m]',
+        name: 'GPT-5.6-Sol (1M · 高消耗)',
+        contextWindow: 1_000_000,
+        maxOutput: 128_000,
+        efforts: ['low', 'medium', 'high', 'xhigh'],
+        defaultEffort: 'medium',
+      },
+    ];
+    const bundled = piBundledModel('gpt-5.6-sol', 'openai-codex-responses', {
+      // readPiBundledModels probes with this deliberately unreachable endpoint.
+      // It must never override the provider-level runtime compat proxy.
+      baseUrl: 'http://127.0.0.1:1',
+      contextWindow: 272_000,
+      maxTokens: 128_000,
+      cost: {
+        input: 5,
+        output: 30,
+        cacheRead: 0.5,
+        cacheWrite: 6.25,
+        tiers: [{
+          inputTokensAbove: 272_000,
+          input: 10,
+          output: 45,
+          cacheRead: 1,
+          cacheWrite: 12.5,
+        }],
+      },
+      compat: { supportsStrictTools: true },
+    });
+
+    const provider = buildPiSubscriptionNativeProviders(
+      catalog,
+      'http://127.0.0.1:4567/',
+      new Map([['openai-codex', new Map([[bundled.id, bundled]])]]),
+    ).providers.find((candidate) => candidate.id === 'openai-codex');
+
+    expect(provider?.models).toEqual([
+      expect.objectContaining({
+        id: 'chatgpt/gpt-5.6-sol',
+        wireId: 'gpt-5.6-sol',
+        api: 'openai-codex-responses',
+        contextWindow: 272_000,
+        maxTokens: 128_000,
+        compat: bundled.compat,
+      }),
+      expect.objectContaining({
+        id: 'chatgpt/gpt-5.6-sol[1m]',
+        wireId: 'gpt-5.6-sol[1m]',
+        catalogAddition: true,
+        name: 'GPT-5.6-Sol (1M · 高消耗)',
+        contextWindow: 1_000_000,
+        cost: bundled.cost,
+        compat: bundled.compat,
+      }),
+    ]);
+    expect(provider?.models[0]?.catalogAddition).toBeUndefined();
+    expect(provider?.models[0]).not.toHaveProperty('baseUrl');
+    expect(provider?.baseUrl).toBe('http://127.0.0.1:4567/');
+
+    const withoutProbe = buildPiSubscriptionNativeProviders(
+      catalog,
+      'http://127.0.0.1:4567/',
+    ).providers.find((candidate) => candidate.id === 'openai-codex');
+    expect(withoutProbe?.models[1]).toMatchObject({
+      id: 'chatgpt/gpt-5.6-sol[1m]',
+      wireId: 'gpt-5.6-sol[1m]',
+      catalogAddition: true,
+      contextWindow: 1_000_000,
+    });
+  });
+
+  it('preserves Pi native wire values when the catalog overlays OpenAI effort membership', () => {
+    const catalog = JSON.parse(JSON.stringify(BUNDLED_CATALOG)) as Catalog;
+    const openai = catalog.providers.find((provider) => provider.id === 'openai')!;
+    openai.models.pi = [
+      {
+        id: 'chatgpt/gpt-5.6-sol',
+        name: 'GPT-5.6 Sol',
+        contextWindow: 272_000,
+        efforts: ['minimal', 'xhigh', 'max'],
+        defaultEffort: 'xhigh',
+      },
+    ];
+    const bundled = piBundledModel('gpt-5.6-sol', 'openai-codex-responses', {
+      thinkingLevelMap: { minimal: 'low', xhigh: 'xhigh', max: 'max' },
+    });
+
+    const model = buildPiSubscriptionNativeProviders(
+      catalog,
+      'http://127.0.0.1:4567/',
+      new Map([['openai-codex', new Map([[bundled.id, bundled]])]]),
+    ).providers.find((candidate) => candidate.id === 'openai-codex')?.models[0];
+
+    expect(model?.thinkingLevelMap).toEqual({
+      minimal: 'low',
+      low: null,
+      medium: null,
+      high: null,
+      xhigh: 'xhigh',
+      max: 'max',
+    });
+  });
+
+  it('keeps a retired OpenAI profile private to its native subscription resume', () => {
+    const catalog = JSON.parse(JSON.stringify(BUNDLED_CATALOG)) as Catalog;
+    const openai = catalog.providers.find((provider) => provider.id === 'openai')!;
+    openai.models.pi = openai.models.pi?.filter(
+      (model) => model.id !== 'chatgpt/gpt-5.6-sol[1m]',
+    );
+    const bundled = piBundledModel('gpt-5.6-sol', 'openai-codex-responses', {
+      contextWindow: 272_000,
+      maxTokens: 128_000,
+      compat: { supportsStrictTools: true },
+    });
+
+    const provider = buildPiSubscriptionNativeProviders(
+      catalog,
+      'http://127.0.0.1:4567/',
+      new Map([['openai-codex', new Map([[bundled.id, bundled]])]]),
+      undefined,
+      {
+        id: 'chatgpt/gpt-5.6-sol[1m]',
+        displayName: 'GPT-5.6-Sol (1M · Higher usage)',
+        contextWindow: 1_000_000,
+        maxOutputTokens: 128_000,
+        efforts: ['minimal', 'low', 'medium', 'high', 'xhigh'],
+        defaultEffort: 'medium',
+      },
+    ).providers.find((candidate) => candidate.id === 'openai-codex');
+
+    expect(provider?.models).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'chatgpt/gpt-5.6-sol[1m]',
+        wireId: 'gpt-5.6-sol[1m]',
+        catalogAddition: true,
+        contextWindow: 1_000_000,
+        compat: bundled.compat,
+      }),
+    ]));
+    expect(openai.models.pi?.some((model) => model.id.endsWith('[1m]'))).toBe(false);
+  });
+
+  it('publishes SuperGrok catalog models missing from this PI binary as catalog additions', () => {
+    const catalog = JSON.parse(JSON.stringify(BUNDLED_CATALOG)) as Catalog;
+    const xai = catalog.providers.find((provider) => provider.id === 'xai');
+    expect(xai?.models.pi?.some((model) => model.id === 'grok-4.6')).toBe(true);
+    expect(xai?.models.pi?.find((model) => model.id === 'grok-4.6')?.piApi).toBe(
+      'openai-responses',
+    );
+
+    const { providers } = buildPiSubscriptionNativeProviders(
+      catalog,
+      'http://127.0.0.1:4567/',
+      new Map([
+        ['xai', new Map([['grok-4.5', piBundledModel('grok-4.5', 'openai-completions')]])],
+      ]),
+      new Map([['xai', new Set(['grok-4.5'])]]),
+    );
+
+    const xaiProvider = providers.find((provider) => provider.id === 'xai');
+    expect(xaiProvider?.models.find((model) => model.id === 'grok-4.6')).toMatchObject({
+      id: 'grok-4.6',
+      wireId: 'grok-4.6',
+      catalogAddition: true,
+      cost: { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 },
+    });
+    expect(xaiProvider?.models.find((model) => model.id === 'grok-4.6')?.api).toBe('openai-responses');
+    expect(xaiProvider?.models.find((model) => model.id === 'grok-4.5')?.catalogAddition).toBeUndefined();
+    expect(xaiProvider?.models.find((model) => model.id === 'grok-4.3')?.catalogAddition).toBeUndefined();
+    expect(xaiProvider?.models.find((model) => model.id === 'grok-4.3')?.api).toBe('openai-responses');
+    expect(xaiProvider?.models.find((model) => model.id === 'grok-build-0.1')?.catalogAddition).toBeUndefined();
+  });
+
+  it('keeps exact SuperGrok protocol annotations when the PI probe is unavailable', () => {
+    const catalog = JSON.parse(JSON.stringify(BUNDLED_CATALOG)) as Catalog;
+    expect(catalog.providers.find((provider) => provider.id === 'xai')?.models.pi?.find((model) => model.id === 'grok-4.6')?.piApi).toBe('openai-responses');
+
+    const { providers } = buildPiSubscriptionNativeProviders(
+      catalog,
+      'http://127.0.0.1:4567/',
+    );
+
+    const xaiProvider = providers.find((provider) => provider.id === 'xai');
+    expect(xaiProvider?.models.find((model) => model.id === 'grok-4.6')).toMatchObject({
+      api: 'openai-responses',
+    });
+    expect(xaiProvider?.models.find((model) => model.id === 'grok-4.5')).toMatchObject({
+      api: 'openai-responses',
+    });
+  });
+
+  it('does not mark SuperGrok models as catalog additions when the probe has no xAI baseline', () => {
+    const catalog = JSON.parse(JSON.stringify(BUNDLED_CATALOG)) as Catalog;
+
+    const { providers } = buildPiSubscriptionNativeProviders(
+      catalog,
+      'http://127.0.0.1:4567/',
+      new Map([
+        ['anthropic', new Map([['claude-opus-5', piBundledModel('claude-opus-5', 'anthropic-messages')]])],
+      ]),
+    );
+
+    const xaiProvider = providers.find((provider) => provider.id === 'xai');
+    expect(xaiProvider?.models.find((model) => model.id === 'grok-4.6')?.catalogAddition).toBeUndefined();
+    expect(xaiProvider?.models.find((model) => model.id === 'grok-4.5')?.catalogAddition).toBeUndefined();
+  });
+
+  it('does not mark SuperGrok models as catalog additions when list-models still has the id', () => {
+    const catalog = JSON.parse(JSON.stringify(BUNDLED_CATALOG)) as Catalog;
+
+    const { providers } = buildPiSubscriptionNativeProviders(
+      catalog,
+      'http://127.0.0.1:4567/',
+      new Map([
+        ['xai', new Map([['grok-4.5', piBundledModel('grok-4.5', 'openai-completions')]])],
+      ]),
+      new Map([['xai', new Set(['grok-4.5', 'grok-4.6'])]]),
+    );
+
+    const xaiProvider = providers.find((provider) => provider.id === 'xai');
+    expect(xaiProvider?.models.find((model) => model.id === 'grok-4.6')?.catalogAddition).toBeUndefined();
+  });
+
+  it('emits a Grok 4.6 inheritModels replacement so xhigh survives writeModelsJson', () => {
+    const { providers } = buildPiSubscriptionNativeProviders(
+      BUNDLED_CATALOG,
+      'http://127.0.0.1:4567/',
+      new Map([
+        [
+          'xai',
+          new Map([
+            [
+              'grok-4.6',
+              piBundledModel('grok-4.6', 'openai-completions', {
+                reasoning: true,
+                compat: {
+                  supportsStore: false,
+                  supportsDeveloperRole: false,
+                  supportsReasoningEffort: false,
+                },
+              }),
+            ],
+          ]),
+        ],
+      ]),
+    );
+    const grok = providers
+      .find((provider) => provider.id === 'xai')
+      ?.models.find((model) => model.wireId === 'grok-4.6' || model.id === 'grok-4.6');
+    expect(grok).toMatchObject({
+      api: 'openai-responses',
+      reasoning: true,
+      thinkingLevelMap: {
+        low: 'low',
+        medium: 'medium',
+        high: 'high',
+        xhigh: 'xhigh',
+      },
+      compat: {
+        supportsReasoningEffort: true,
+      },
+    });
   });
 
   it('namespaces only colliding BYOM runtime ids and preserves their persisted source ids', () => {
@@ -664,7 +1429,110 @@ describe('buildPiNativeProvidersFromConfigs', () => {
         wireId: 'grok-daily',
         api: 'openai-responses',
       });
+      expect(providers.find((provider) => provider.id === 'xai')).toMatchObject({
+        apiKeyEnvVar: 'CINDY_PI_XAI_PROXY_API_KEY',
+        modelIdAliases: expect.objectContaining({
+          'xai/grok-daily': 'xai/grok-daily',
+          'grok-daily': 'xai/grok-daily',
+        }),
+      });
     }
+  });
+
+  it('keeps ChatGPT aliases pointed at namespaced spec ids, not bare wire ids', () => {
+    const catalog = JSON.parse(JSON.stringify(BUNDLED_CATALOG)) as Catalog;
+    const openai = catalog.providers.find((provider) => provider.id === 'openai')!;
+    openai.models.pi = [
+      {
+        id: 'chatgpt/gpt-5.7',
+        name: 'GPT-5.7',
+        contextWindow: 272_000,
+        efforts: [],
+        defaultEffort: null,
+        piApi: 'openai-responses',
+      },
+    ];
+    const provider = buildPiSubscriptionNativeProviders(
+      catalog,
+      'http://127.0.0.1:4567/',
+      new Map(),
+    ).providers.find((candidate) => candidate.id === 'openai-codex');
+    expect(provider?.modelIdAliases).toMatchObject({
+      'chatgpt/gpt-5.7': 'chatgpt/gpt-5.7',
+      'gpt-5.7': 'chatgpt/gpt-5.7',
+    });
+  });
+
+  it('writes pinned-Pi-missing Grok 4.6 using the official openai-responses API', () => {
+    const catalog = JSON.parse(JSON.stringify(BUNDLED_CATALOG)) as Catalog;
+    const xai = catalog.providers.find((provider) => provider.id === 'xai')!;
+    xai.models.pi = [
+      {
+        id: 'grok-4.6',
+        name: 'Grok 4.6',
+        contextWindow: 500_000,
+        efforts: [],
+        defaultEffort: null,
+        supportsImageInput: true,
+      },
+    ];
+    const provider = buildPiSubscriptionNativeProviders(
+      catalog,
+      'http://127.0.0.1:4567/',
+      new Map([['xai', new Map([['grok-4.5', piBundledModel('grok-4.5', 'openai-completions')]])]]),
+      new Map([['xai', new Set(['grok-4.5'])]]),
+    ).providers.find((candidate) => candidate.id === 'xai');
+    expect(provider?.models).toEqual([
+      expect.objectContaining({
+        id: 'grok-4.6',
+        wireId: 'grok-4.6',
+        api: 'openai-responses',
+        catalogAddition: true,
+        reasoning: true,
+        thinkingLevelMap: expect.objectContaining({ xhigh: 'xhigh' }),
+        compat: expect.objectContaining({ supportsReasoningEffort: true }),
+      }),
+    ]);
+    expect(provider?.modelIdAliases).toMatchObject({
+      'grok-4.6': 'grok-4.6',
+      'xai/grok-4.6': 'grok-4.6',
+    });
+  });
+
+  it('does not rewrite bundled xAI protocols when the PI probe is unavailable', () => {
+    const catalog = JSON.parse(JSON.stringify(BUNDLED_CATALOG)) as Catalog;
+    const xai = catalog.providers.find((provider) => provider.id === 'xai')!;
+    xai.models.pi = [
+      {
+        id: 'grok-4.3',
+        name: 'Grok 4.3',
+        contextWindow: 1_000_000,
+        efforts: [],
+        defaultEffort: null,
+        supportsImageInput: true,
+      },
+      {
+        id: 'grok-4.6',
+        name: 'Grok 4.6',
+        contextWindow: 500_000,
+        efforts: [],
+        defaultEffort: null,
+        supportsImageInput: true,
+      },
+    ];
+    const provider = buildPiSubscriptionNativeProviders(
+      catalog,
+      'http://127.0.0.1:4567/',
+      undefined,
+    ).providers.find((candidate) => candidate.id === 'xai');
+    const grok43 = provider?.models.find((model) => model.wireId === 'grok-4.3');
+    const grok46 = provider?.models.find((model) => model.wireId === 'grok-4.6');
+    expect(grok43?.id).toBe('grok-4.3');
+    expect(grok43?.catalogAddition).toBeUndefined();
+    expect(grok43?.api).toBeUndefined();
+    expect(grok46?.id).toBe('grok-4.6');
+    expect(grok46?.catalogAddition).toBeUndefined();
+    expect(grok46?.api).toBeUndefined();
   });
 
   it('keeps missing daily rows while respecting models returned by a partial PI probe', () => {
@@ -703,7 +1571,7 @@ describe('buildPiNativeProvidersFromConfigs', () => {
     expect(provider?.models[0]?.api).toBeUndefined();
   });
 
-  it('preserves PI bundled metadata when a daily annotation corrects an existing protocol', () => {
+  it('drops PI bundled serializer metadata when a daily annotation corrects the protocol', () => {
     const catalog = JSON.parse(JSON.stringify(BUNDLED_CATALOG)) as Catalog;
     const xai = catalog.providers.find((provider) => provider.id === 'xai')!;
     xai.models.pi = [
@@ -733,54 +1601,67 @@ describe('buildPiNativeProvidersFromConfigs', () => {
     expect(provider?.models[0]).toMatchObject({
       wireId: 'grok-corrected',
       api: 'openai-responses',
-      name: 'PI Bundled Name',
-      contextWindow: 500_000,
-      maxTokens: 64_000,
-      cost: bundled.cost,
-      compat: bundled.compat,
+      name: 'Daily Name',
+      contextWindow: 1_000_000,
+      reasoning: true,
+      thinkingLevelMap: {
+        minimal: null,
+        low: null,
+        medium: null,
+        high: 'high',
+        xhigh: null,
+        max: null,
+      },
     });
+    expect(provider?.models[0]?.maxTokens).toBeUndefined();
+    expect(provider?.models[0]?.cost).toBeUndefined();
+    expect(provider?.models[0]?.compat).toBeUndefined();
+    expect(provider?.models[0]?.headers).toBeUndefined();
   });
 
-  it('turns a Claude-derived wizard runtime and copied Pi key into a callable native provider', () => {
-    const derived = derivePiRuntimeFromClaudeRuntime({
-      baseUrl: 'https://api.example/anthropic',
-      headers: { 'x-tenant': 'acme' },
-      models: [{ id: 'model-a', name: 'Model A', contextWindow: 100_000 }],
+  it('does not apply official Responses metadata to an xAI protocol correction to Completions', () => {
+    const catalog = JSON.parse(JSON.stringify(BUNDLED_CATALOG)) as Catalog;
+    const xai = catalog.providers.find((provider) => provider.id === 'xai')!;
+    xai.models.pi = [
+      {
+        id: 'xai/grok-4.6',
+        name: 'Corrected Grok 4.6',
+        contextWindow: 1_000_000,
+        efforts: ['high'],
+        defaultEffort: 'high',
+        piApi: 'openai-completions',
+      },
+    ];
+    const bundled = piBundledModel('grok-4.6', 'openai-responses', {
+      thinkingLevelMap: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh' },
+      compat: { supportsReasoningEffort: true },
     });
-    expect(derived).not.toBeNull();
 
-    const { providers, env } = buildPiNativeProvidersFromConfigs(
-      [
-        {
-          id: 'wizard-provider',
-          name: 'Wizard Provider',
-          auth: { method: 'apiKey' },
-          runtimes: { pi: derived! },
-        },
-      ],
-      (providerId, agent) =>
-        providerId === 'wizard-provider' && agent === 'pi' ? 'wizard-secret' : null,
-    );
+    const model = buildPiSubscriptionNativeProviders(
+      catalog,
+      'http://127.0.0.1:4567/',
+      new Map([['xai', new Map([[bundled.id, bundled]])]]),
+    ).providers.find((candidate) => candidate.id === 'xai')?.models[0];
 
-    expect(providers).toHaveLength(1);
-    expect(providers[0]).toMatchObject({
-      id: 'wizard-provider',
-      name: 'Wizard Provider',
-      baseUrl: 'https://api.example/anthropic',
-      api: 'anthropic-messages',
-      models: [{ id: 'model-a', name: 'Model A', contextWindow: 100_000 }],
+    expect(model).toMatchObject({
+      api: 'openai-completions',
+      thinkingLevelMap: {
+        minimal: null,
+        low: null,
+        medium: null,
+        high: 'high',
+        xhigh: null,
+        max: null,
+      },
     });
-    expect(env[providers[0].apiKeyEnvVar!]).toBe('wizard-secret');
-    expect(providers[0].headers?.['x-tenant']).toMatch(/^\$CINDY_PI_KEY_/);
-    expect(Object.values(env)).toContain('acme');
+    expect(model?.compat).toBeUndefined();
   });
 
-  it('maps wire protocols to pi api forms (openai-chat→openai-completions, undefined→openai-completions)', () => {
-    const cases: Array<[string | undefined, string]> = [
+  it('maps each explicitly configured wire protocol to the Pi API form', () => {
+    const cases: Array<[string, string]> = [
       ['anthropic-messages', 'anthropic-messages'],
       ['openai-responses', 'openai-responses'],
       ['openai-chat', 'openai-completions'],
-      [undefined, 'openai-completions'],
     ];
     for (const [wp, api] of cases) {
       const { providers } = buildPiNativeProvidersFromConfigs(
@@ -796,6 +1677,82 @@ describe('buildPiNativeProvidersFromConfigs', () => {
       );
       expect(providers[0]?.api).toBe(api);
     }
+  });
+
+  it('keeps a model endpoint only when it matches the final Pi protocol', () => {
+    const { providers } = buildPiNativeProvidersFromConfigs(
+      [
+        {
+          id: 'legacy-route',
+          name: 'Legacy Route',
+          auth: { method: 'none' },
+          runtimes: {
+            pi: piRuntime({
+              baseUrl: 'https://api.example/v1',
+              wireProtocol: 'anthropic-messages',
+              models: [
+                {
+                  id: 'stale-route',
+                  name: 'Stale Route',
+                  piApi: 'openai-responses',
+                  route: {
+                    baseUrl: 'https://api.example/messages',
+                    wireProtocol: 'anthropic-messages',
+                  },
+                },
+                {
+                  id: 'matching-route',
+                  name: 'Matching Route',
+                  piApi: 'openai-responses',
+                  route: {
+                    baseUrl: 'https://api.example/responses',
+                    wireProtocol: 'openai-responses',
+                  },
+                },
+              ],
+            }),
+          },
+        },
+      ],
+      () => null,
+    );
+
+    expect(providers[0]?.models).toMatchObject([
+      { id: 'stale-route', api: 'openai-responses' },
+      {
+        id: 'matching-route',
+        api: 'openai-responses',
+        baseUrl: 'https://api.example/responses',
+      },
+    ]);
+    expect(providers[0]?.models[0]).not.toHaveProperty('baseUrl');
+  });
+
+  it('skips a provider when any model has no explicit or authoritative Pi protocol', () => {
+    const skipped: Array<[string, string]> = [];
+    const { providers } = buildPiNativeProvidersFromConfigs(
+      [
+        {
+          id: 'unconfigured',
+          name: 'Unconfigured',
+          auth: { method: 'none' },
+          runtimes: {
+            pi: piRuntime({
+              wireProtocol: undefined,
+              models: [
+                { id: 'declared', name: 'Declared', piApi: 'openai-responses' },
+                { id: 'unknown', name: 'Unknown' },
+              ],
+            }),
+          },
+        },
+      ],
+      () => null,
+      (id, reason) => skipped.push([id, reason]),
+    );
+
+    expect(providers).toEqual([]);
+    expect(skipped).toEqual([['unconfigured', "pi protocol not configured for model 'unknown'"]]);
   });
 
   it('fails closed for an unknown custom-provider wire protocol', () => {
@@ -814,7 +1771,7 @@ describe('buildPiNativeProvidersFromConfigs', () => {
     ).toThrow('Unsupported PI wire protocol: future-protocol');
   });
 
-  it('uses PI bundled protocol knowledge before the legacy unknown-BYOM default', () => {
+  it('uses same-origin PI bundled protocol knowledge without borrowing its endpoint path', () => {
     const bundled = new Map([
       [
         'zai',
@@ -854,6 +1811,7 @@ describe('buildPiNativeProvidersFromConfigs', () => {
           runtimes: {
             pi: piRuntime({
               baseUrl: 'https://open.bigmodel.cn/api/anthropic',
+              wireProtocol: undefined,
               models: [
                 { id: 'glm-5.2', name: 'GLM-5.2' },
                 { id: 'glm-5.3', name: 'GLM-5.3', piApi: 'anthropic-messages' },
@@ -868,16 +1826,15 @@ describe('buildPiNativeProvidersFromConfigs', () => {
     );
 
     expect(providers[0]).toMatchObject({
+      baseUrl: 'https://open.bigmodel.cn/api/anthropic',
       api: 'openai-completions',
       models: [
-        {
-          id: 'glm-5.2',
-          baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
-        },
+        { id: 'glm-5.2' },
         { id: 'glm-5.3', api: 'anthropic-messages' },
       ],
     });
     expect(providers[0]?.models[0]?.api).toBeUndefined();
+    expect(providers[0]?.models[0]).not.toHaveProperty('baseUrl');
   });
 
   it('does not infer ambiguous duplicate model ids from PI bundled providers', () => {
@@ -888,12 +1845,13 @@ describe('buildPiNativeProvidersFromConfigs', () => {
     expect(resolvePiBundledApiByModelId(bundled, 'same-id')).toBeUndefined();
   });
 
-  it('does not copy a unique same-named PI model across BYOM origins', () => {
+  it('does not copy a unique same-named PI model across BYOM origins or guess a default', () => {
     const bundledModel = piBundledModel('shared-model', 'anthropic-messages', {
       baseUrl: 'https://official.example/v1/messages',
       name: 'Official Name',
       compat: { supportsStrictTools: true },
     });
+    const skipped: Array<[string, string]> = [];
     const { providers } = buildPiNativeProvidersFromConfigs(
       [
         {
@@ -903,26 +1861,24 @@ describe('buildPiNativeProvidersFromConfigs', () => {
           runtimes: {
             pi: piRuntime({
               baseUrl: 'http://127.0.0.1:9000/v1',
+              wireProtocol: undefined,
               models: [{ id: 'shared-model', name: 'Local Name' }],
             }),
           },
         },
       ],
       () => null,
-      undefined,
+      (id, reason) => skipped.push([id, reason]),
       new Map([['official-provider', new Map([['shared-model', bundledModel]])]]),
     );
 
-    expect(providers[0]).toMatchObject({
-      baseUrl: 'http://127.0.0.1:9000/v1',
-      api: 'openai-completions',
-      models: [{ id: 'shared-model', name: 'Local Name' }],
-    });
-    expect(providers[0]?.models[0]?.baseUrl).toBeUndefined();
-    expect(providers[0]?.models[0]?.compat).toBeUndefined();
+    expect(providers).toEqual([]);
+    expect(skipped).toEqual([
+      ['local-provider', "pi protocol not configured for model 'shared-model'"],
+    ]);
   });
 
-  it('uses matched bundled reasoning true/false and falls back only when metadata is absent', () => {
+  it('uses matched bundled reasoning true/false and explicit config when metadata is absent', () => {
     const baseUrl = 'https://same-origin.example/v1';
     const bundled = new Map([
       [
@@ -957,6 +1913,7 @@ describe('buildPiNativeProvidersFromConfigs', () => {
           runtimes: {
             pi: piRuntime({
               baseUrl,
+              wireProtocol: undefined,
               models: [
                 { id: 'bundled-reasoning-on', reasoning: false },
                 {
@@ -966,6 +1923,7 @@ describe('buildPiNativeProvidersFromConfigs', () => {
                 },
                 {
                   id: 'configured-only',
+                  piApi: 'openai-completions',
                   reasoning: true,
                   reasoningEfforts: ['high'],
                 },
@@ -1220,27 +2178,77 @@ describe('buildPiNativeProvidersFromConfigs', () => {
       ],
       () => null,
     );
+    const chatDefaultCompat = { compat: { supportsDeveloperRole: false } };
     expect(providers[0].models).toEqual([
-      { id: 'vision', name: 'Vision', contextWindow: undefined, input: ['text', 'image'] },
-      { id: 'legacy', name: 'Legacy', contextWindow: undefined },
+      {
+        id: 'vision',
+        name: 'Vision',
+        contextWindow: undefined,
+        input: ['text', 'image'],
+        ...chatDefaultCompat,
+      },
+      { id: 'legacy', name: 'Legacy', contextWindow: undefined, ...chatDefaultCompat },
     ]);
   });
 
-  it('keeps an unedited preset per-model piApi correction in the native model spec', () => {
+  it.each([
+    ['anthropic-messages', 'anthropic-messages'],
+    ['openai-completions', 'openai-completions'],
+    ['openai-responses', 'openai-responses'],
+  ] as const)(
+    'uses the per-model %s override before the provider default',
+    (piApi, expectedApi) => {
+      const { providers } = buildPiNativeProvidersFromConfigs(
+        [
+          {
+            id: 'deepseek',
+            name: 'DeepSeek',
+            auth: { method: 'none' },
+            runtimes: {
+              pi: piRuntime({
+                wireProtocol: 'openai-chat',
+                models: [
+                  {
+                    id: 'deepseek-v4-pro',
+                    name: 'DeepSeek V4 Pro',
+                    piApi,
+                  },
+                ],
+              }),
+            },
+          },
+        ],
+        () => null,
+      );
+
+      expect(providers[0]?.api).toBe('openai-completions');
+      expect(providers[0]?.models[0]).toMatchObject({
+        id: 'deepseek-v4-pro',
+        api: expectedApi,
+      });
+    },
+  );
+
+  it('keeps a per-model endpoint paired with its protocol override', () => {
     const { providers } = buildPiNativeProvidersFromConfigs(
       [
         {
-          id: 'deepseek',
-          name: 'DeepSeek',
+          id: 'opencode-go',
+          name: 'OpenCode Go',
           auth: { method: 'none' },
           runtimes: {
             pi: piRuntime({
-              wireProtocol: 'openai-responses',
+              baseUrl: 'https://opencode.ai/zen/go/v1',
+              wireProtocol: 'openai-chat',
               models: [
                 {
-                  id: 'deepseek-v4-pro',
-                  name: 'DeepSeek V4 Pro',
-                  piApi: 'openai-responses',
+                  id: 'minimax-m3',
+                  name: 'MiniMax M3',
+                  piApi: 'anthropic-messages',
+                  route: {
+                    baseUrl: 'https://opencode.ai/zen/go',
+                    wireProtocol: 'anthropic-messages',
+                  },
                 },
               ],
             }),
@@ -1250,9 +2258,16 @@ describe('buildPiNativeProvidersFromConfigs', () => {
       () => null,
     );
 
-    expect(providers[0]?.models[0]).toMatchObject({
-      id: 'deepseek-v4-pro',
-      api: 'openai-responses',
+    expect(providers[0]).toMatchObject({
+      baseUrl: 'https://opencode.ai/zen/go/v1',
+      api: 'openai-completions',
+      models: [
+        {
+          id: 'minimax-m3',
+          api: 'anthropic-messages',
+          baseUrl: 'https://opencode.ai/zen/go',
+        },
+      ],
     });
   });
 
@@ -1260,7 +2275,7 @@ describe('buildPiNativeProvidersFromConfigs', () => {
     ['openai-chat', 'openai-completions'],
     ['anthropic-messages', 'anthropic-messages'],
   ] as const)(
-    'uses a saved explicit %s PI protocol after the dialog clears preset piApi',
+    'uses the saved %s provider default when the model inherits it',
     (wireProtocol, expectedApi) => {
       const { providers } = buildPiNativeProvidersFromConfigs(
         [
@@ -1370,6 +2385,8 @@ describe('buildPiNativeProvidersFromConfigs', () => {
         xhigh: null,
         max: 'max',
       },
+      // 显式声明能力但无同源元数据,Chat Completions 默认收敛 system role(#3832)。
+      compat: { supportsDeveloperRole: false },
     });
   });
 });

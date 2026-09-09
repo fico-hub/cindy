@@ -1,3 +1,8 @@
+import {
+  mergeDiscoveredRuntimeModels,
+  validModelMetadata,
+  type DiscoveredModel,
+} from '@cindy/model-providers';
 /**
  * custom-provider-store —— 用户自定义供应商**非凭证配置**的 localDb CRUD。
  *
@@ -48,6 +53,28 @@ const VALID_AGENTS: readonly AgentKind[] = ['claude-code', 'codex', 'pi'];
 const MAX_ID_LEN = 40;
 const MAX_NAME_LEN = 60;
 
+/**
+ * SQLite's INTEGER affinity still permits legacy text values in a non-STRICT
+ * table. Keep the write boundary numeric so a malformed stored timestamp cannot
+ * turn `updatedAt + 1` into NaN and poison the NOT NULL column.
+ */
+function nextUpdatedAt(now: number, stored: unknown): number {
+  const current = Number.isSafeInteger(now) ? now : Date.now();
+  const previous =
+    typeof stored === 'number'
+      ? stored
+      : typeof stored === 'string' && stored.trim().length > 0
+        ? Number(stored)
+        : Number.NaN;
+  if (!Number.isSafeInteger(previous)) return current;
+  // CAS contract: every successful write must produce a strictly different
+  // updated_at. When previous is at MAX_SAFE_INTEGER, incrementing is
+  // impossible; return current (a real timestamp) which is guaranteed to
+  // differ from the stale MAX_SAFE_INTEGER snapshot.
+  if (previous >= Number.MAX_SAFE_INTEGER) return current;
+  return Math.max(current, previous + 1);
+}
+
 /** 验证结果：ok 或带 code + message（供 handler 映射成 throwIpcError）。 */
 export type ValidationResult =
   { ok: true } | { ok: false; code: 'INVALID_PARAMS'; message: string };
@@ -56,22 +83,33 @@ function invalid(message: string): ValidationResult {
   return { ok: false, code: 'INVALID_PARAMS', message };
 }
 
+const CINDY_RUNTIME_REASONING_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+
 function isPiReasoningEffort(value: unknown): value is PiReasoningEffort {
   return typeof value === 'string' && (PI_REASONING_EFFORTS as readonly string[]).includes(value);
+}
+
+function isReasoningEffortForAgent(agent: string, value: unknown): boolean {
+  if (agent === 'pi') return isPiReasoningEffort(value);
+  return (
+    typeof value === 'string' &&
+    (CINDY_RUNTIME_REASONING_EFFORTS as readonly string[]).includes(value)
+  );
 }
 
 function isPiModelApi(value: unknown): value is PiModelApi {
   return typeof value === 'string' && (PI_MODEL_APIS as readonly string[]).includes(value);
 }
 
-function parseStoredPiReasoningCapability(
+function parseStoredReasoningCapability(
   agent: AgentKind,
   model: Record<string, unknown>,
 ): Partial<ProviderRuntimeModelConfig> {
-  if (agent !== 'pi' || model.reasoning !== true || !Array.isArray(model.reasoningEfforts)) {
+  if (model.reasoning === false) return { reasoning: false };
+  if (model.reasoning !== true || !Array.isArray(model.reasoningEfforts)) {
     return {};
   }
-  const efforts = model.reasoningEfforts.filter(isPiReasoningEffort);
+  const efforts = model.reasoningEfforts.filter((item) => isReasoningEffortForAgent(agent, item));
   if (
     efforts.length === 0 ||
     efforts.length !== model.reasoningEfforts.length ||
@@ -80,13 +118,13 @@ function parseStoredPiReasoningCapability(
     return {};
   }
   const defaultEffort =
-    isPiReasoningEffort(model.reasoningDefaultEffort) &&
-    efforts.includes(model.reasoningDefaultEffort)
-      ? model.reasoningDefaultEffort
+    isReasoningEffortForAgent(agent, model.reasoningDefaultEffort) &&
+    efforts.includes(model.reasoningDefaultEffort as string)
+      ? (model.reasoningDefaultEffort as ProviderRuntimeModelConfig['reasoningDefaultEffort'])
       : undefined;
   return {
     reasoning: true,
-    reasoningEfforts: efforts,
+    reasoningEfforts: efforts as NonNullable<ProviderRuntimeModelConfig['reasoningEfforts']>,
     ...(defaultEffort ? { reasoningDefaultEffort: defaultEffort } : {}),
   };
 }
@@ -98,10 +136,7 @@ function parseStoredModelRoute(
 ): ProviderRuntimeModelConfig['route'] | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const route = value as Record<string, unknown>;
-  if (
-    typeof route.baseUrl !== 'string' ||
-    !isAllowedWireProtocol(agent, route.wireProtocol)
-  ) {
+  if (typeof route.baseUrl !== 'string' || !isAllowedWireProtocol(agent, route.wireProtocol)) {
     return undefined;
   }
   try {
@@ -158,14 +193,15 @@ function allowedWireProtocols(agent: string): readonly ProviderWireProtocol[] {
     : ['openai-responses', 'openai-chat', 'anthropic-messages'];
 }
 
-function isAllowedWireProtocol(
-  agent: string,
-  value: unknown,
-): value is ProviderWireProtocol {
+function isAllowedWireProtocol(agent: string, value: unknown): value is ProviderWireProtocol {
   return (
-    typeof value === 'string' &&
-    allowedWireProtocols(agent).includes(value as ProviderWireProtocol)
+    typeof value === 'string' && allowedWireProtocols(agent).includes(value as ProviderWireProtocol)
   );
+}
+
+/** ProviderPreset.id is an opaque, non-empty string in the catalog contract. */
+function isCatalogPresetId(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0;
 }
 
 function validateRuntime(agent: string, rt: unknown): ValidationResult {
@@ -189,6 +225,12 @@ function validateRuntime(agent: string, rt: unknown): ValidationResult {
   if (r.requestPath !== undefined && !isProviderRequestPath(r.requestPath)) {
     return invalid(`runtime '${agent}' requestPath invalid`);
   }
+  if (r.supportsImageGeneration !== undefined && typeof r.supportsImageGeneration !== 'boolean') {
+    return invalid(`runtime '${agent}' supportsImageGeneration must be a boolean`);
+  }
+  if (r.supportsImageGeneration === true && agent !== 'codex') {
+    return invalid(`runtime '${agent}' supportsImageGeneration requires Codex`);
+  }
   if (!Array.isArray(r.models)) return invalid(`runtime '${agent}' models must be an array`);
   for (const m of r.models) {
     if (!m || typeof m !== 'object') return invalid(`runtime '${agent}' model must be an object`);
@@ -199,6 +241,8 @@ function validateRuntime(agent: string, rt: unknown): ValidationResult {
     if (typeof mm.name !== 'string' || mm.name.trim().length === 0) {
       return invalid(`runtime '${agent}' model.name required`);
     }
+    if (mm.discoveredMetadata !== undefined && !validModelMetadata(mm.discoveredMetadata))
+      return invalid(`runtime '${agent}' discoveredMetadata invalid`);
     if (
       mm.contextWindow !== undefined &&
       (typeof mm.contextWindow !== 'number' ||
@@ -241,21 +285,12 @@ function validateRuntime(agent: string, rt: unknown): ValidationResult {
       if (routeUrl.origin !== runtimeUrl.origin) {
         return invalid(`runtime '${agent}' model.route.baseUrl must use the runtime origin`);
       }
-      if (
-        !isAllowedWireProtocol(agent, route.wireProtocol)
-      ) {
+      if (!isAllowedWireProtocol(agent, route.wireProtocol)) {
         return invalid(`runtime '${agent}' model.route.wireProtocol invalid`);
       }
       if (route.requestPath !== undefined && !isProviderRequestPath(route.requestPath)) {
         return invalid(`runtime '${agent}' model.route.requestPath invalid`);
       }
-    }
-    const hasReasoningCapability =
-      mm.reasoning !== undefined ||
-      mm.reasoningEfforts !== undefined ||
-      mm.reasoningDefaultEffort !== undefined;
-    if (hasReasoningCapability && agent !== 'pi') {
-      return invalid(`runtime '${agent}' reasoning capability is only supported for pi models`);
     }
     if (mm.reasoning !== undefined && typeof mm.reasoning !== 'boolean') {
       return invalid(`runtime '${agent}' model.reasoning must be a boolean`);
@@ -265,14 +300,14 @@ function validateRuntime(agent: string, rt: unknown): ValidationResult {
         return invalid(`runtime '${agent}' model.reasoningEfforts must be a non-empty array`);
       }
       if (
-        mm.reasoningEfforts.some((effort) => !isPiReasoningEffort(effort)) ||
+        mm.reasoningEfforts.some((effort) => !isReasoningEffortForAgent(agent, effort)) ||
         new Set(mm.reasoningEfforts).size !== mm.reasoningEfforts.length
       ) {
         return invalid(`runtime '${agent}' model.reasoningEfforts invalid`);
       }
       if (
         mm.reasoningDefaultEffort !== undefined &&
-        (!isPiReasoningEffort(mm.reasoningDefaultEffort) ||
+        (!isReasoningEffortForAgent(agent, mm.reasoningDefaultEffort) ||
           !mm.reasoningEfforts.includes(mm.reasoningDefaultEffort))
       ) {
         return invalid(`runtime '${agent}' model.reasoningDefaultEffort invalid`);
@@ -281,12 +316,29 @@ function validateRuntime(agent: string, rt: unknown): ValidationResult {
       return invalid(`runtime '${agent}' reasoning metadata requires reasoning=true`);
     }
   }
+  if (agent === 'pi' && r.wireProtocol === undefined) {
+    return invalid("runtime 'pi' wireProtocol required");
+  }
   if (r.wireProtocol !== undefined) {
     // Pi 是多协议 harness；Codex 也具备 Responses / Chat / Anthropic bridge。
     // Claude Code 只接受原生 Anthropic Messages。
     if (!isAllowedWireProtocol(agent, r.wireProtocol)) {
       return invalid(`runtime '${agent}' wireProtocol invalid`);
     }
+  }
+  const defaultWireProtocol =
+    r.wireProtocol ?? (agent === 'codex' ? 'openai-responses' : undefined);
+  const hasResponsesRoute =
+    defaultWireProtocol === 'openai-responses' ||
+    r.models.some((model) => {
+      if (!model || typeof model !== 'object') return false;
+      const route = (model as Record<string, unknown>).route;
+      return route && typeof route === 'object' && !Array.isArray(route)
+        ? (route as Record<string, unknown>).wireProtocol === 'openai-responses'
+        : false;
+    });
+  if (r.supportsImageGeneration === true && !hasResponsesRoute) {
+    return invalid(`runtime '${agent}' supportsImageGeneration requires OpenAI Responses`);
   }
   if (r.headers !== undefined) {
     if (!r.headers || typeof r.headers !== 'object' || Array.isArray(r.headers)) {
@@ -307,10 +359,15 @@ function validateRuntime(agent: string, rt: unknown): ValidationResult {
       if (u.protocol !== 'http:' && u.protocol !== 'https:') {
         return invalid(`runtime '${agent}' modelsUrl must be http(s)`);
       }
+      if (u.username || u.password) {
+        return invalid(`runtime '${agent}' modelsUrl must not contain embedded credentials`);
+      }
     } catch {
       return invalid(`runtime '${agent}' modelsUrl is not a valid URL`);
     }
   }
+  if (r.catalogPresetId !== undefined && !isCatalogPresetId(r.catalogPresetId))
+    return invalid(`runtime '${agent}' catalogPresetId invalid`);
   if (
     r.piCatalogProviderId !== undefined &&
     (agent !== 'pi' ||
@@ -495,22 +552,24 @@ function normalizeRuntime(
     .map((m) => ({
       id: m.id.trim(),
       name: m.name.trim(),
+      ...(m.discoveredMetadata ? { discoveredMetadata: m.discoveredMetadata } : {}),
+      ...(m.nameExplicit === true ? { nameExplicit: true } : {}),
       ...(agent === 'pi' && m.piApi ? { piApi: m.piApi } : {}),
       ...(m.route
         ? {
             route: {
               baseUrl: m.route.baseUrl.trim(),
               wireProtocol: m.route.wireProtocol,
-              ...(m.route.requestPath?.trim()
-                ? { requestPath: m.route.requestPath.trim() }
-                : {}),
+              ...(m.route.requestPath?.trim() ? { requestPath: m.route.requestPath.trim() } : {}),
             },
           }
         : {}),
       ...(m.contextWindow !== undefined ? { contextWindow: m.contextWindow } : {}),
       ...(m.defaultEnabled === false ? { defaultEnabled: false } : {}),
-      ...(m.supportsImageInput === true ? { supportsImageInput: true } : {}),
-      ...(agent === 'pi' && m.reasoning === true && m.reasoningEfforts?.length
+      ...(typeof m.supportsImageInput === 'boolean'
+        ? { supportsImageInput: m.supportsImageInput }
+        : {}),
+      ...(m.reasoning === true && m.reasoningEfforts?.length
         ? {
             reasoning: true,
             reasoningEfforts: [...m.reasoningEfforts],
@@ -518,15 +577,25 @@ function normalizeRuntime(
               ? { reasoningDefaultEffort: m.reasoningDefaultEffort }
               : {}),
           }
-        : {}),
+        : m.reasoning === false
+          ? { reasoning: false }
+          : {}),
+      ...(m.thinkingToggle === true ? { thinkingToggle: true } : {}),
     }))
     .filter((m) => {
       if (!m.id || !m.name || seen.has(m.id)) return false;
       seen.add(m.id);
       return true;
     });
-  const out: CustomProviderRuntimeConfig = { baseUrl: rt.baseUrl.trim(), models };
+  const out: CustomProviderRuntimeConfig = {
+    baseUrl: rt.baseUrl.trim(),
+    models,
+    ...(rt.catalogPresetId ? { catalogPresetId: rt.catalogPresetId } : {}),
+  };
   if (rt.wireProtocol) out.wireProtocol = rt.wireProtocol;
+  if (agent === 'codex' && rt.supportsImageGeneration === true) {
+    out.supportsImageGeneration = true;
+  }
   if (agent !== 'pi' && rt.requestPath && rt.requestPath.trim()) {
     out.requestPath = rt.requestPath.trim();
   }
@@ -616,35 +685,17 @@ function invalidateEditedPiCatalogMarker(
 export function mergeDiscoveredModelsIntoConfig(
   config: CustomProviderConfig,
   agent: AgentKind,
-  discovered: { id: string; name: string; contextWindow?: number }[],
+  discovered: DiscoveredModel[],
 ): CustomProviderConfig | null {
   const rt = config.runtimes[agent];
   if (!rt) return null;
-  const existing = new Set(rt.models.map((m) => m.id));
-  const fresh = discovered.filter((m) => m.id && m.name && !existing.has(m.id));
-  if (fresh.length === 0) return null;
-  return {
-    ...config,
-    runtimes: {
-      ...config.runtimes,
-      [agent]: {
-        ...rt,
-        models: [
-          ...rt.models,
-          // 端点声明了上下文长度就随发现落盘,缺省则回落保守默认(#386)。
-          ...fresh.map((m) => ({
-            id: m.id,
-            name: m.name,
-            ...(typeof m.contextWindow === 'number' &&
-            Number.isFinite(m.contextWindow) &&
-            m.contextWindow > 0
-              ? { contextWindow: Math.floor(m.contextWindow) }
-              : {}),
-          })),
-        ],
-      },
-    },
-  };
+  const models = mergeDiscoveredRuntimeModels(rt.models, discovered);
+  return JSON.stringify(models) === JSON.stringify(rt.models)
+    ? null
+    : {
+        ...config,
+        runtimes: { ...config.runtimes, [agent]: { ...rt, models } },
+      };
 }
 
 /** 安全解析 auth 列 JSON（坏数据 / 结构不完整兜底为 undefined = API key 历史形态）。 */
@@ -663,6 +714,13 @@ function parseAuth(raw: string | null): CustomProviderConfig['auth'] {
   return undefined;
 }
 
+/**
+ * 计算写回的 `updatedAt`：既要严格大于库里的旧值（`updateCustomProviderIfUnchanged` 依赖它
+ * 做乐观锁），也要不早于当前时刻。
+ *
+ * 必须先转数值再 +1：`updated_at` 列声明为 INTEGER，但 SQLite 非 STRICT 表允许存入文本，
+ * 而 `rowToConfig` 只读 id/name/runtimes/auth、不校验该列。一旦某行存的是字符串，
+ * `existing.updatedAt + 1` 会退化成字符串拼接，`Math.max` 得到 NaN，写入 NOT NULL 整数列
 /** 安全解析 runtimes JSON（坏数据兜底为 {}，逐字段防御）。 */
 function parseRuntimes(raw: string): Partial<Record<AgentKind, CustomProviderRuntimeConfig>> {
   let v: unknown;
@@ -692,18 +750,26 @@ function parseRuntimes(raw: string): Partial<Record<AgentKind, CustomProviderRun
               name: String(m.name ?? ''),
               ...(agent === 'pi' && isPiModelApi(m.piApi) ? { piApi: m.piApi } : {}),
               ...(route ? { route } : {}),
+              ...(validModelMetadata(m.discoveredMetadata)
+                ? { discoveredMetadata: m.discoveredMetadata }
+                : {}),
+              ...(m.nameExplicit === true ? { nameExplicit: true } : {}),
               ...(typeof m.contextWindow === 'number' &&
               Number.isFinite(m.contextWindow) &&
               m.contextWindow > 0
                 ? { contextWindow: m.contextWindow }
                 : {}),
               ...(m.defaultEnabled === false ? { defaultEnabled: false } : {}),
-              ...(m.supportsImageInput === true ? { supportsImageInput: true } : {}),
-              ...parseStoredPiReasoningCapability(agent, m),
+              ...(typeof m.supportsImageInput === 'boolean'
+                ? { supportsImageInput: m.supportsImageInput }
+                : {}),
+              ...parseStoredReasoningCapability(agent, m),
+              ...(m.thinkingToggle === true ? { thinkingToggle: true } : {}),
             };
           })
       : [];
     const entry: CustomProviderRuntimeConfig = {
+      ...(isCatalogPresetId(r.catalogPresetId) ? { catalogPresetId: r.catalogPresetId } : {}),
       baseUrl,
       models,
     };
@@ -714,6 +780,13 @@ function parseRuntimes(raw: string): Partial<Record<AgentKind, CustomProviderRun
         r.wireProtocol === 'openai-chat')
     ) {
       entry.wireProtocol = r.wireProtocol;
+    } else if (agent === 'pi' && r.wireProtocol === undefined) {
+      // 旧版把 Pi 的缺省协议解释为 Chat。新写入口已要求显式 wireProtocol；仅在读取
+      // 历史持久化记录时把旧语义物化，避免运行时重新猜测或按供应商穷举兼容。
+      entry.wireProtocol = 'openai-chat';
+    }
+    if (agent === 'codex' && r.supportsImageGeneration === true) {
+      entry.supportsImageGeneration = true;
     }
     if (agent !== 'pi' && isProviderRequestPath(r.requestPath)) {
       entry.requestPath = r.requestPath;
@@ -816,7 +889,7 @@ export async function updateCustomProvider(
       name: c.name,
       runtimes: JSON.stringify(c.runtimes),
       auth: c.auth ? JSON.stringify(c.auth) : null,
-      updatedAt: Math.max(now, existing.updatedAt + 1),
+      updatedAt: nextUpdatedAt(now, existing.updatedAt),
     })
     .where(eq(customProviders.id, id));
   return c;
@@ -854,7 +927,7 @@ export async function updateCustomProviderIfUnchanged(
       name: nextConfig.name,
       runtimes: JSON.stringify(nextConfig.runtimes),
       auth: nextConfig.auth ? JSON.stringify(nextConfig.auth) : null,
-      updatedAt: Math.max(now, existing.updatedAt + 1),
+      updatedAt: nextUpdatedAt(now, existing.updatedAt),
     })
     .where(and(eq(customProviders.id, id), eq(customProviders.updatedAt, existing.updatedAt)));
   return result.changes === 1;

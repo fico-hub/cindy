@@ -15,6 +15,7 @@ export * from './interfaces/index.js';
 
 // agents
 export * from './agents/index.js';
+export * from './agents/pi/managed-command.js';
 export { evaluatePiProjectTrust, piProjectKey } from './agents/pi/project-trust.js';
 export {
   assertReviewMessageContentPaths,
@@ -62,6 +63,8 @@ export {
   MemoryStorage,
   sanitizeWorkdir,
   buildMemoryScopeKey,
+  buildBotMemoryScopeKey,
+  parseBotMemoryScopeKey,
   memoryScopeDirName,
   buildFilename,
   parseFilename,
@@ -82,6 +85,7 @@ export {
   type SetEnabledResult,
   type SqliteFactory,
 } from './memory/manager.js';
+export { isBotMcpServerAllowed } from './agents/shared/bot-runtime-policy.js';
 export {
   MemoryFlushController,
   DEFAULT_FLUSH_THRESHOLDS,
