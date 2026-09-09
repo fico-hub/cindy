@@ -136,6 +136,12 @@ export function registerScheduleUpdateTool(
             input = { ...input, [key]: undefined };
           }
         }
+        const clearsWorkingDir = (patch as { workingDir?: string | null }).workingDir === null;
+        if (clearsWorkingDir) {
+          // 清目录 = 回到对话工作区语义(与 create 缺省目录时的推断、引擎「给了真实
+          // 目录翻成 project」对称),否则 workspaceKind 仍是 project 却无目录。
+          input = { ...input, workspaceKind: 'dialogue' };
+        }
         // 无条件校验本次 patch 显式带的 cronExpr / timezone(函数对缺省字段是
         // no-op)。不能只在 patch 带 intervalMs 数值时校验:任务已有 intervalMs、
         // patch 只改 cronExpr 时,真 partial 语义保留原 interval,引擎按
@@ -154,6 +160,17 @@ export function registerScheduleUpdateTool(
           input = { ...input, targetSessionId: sessionId };
         }
         return scheduler.updateFromCurrent(id, async (existing) => {
+          // worktree 模式以 workingDir 为基仓(workdir-resolver 会拒绝无目录的 worktree
+          // 任务,每次 fire 都失败)。清目录时若任务仍开着 useWorktree 且本次没关,
+          // 明确拒绝而不是写出一条跑不动的任务(codex review)。
+          const nextUseWorktree = Object.prototype.hasOwnProperty.call(input, 'useWorktree')
+            ? input.useWorktree
+            : existing.useWorktree;
+          if (clearsWorkingDir && nextUseWorktree) {
+            throw new Error(
+              'invalid request: workingDir 传 null 清空时任务仍开启 useWorktree(worktree 需要 workingDir 作为基仓);请同时传 useWorktree:false,或改传新的 workingDir',
+            );
+          }
           // preRunHook.timeoutMs 的真 partial 表达:只改 command 时沿用任务现有超时
           // (此前整对象替换会把省略的 timeoutMs 静默清成"不限时");传 null 才显式清除。
           // null 在进入引擎前剥掉 —— 引擎/storage 只认 number | undefined。

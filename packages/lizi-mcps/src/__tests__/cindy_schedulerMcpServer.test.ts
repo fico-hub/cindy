@@ -1134,6 +1134,28 @@ describe('schedule_update — partial 语义的 JSON 边界翻译', () => {
     expect(updated.patch?.agentKind).toBe('claude-code');
   });
 
+  it('workingDir: null 且任务仍开 useWorktree → 拒绝;同时关 useWorktree → 清目录并回到 dialogue', async () => {
+    // worktree 需要 workingDir 作为基仓,只清目录会留下一条每次 fire 都失败的任务(codex review)
+    const { updated, registry } = setup({ workingDir: '/repo', useWorktree: true });
+    const rejected = await callUpdate(registry, { workingDir: null });
+    expect(rejected.ok).toBe(false);
+    expect(updated.patch).toBeUndefined();
+
+    const ok = await callUpdate(registry, { workingDir: null, useWorktree: false });
+    expect(ok.ok).toBe(true);
+    expect(Object.prototype.hasOwnProperty.call(updated.patch ?? {}, 'workingDir')).toBe(true);
+    expect(updated.patch?.workingDir).toBeUndefined();
+    expect(updated.patch?.useWorktree).toBe(false);
+    expect(updated.patch?.workspaceKind).toBe('dialogue');
+
+    // 任务本来没开 worktree → 直接清
+    const plain = setup({ workingDir: '/repo', useWorktree: false });
+    const env = await callUpdate(plain.registry, { workingDir: null });
+    expect(env.ok).toBe(true);
+    expect(plain.updated.patch?.workingDir).toBeUndefined();
+    expect(plain.updated.patch?.workspaceKind).toBe('dialogue');
+  });
+
   it('省略 model / providerId → patch 不带 key(真 partial);非法 effort 仍被拒', async () => {
     const { updated, registry } = setup({ model: 'gpt-6-astra', providerId: 'openai' });
     const env = await callUpdate(registry, { prompt: 'only prompt' });
