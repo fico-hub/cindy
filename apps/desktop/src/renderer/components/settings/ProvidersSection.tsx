@@ -2446,6 +2446,7 @@ export function ProvidersSection() {
   const handleDelete = useCallback(
     async (p: ProviderView) => {
       const ok = await confirm({
+        presentation: 'standard',
         title: t('settings.providers.custom.deleteConfirm.title'),
         description: t('settings.providers.custom.deleteConfirm.description', { name: p.name }),
         confirmText: t('settings.providers.custom.deleteConfirm.confirm'),
@@ -2517,8 +2518,8 @@ export function ProvidersSection() {
           toast.error(t('settings.providers.models.refreshFailed'));
           return;
         }
+        await updateCustomProvider(config, {});
         if (added > 0) {
-          await updateCustomProvider(config, {});
           toast.success(t('settings.providers.models.refreshAdded', { count: added }));
         } else {
           toast.success(t('settings.providers.models.refreshNoNew'));

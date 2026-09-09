@@ -3956,6 +3956,64 @@ describe("Pi provider-aware model routing", () => {
     await handle.close();
   });
 
+  it.each([
+    { input: ["text", "image"] as Array<"text" | "image">, supported: true },
+    { input: ["text"] as Array<"text" | "image">, supported: false },
+    { input: undefined, supported: false },
+  ])("uses the native ChatGPT image snapshot for models.json, send and steer: $input", async ({ input, supported }) => {
+    const modelId = "chatgpt/gpt-5.6-sol";
+    const agent = new PiAgent(byomDeps(async () => ({
+      providers: [{
+        id: "openai-codex", sourceProviderId: "openai", name: "ChatGPT",
+        baseUrl: "http://127.0.0.1:9", inheritModels: true,
+        models: [{
+          id: modelId, wireId: "gpt-5.6-sol", api: "openai-codex-responses", input,
+        }],
+      }],
+      env: {},
+    }), [{
+      id: modelId, displayName: "Same-id gateway model", contextWindow: 272_000,
+      efforts: [], defaultEffort: null, supportsImageInput: !supported,
+    }]));
+    const handle = await agent.startSession({
+      sessionId: "chatgpt-images", workingDir: cwd, model: modelId, providerId: "openai",
+    });
+    try {
+      const config = JSON.parse(readFileSync(
+        path.join(captured.env.PI_CODING_AGENT_DIR as string, "models.json"), "utf8",
+      ));
+      expect(config.providers["openai-codex"].models).toEqual([
+        expect.objectContaining({
+          id: "gpt-5.6-sol", api: "openai-codex-responses", input: input ?? ["text"],
+        }),
+      ]);
+      const data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+      const imagePath = path.join(cwd, "image.png");
+      writeFileSync(imagePath, Buffer.from(data, "base64"));
+      const image = { type: "image" as const, path: imagePath };
+      for (const content of [[image], [{ type: "text" as const, text: "describe" }, image], [image, image]]) {
+        for (const method of ["send", "steer"] as const) {
+          captured.requests.length = 0;
+          const sent = handle[method]!({ type: "user", content });
+          if (supported) {
+            await sent;
+            expect(captured.requests).toContainEqual(expect.objectContaining({
+              type: method === "send" ? "prompt" : "steer",
+              images: content.filter((part) => part.type === "image").map(() => ({
+                type: "image", mimeType: "image/png", data,
+              })),
+            }));
+          } else {
+            await expect(sent).rejects.toMatchObject({ code: "PI_IMAGE_INPUT_UNSUPPORTED" });
+            expect(captured.requests).toHaveLength(0);
+          }
+        }
+      }
+    } finally {
+      await handle.close();
+    }
+  });
+
   it("guards image prompts by the startup provider-model capability and follows model switches", async () => {
     const gatewayModels: ModelDescriptor[] = [
       {
@@ -5441,13 +5499,22 @@ describe("Pi provider-aware model routing", () => {
       killRemoteSession: async () => {},
     };
     const capturedRemoteEnvs: Array<Record<string, string | undefined>> = [];
+    let globalRules: string | undefined = 'remote global v1';
+    const contextWrites: Array<[string, string]> = [];
     const remoteFileOps = {
       mkdirp: async () => {},
-      writeFile: async () => {},
-      stat: async () => ({ isFile: true }),
+      writeFile: async (file: string, content: string) => {
+        if (file.endsWith('/AGENTS.md')) contextWrites.push([file, content]);
+      },
+      stat: async (file: string) => file.startsWith('$HOME/.pi/agent/')
+        ? { isFile: file.endsWith('/AGENTS.md') && globalRules !== undefined }
+        : { isFile: true },
       rm: async () => {},
       listDir: async () => [],
-      readFile: async () => { throw new Error("Unexpected remote file read in empty directory fixture"); },
+      readFile: async (file: string) => {
+        expect(file).toBe('$HOME/.pi/agent/AGENTS.md');
+        return globalRules!;
+      },
       sha256File: async () => { throw new Error("Unexpected remote file hash in empty directory fixture"); },
     };
     const startRemote = async (permissionMode: "ask" | "bypassPermissions") => {
@@ -5464,6 +5531,10 @@ describe("Pi provider-aware model routing", () => {
           return remoteStub;
         },
         getRemotePiFileOps: () => remoteFileOps,
+        resolvePiGlobalContextHome: (hostId) => {
+          expect(hostId).toBe('remote-host');
+          return '$HOME/.pi/agent';
+        },
       });
       const handle = await agent.startSession({
         sessionId: "remote-perm-hash",
@@ -5496,6 +5567,19 @@ describe("Pi provider-aware model routing", () => {
     expect(capturedRemoteEnvs[1]!.CINDY_PI_PERMISSION_FILE).toContain(
       capturedRemoteEnvs[1]!.CINDY_PI_PERMISSION_HASH,
     );
+    const originalHome = capturedRemoteEnvs[1]!.PI_CODING_AGENT_DIR;
+    await startRemote('bypassPermissions');
+    expect(capturedRemoteEnvs[2]!.PI_CODING_AGENT_DIR).toBe(originalHome);
+    globalRules = 'remote global v2';
+    await startRemote('bypassPermissions');
+    expect(capturedRemoteEnvs[3]!.PI_CODING_AGENT_DIR).not.toBe(originalHome);
+    expect(contextWrites.at(-1)).toEqual([
+      path.posix.join(capturedRemoteEnvs[3]!.PI_CODING_AGENT_DIR!, 'AGENTS.md'), 'remote global v2',
+    ]);
+    globalRules = undefined;
+    await startRemote('bypassPermissions');
+    expect(capturedRemoteEnvs[4]!.PI_CODING_AGENT_DIR).not.toBe(capturedRemoteEnvs[3]!.PI_CODING_AGENT_DIR);
+    expect(contextWrites).toHaveLength(4);
   });
 
   it("puts a deterministic Cindy extension bundle hash into remote spawn env", async () => {

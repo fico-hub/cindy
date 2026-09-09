@@ -93,7 +93,7 @@ describe('Bot conversation read position', () => {
 
     const view = render(<BotSessionView />);
 
-    // DOM commit can precede the passive effect that advances the read position.
+    // Rendering the divider can precede the passive effect that advances the read position.
     await waitFor(() => {
       expect(view.getByTestId('chat').dataset.unreadBoundary).toBe('5000');
       expect(getBotLastReadAt('bot-1')).toBe(10_000);

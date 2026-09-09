@@ -1,3 +1,4 @@
+import { readDisabledSkillPaths } from '../skillhub/activationPreferences';
 /**
  * pi agent 的 desktop host 装配 —— auth / runtimeConfig / 二进制解析 / 构造,
  * 集中在本模块,maker-host/index.ts 只做一次 buildPiAgent() 调用。
@@ -24,6 +25,7 @@ import path from 'node:path';
 import { app } from 'electron';
 
 import { readModelContextLimit } from './model-context-limit-store.js';
+import { toolchainThreadCapEnv } from './toolchain-thread-cap.js';
 
 import {
   PiAgent,
@@ -106,7 +108,7 @@ import {
   resolveBundledPiGatewayModelProfile,
 } from './pi-gateway-model-catalog.js';
 import { isExclusiveXaiModelId } from '../../shared/subscriptionModels.js';
-import { resolvePiRuntimeModelDescriptor } from './catalog-to-descriptors.js';
+import { resolvePiRuntimeModelDescriptor, resolveModelDefaultContextWindow, resolveModelContextProviderId } from './catalog-to-descriptors.js';
 import {
   resolveManagedPiNativePackagePaths,
   resolveManagedPiPackageResources,
@@ -649,6 +651,13 @@ export function buildPiSubscriptionNativeProviders(
           listedModelIdsByProvider?.get(piProviderId)
           ?? listedPiModelIds(bundledModelsByProvider)?.get(piProviderId);
         const officialOpenAi = officialOpenAiById.get(wireId);
+        // Catalog overrides (including false) keep the same authority when the
+        // runtime probe is unavailable and we fall back to the shipped Pi catalog.
+        const openAiInputOverride = model.supportsImageInput === undefined
+          ? undefined
+          : model.supportsImageInput
+            ? ['text', 'image'] as Array<'text' | 'image'>
+            : ['text'] as Array<'text' | 'image'>;
         if (sourceProviderId === 'openai' && !bundledModel && !listedIds?.has(wireId)
           && officialOpenAi?.api === 'openai-codex-responses') {
           return {
@@ -656,6 +665,7 @@ export function buildPiSubscriptionNativeProviders(
             id: model.id,
             wireId,
             catalogAddition: true,
+            ...(openAiInputOverride ? { input: openAiInputOverride } : {}),
           };
         }
         const isKnownMissingXaiModel =
@@ -688,11 +698,6 @@ export function buildPiSubscriptionNativeProviders(
         const isRegistryBaselineOverlay = sourceProviderId === 'openai' && !!bundledModel;
         const catalogCost = catalogCostForPiNative(model.cost);
         if (isRegistryBaselineOverlay) {
-          const input = model.supportsImageInput === undefined
-            ? [...bundledModel.input]
-            : model.supportsImageInput
-              ? ['text', 'image'] as Array<'text' | 'image'>
-              : ['text'] as Array<'text' | 'image'>;
           const cost = catalogCost ?? bundledModel.cost;
           return {
             id: model.id,
@@ -705,7 +710,7 @@ export function buildPiSubscriptionNativeProviders(
             contextWindow: model.contextWindow,
             maxTokens: model.maxOutput ?? bundledModel.maxTokens,
             reasoning: model.efforts.length > 0,
-            input,
+            input: [...(openAiInputOverride ?? bundledModel.input)],
             thinkingLevelMap: catalogThinkingLevelMap(
               model.efforts,
               bundledModel.thinkingLevelMap,
@@ -755,9 +760,7 @@ export function buildPiSubscriptionNativeProviders(
                 ? { api: capabilityCorrection.api }
                 : {}),
           name: isContextProfileAddition ? model.name : (preserved?.name ?? model.name),
-          contextWindow: isContextProfileAddition
-            ? model.contextWindow
-            : (preserved?.contextWindow ?? model.contextWindow),
+          contextWindow: model.contextWindow,
           ...(preserved?.maxTokens
             ? { maxTokens: preserved.maxTokens }
             : model.maxOutput
@@ -907,6 +910,7 @@ export function composePiSystemPrompt(hostPrompt: string, agentPrompt: string): 
 function buildDesktopPiRuntimeConfig(): AgentRuntimeConfig {
   const ripgrepPath = getRipgrepBinaryPath();
   const config: AgentRuntimeConfig = {
+    behaviorFlags: (ctx) => ctx.spawnMode === 'remote' ? {} : toolchainThreadCapEnv(),
     // 保留 host 共用身份段,再追加 Pi 专属行为段；maker-core 会整体追加到 Pi 原生 prompt。
     systemPrompt: composePiSystemPrompt(hostSystemPrompt, piSystemPrompt),
     // Pi 的 grep 以及 Cindy 覆盖的 find 都固定复用随 Desktop 校验、打包的 rg。
@@ -1824,11 +1828,16 @@ export function buildPiAgent(opts: BuildPiAgentOpts): PiAgent | null {
   }
   log.info('pi agent enabled', { binaryPath });
   return new PiAgent({
-    resolveModelContextLimit: (providerId, modelId) => providerId
-      ? readModelContextLimit('pi', providerId, modelId) : null,
+    getDisabledSkillPaths: readDisabledSkillPaths,
+    resolveModelContextLimit: (providerId, modelId) => {
+      const catalog = getActiveCatalog();
+      const source = resolveModelContextProviderId(catalog, 'pi', providerId, modelId);
+      return source ? readModelContextLimit('pi', source, modelId)
+        ?? resolveModelDefaultContextWindow(catalog, 'pi', source, modelId) : null;
+    },
     auth: desktopPiAuthAdapter,
     runtimeConfig: buildDesktopPiRuntimeConfig(),
-    binaryPath,
+    get binaryPath() { return resolvePiBinaryPath() ?? binaryPath; },
     logger: opts.logger,
     turnChangeCapture: opts.turnChangeCapture,
     registerLocalAgentProcess: opts.registerLocalAgentProcess,
@@ -1850,6 +1859,13 @@ export function buildPiAgent(opts: BuildPiAgentOpts): PiAgent | null {
       // 一致。run-tmp 等短生命周期内容仍走 agentHome/run-tmp。
       if (remoteHostId) return '$HOME/.xdt-server/v1/pi-agent-home';
       return path.join(app.getPath('userData'), 'pi-agent-home');
+    },
+    resolvePiGlobalContextHome: (remoteHostId) => {
+      if (remoteHostId) return '$HOME/.pi/agent';
+      const override = process.env.PI_CODING_AGENT_DIR;
+      return override
+        ? path.resolve(override.replace(/^~(?=$|[\\/])/, () => os.homedir()))
+        : path.join(os.homedir(), '.pi', 'agent');
     },
     resolvePiManagedPackageResources: resolveManagedPiPackageResources,
     resolvePiNativePackagePaths: resolveManagedPiNativePackagePaths,
@@ -1873,7 +1889,8 @@ export function buildPiAgent(opts: BuildPiAgentOpts): PiAgent | null {
         'native-command-failed': t('settings.piPackages.failure.nativeCommandFailed'),
       },
       mutationSuccess: {
-        install: t('settings.piPackages.success.installEnabled'),
+        install: t('settings.piPackages.success.install'),
+        installEnabled: t('settings.piPackages.success.installEnabled'),
         update: t('settings.piPackages.success.update'),
         remove: t('settings.piPackages.success.remove'),
       },

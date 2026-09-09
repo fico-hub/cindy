@@ -1,3 +1,4 @@
+import { readDisabledSkillPaths } from '../skillhub/activationPreferences';
 /**
  * apps/desktop/src/main/maker-host
  *
@@ -9,6 +10,7 @@
  */
 
 import { createMediaDownloadContext } from '../cindy-media/mediaDownloadApproval.js';
+import { acquireWorktreeRuntimeLease, releaseWorktreeRuntimeLease, type WorktreeRuntimeLease } from '../worktree/runtimeLeases';
 import { readCodexContextWindowInfo } from './codex-context-window.js';
 import { app, BrowserWindow } from 'electron';
 import { createHash } from 'node:crypto';
@@ -21,6 +23,7 @@ import {
   ClaudeCodeAgent,
   CodexAgent,
   configureDefaultImageResizer,
+  type AgentKind,
   type McpProvider,
 } from '@cindy/maker-core';
 import type { ProviderView } from '@cindy/model-providers';
@@ -55,6 +58,8 @@ import {
   type BotProfileRuntimeSnapshot,
 } from '../maker-ipc/botProfileRuntime.js';
 import { collectBotOwnSkillMounts } from '../maker-ipc/botSkillService.js';
+import { buildBotMcpCatalog } from './botMcpCatalog.js';
+import { createBotCapabilityService, type BotCapabilityServiceDeps, type BotCapabilityUpdate } from '../maker-ipc/botCapabilityService.js';
 import {
   botProfileDir,
   ensureBotContentDirs,
@@ -104,7 +109,7 @@ import {
 import { createToolResultImageDescriptor } from '../vision-bridge/tool-result-image-descriptor.js';
 import * as blobStore from '../cindy-media/blobStore.js';
 import { buildPiVisionBridgeEnv } from '../vision-bridge/pi-vision-bridge-env.js';
-import { inferProviderIdForModel, resolveVisionBackendRoute, setVisionGatewayKeyReader } from './provider-route.js';
+import { resolveVisionBackendRoute, setVisionGatewayKeyReader } from './provider-route.js';
 import { resolveSessionCcDebugFile } from '../logger.js';
 import { resetProviderModelAutoRefreshCooldowns } from './provider-model-auto-refresh.js';
 import { getThinkingEnabledFromMemory } from './newMakerDefaultsCache.js';
@@ -141,6 +146,7 @@ import {
   resolveModelDefaultContextWindow,
 } from './catalog-to-descriptors.js';
 import { readModelContextLimit } from './model-context-limit-store.js';
+import { resolveDesktopModelContextProviderId } from './model-context-settings.js';
 import {
   prepareCodexCustomContextCatalog,
 } from './codex-custom-context-catalog.js';
@@ -235,6 +241,8 @@ import {
 import { cleanupComputerDriverSession } from '../mcp-integrations/computer.js';
 import { createPluginRegistry, resetPluginRegistry } from './plugins/index.js';
 import {
+  withCodexMcpDiscoveryContext,
+  getActiveCodexBridgeInstanceId,
   getActiveCodexBridgeServerNames,
   getCodexExtraSpawnConfig,
   registerCodexMcpThreadContext,
@@ -243,14 +251,16 @@ import {
 } from '../mcp-integrations/codexEnvironment.js';
 import type { CodexHttpBridge } from '../mcp-integrations/codexHttpBridge.js';
 import { setRemoteMcpBridgeTokenRotatedHook } from '../mcp-integrations/remoteMcpBridgeToken.js';
-import { isBotToolsetAvailableOnTarget } from '../../shared/botRemoteCapabilities.js';
+import type { BotToolsetContext } from '../../shared/botRemoteCapabilities.js';
+import { isBotToolsetProviderAvailable } from './botToolsetAvailability.js';
 import {
   ensureRemoteMcpForward,
+  buildRemoteCodexSessionMcpConfig,
   setRemoteMcpForwardRearmedHook,
   stripRemoteCodexMcpConfig,
 } from '../remote-ssh/codex-remote-mcp.js';
 import {
-  buildCcRemoteHttpMcpServers,
+  prepareCcRemoteQueryMcp,
   CC_MCP_DISABLED_FINGERPRINT,
   readCcAppliedFingerprint,
   writeCcAppliedFingerprint,
@@ -304,7 +314,11 @@ import {
   rehydrateCloseSuppression,
   withRehydrateCloseSuppressed,
 } from './rehydrateCloseSuppression.js';
-import { getSessionProvider, hydrateSessionProvider } from './session-provider-store.js';
+import {
+  freezeSessionProviderAtStart,
+  getSessionProvider,
+  hydrateSessionProvider,
+} from './session-provider-store.js';
 import { prepareLocalCodexCredentialModeSwitch } from './codex-credential-switch.js';
 import { createDesktopOrcaTeamStoreAdapter } from './orcaTeamStoreAdapter.js';
 import { broadcastOrcaWorkerChanged } from './orcaWorkerBroadcast.js';
@@ -332,6 +346,8 @@ type RemoteCcQuery = Awaited<
 let _maker: Maker | null = null;
 /** Prepared Bot runtime records waiting for the matching Maker startup result. */
 const pendingBotRuntimeSnapshots = new Map<string, BotProfileRuntimeSnapshot>();
+// Maker copies start options for every runtime, including rebuilds of one task.
+const worktreeRuntimeLeases = new WeakMap<object, WorktreeRuntimeLease>();
 let botRuntimeResourcePreflight:
   | ((opts: MakerSessionCreateOpts) => Promise<BotProfileRuntimeSnapshot | null>)
   | null = null;
@@ -340,6 +356,12 @@ let _registerPiAgent: (() => boolean) | null = null;
 let _visionBridgeInstance: ReturnType<typeof createVisionBridge> | null = null;
 
 let providerAccessRuntimeRefreshListener: (() => void) | null = null;
+let modelContextRuntimeRefreshListener: (() => void) | null = null;
+
+/** Reconcile active tasks after a catalog working-default update. */
+export function setModelContextRuntimeRefreshListener(listener: (() => void) | null): void {
+  modelContextRuntimeRefreshListener = listener;
+}
 
 /** Register the bootstrap-owned runtime reconciliation that follows provider access changes. */
 export function setProviderAccessRuntimeRefreshListener(listener: (() => void) | null): void {
@@ -392,6 +414,7 @@ function refreshSelectableModelsAndBroadcast(payload: Record<string, unknown>): 
 setActiveCatalogChangedListener((revision) => {
   try {
     refreshSelectableModelsAndBroadcast({ revision });
+    modelContextRuntimeRefreshListener?.();
   } catch (error) {
     desktopMakerLogger.warn('active catalog capabilities refresh failed', {
       revision,
@@ -464,10 +487,10 @@ export function refreshProviderAccessAfterAuthChange(): void {
  */
 let _codexAgent: CodexAgent | null = null;
 /**
- * codexMcpProviders 的模块级引用 —— 供 ensureCodexMcpBridgeStartedForRemote()
- * 在远端 daemon MCP 注入链路里懒启动 bridge 时取用。getMaker() 构造后回填。
+ * Actual provider array references, shared by runtime catalogs and the lazy Codex bridge.
+ * Custom MCP refresh mutates these arrays in place; resetMaker drops every reference.
  */
-let _codexMcpProviders: McpProvider[] | null = null;
+let _mcpProviders: Partial<Record<AgentKind, McpProvider[]>> = {};
 /**
  * 本进程已对哪些 cc session 做过 bridge MCP 的强制 fresh start。bridge 是
  * 进程内存态, 随 app 重启清空 — 重启后首轮注入重新强制 fresh; SSH 断线
@@ -512,6 +535,16 @@ let _codexCredentialChangeGuard: CodexLocalCredentialChangeGuard | null = null;
 let _beforeLocalCodexSessionStartHook: (() => Promise<void>) | null = null;
 export function setBeforeLocalCodexSessionStartHook(hook: (() => Promise<void>) | null): void {
   _beforeLocalCodexSessionStartHook = hook;
+}
+
+// Process-lifetime IPC binding: its reconciler reads the dynamic Maker facade and
+// clears owner-scoped bookkeeping by epoch. Keep it across resetMaker; IPC is not
+// registered again after an account switch. MCP factories bind before it is ready.
+let _resolveBotCapabilityAgentKind: BotCapabilityServiceDeps['resolveBotAgentKind'] | null = null;
+export function setBotCapabilityAgentKindResolver(
+  resolver: BotCapabilityServiceDeps['resolveBotAgentKind'] | null,
+): void {
+  _resolveBotCapabilityAgentKind = resolver;
 }
 
 /**
@@ -613,10 +646,10 @@ export async function ensureCodexMcpBridgeStartedForRemote(): Promise<{
   bridgeInstanceId: string;
   bridge: CodexHttpBridge;
 } | null> {
-  if (!_codexMcpProviders) return null;
+  if (!_mcpProviders.codex) return null;
   try {
     const cfg = await getCodexExtraSpawnConfig({
-      mcpProviders: _codexMcpProviders,
+      mcpProviders: _mcpProviders.codex,
       logger: desktopMakerLogger,
     });
     if (!cfg.bridge) return null;
@@ -714,6 +747,35 @@ function getLspPool(): LspServerPool {
     logger: desktopMakerLogger.child('lsp-pool'),
   });
   return lspPool;
+}
+
+/** Same Desktop provider instances used by the runtimes, evaluated for this Bot. */
+export function isBotToolsetAvailable(input: BotToolsetContext & { toolsetId: string }): boolean {
+  return isBotToolsetProviderAvailable(_mcpProviders.codex ?? [], input);
+}
+
+/** Shared by Bot tools, settings and hydration; never infer registration from raw DB rows. */
+export async function listBotRuntimeMcpServers({ agentKind, remoteHostId }: { agentKind: AgentKind; remoteHostId?: string }) {
+  return buildBotMcpCatalog({
+    agentKind,
+    remoteHostId,
+    providers: _mcpProviders[agentKind] ?? [],
+    builtinNames: getBuiltinMcpServerNames(),
+    customServers: await listCustomMcpRuntimeGenerations(),
+  });
+}
+
+function createDesktopBotCapabilityService() {
+  return createBotCapabilityService({
+    getMaker, getPluginRegistry, isBotToolsetAvailable,
+    listMcpServers: listBotRuntimeMcpServers,
+    resolveBotAgentKind: async (sessionId, chain) => _resolveBotCapabilityAgentKind?.(sessionId, chain) ?? null,
+  });
+}
+
+/** Settings IPC reuses the model-side catalog at its save boundary. */
+export async function validateBotCapabilityAdditions(update: BotCapabilityUpdate): Promise<void> {
+  await createDesktopBotCapabilityService().validateAdditions(update);
 }
 
 /** Get the plugin registry singleton (delegates to plugins/index.ts module-level cache). */
@@ -833,6 +895,7 @@ export function getMaker(): Maker {
     };
 
     const makerMemoryProviderDeps = {
+      botCapabilities: createDesktopBotCapabilityService(),
       createMediaDownloadContext: (sessionId: string, sessionInstanceId: string) => {
         const session = _maker?.getSession(sessionId);
         if (!session || session.instanceId !== sessionInstanceId) return undefined;
@@ -998,6 +1061,7 @@ export function getMaker(): Maker {
       ...createDesktopMcpProviders(makerMemoryProviderDeps),
       orcaWorkerBridgeProvider,
     ];
+    _mcpProviders['claude-code'] = claudeMcpProviders;
     // agent Bash 命令的全局并发闸门(跨所有本地 cc session / worker / subagent 共享)。
     // 上限每次准入判断现读设置文件,热更即刻生效;默认 0 = 不限 = 不排队。
     const commandConcurrencyGate = createCommandConcurrencyGate({
@@ -1005,6 +1069,7 @@ export function getMaker(): Maker {
       log: desktopMakerLogger.child('command-gate'),
     });
     const claudeAgent = new ClaudeCodeAgent({
+      getDisabledSkillPaths: readDisabledSkillPaths,
       auth: desktopClaudeAuthAdapter,
       runtimeConfig: buildDesktopClaudeRuntimeConfig(getClaudeEndpoint),
       binaryPath: claudePath,
@@ -1052,10 +1117,15 @@ export function getMaker(): Maker {
       capabilityAdditions: {
         availableModels: deriveAvailableModels(getDesktopSelectableCatalog(), 'claude-code'),
       },
-      resolveModelContextLimit: (providerId, modelId) =>
-        providerId ? readModelContextLimit('claude-code', providerId, modelId) : null,
+      resolveModelContextLimit: (providerId, modelId) => {
+        const catalog = getDesktopSelectableCatalog();
+        const source = resolveDesktopModelContextProviderId(catalog, 'claude-code', providerId, modelId);
+        return source ? readModelContextLimit('claude-code', source, modelId)
+          ?? resolveModelDefaultContextWindow(catalog, 'claude-code', source, modelId) : null;
+      },
       resolveVerifiedContextWindow: (providerId, modelId) =>
-        resolveVerifiedContextWindow(getDesktopSelectableCatalog(), 'claude-code', providerId, modelId),
+        resolveVerifiedContextWindow(getDesktopSelectableCatalog(), 'claude-code',
+          resolveDesktopModelContextProviderId(getDesktopSelectableCatalog(), 'claude-code', providerId, modelId), modelId),
       // SDK PreToolUse / PostToolUse 等 in-process hook 注入点。host 自己定义 hook
       // 实现 (./claude-hooks/*.ts), maker-core 不感知具体逻辑。
       //
@@ -1106,6 +1176,7 @@ export function getMaker(): Maker {
         onOAuthRefresh,
         makerMemoryEnabled,
         makerMemoryScopeKey,
+        botSession,
       }) => {
         const host = getRemoteSshPool().get(remoteHostId);
         if (host?.getStatus() !== 'ready') {
@@ -1125,47 +1196,43 @@ export function getMaker(): Maker {
         // 远端 cc 的协同 MCP 恢复通道:bridge + remote-forward + per-session
         // token,把 cindy_orca / orca_worker_bridge 以 http 形态追加进
         // startParams.mcpServers (cc remote 过滤器本来就放行 http transport)。
-        // 注入失败降级为"远端无协同 MCP"(历史行为),不阻塞 session 建立。
-        let mcpCleanup: () => void = () => {};
-        let injectedServerCount = 0;
-        let mcpNeedsFreshStart = false;
-        let mcpInjectFingerprint: string | undefined;
-        try {
-          const injected = await buildCcRemoteHttpMcpServers(
-            {
-              host,
-              sessionId,
-              sessionInstanceId,
-              workingDir: typeof startParams.cwd === 'string' ? startParams.cwd : '',
-              vendorOptions,
-              // per-session Maker Memory 开关 (maker-core 归一后透传)。
-              makerMemoryEnabled,
-              // 同源的 scope key: Bot 会话恒为 `bot:<botId>`, 缺失时远端工具
-              // 会回落 workdir 键, 与本地 prompt 注入的伙伴记忆分家。
-              ...(makerMemoryScopeKey ? { makerMemoryScopeKey } : {}),
-            },
-            {
-              ensureBridgeStarted: ensureCodexMcpBridgeStartedForRemote,
-              ensureForward: ensureRemoteMcpForward,
-              // collab 全局禁用 (Tier 4) 时整个不注入 — bridge 名单不反映
-              // 开关 (codex-connector R20 P2, 与 codex daemon 侧同闸门)。
-              isCollabEnabled: () => pluginRegistry.isEnabled('collab'),
-            },
-          );
-          mcpCleanup = injected.cleanup;
-          mcpNeedsFreshStart = injected.needsFreshStart === true;
-          mcpInjectFingerprint = injected.fingerprint;
-          if (Object.keys(injected.servers).length > 0) {
-            injectedServerCount = Object.keys(injected.servers).length;
-            const mutableParams = startParams as { mcpServers?: Record<string, unknown> };
-            mutableParams.mcpServers = { ...(mutableParams.mcpServers ?? {}), ...injected.servers };
-          }
-        } catch (err) {
-          desktopMakerLogger.warn('cc remote MCP injection skipped', {
-            remoteHostId,
+        // 普通任务保留可选 MCP 降级;伙伴缺少 helper 时必须在 query 建立前失败。
+        const injected = await prepareCcRemoteQueryMcp(
+          {
+            host,
             sessionId,
-            message: err instanceof Error ? err.message : String(err),
-          });
+            sessionInstanceId,
+            workingDir: typeof startParams.cwd === 'string' ? startParams.cwd : '',
+            vendorOptions,
+            // per-session Maker Memory 开关 (maker-core 归一后透传)。
+            makerMemoryEnabled,
+            botSession,
+            // 同源的 scope key: Bot 会话恒为 `bot:<botId>`, 缺失时远端工具
+            // 会回落 workdir 键, 与本地 prompt 注入的伙伴记忆分家。
+            ...(makerMemoryScopeKey ? { makerMemoryScopeKey } : {}),
+          },
+          {
+            ensureBridgeStarted: ensureCodexMcpBridgeStartedForRemote,
+            ensureForward: ensureRemoteMcpForward,
+            // collab 全局禁用 (Tier 4) 时整个不注入 — bridge 名单不反映
+            // 开关 (codex-connector R20 P2, 与 codex daemon 侧同闸门)。
+            isCollabEnabled: () => pluginRegistry.isEnabled('collab'),
+            onOptionalInjectionError: (err) => {
+              desktopMakerLogger.warn('cc remote MCP injection skipped', {
+                remoteHostId,
+                sessionId,
+                message: err instanceof Error ? err.message : String(err),
+              });
+            },
+          },
+        );
+        const mcpCleanup = injected.cleanup;
+        const mcpNeedsFreshStart = injected.needsFreshStart === true;
+        const mcpInjectFingerprint = injected.fingerprint;
+        const injectedServerCount = Object.keys(injected.servers).length;
+        if (injectedServerCount > 0) {
+          const mutableParams = startParams as { mcpServers?: Record<string, unknown> };
+          mutableParams.mcpServers = { ...(mutableParams.mcpServers ?? {}), ...injected.servers };
         }
 
         // maker-core computes the initial permission mode before this factory
@@ -1303,7 +1370,7 @@ export function getMaker(): Maker {
       ...createDesktopMcpProviders(makerMemoryProviderDeps),
       orcaWorkerBridgeProvider,
     ];
-    _codexMcpProviders = codexMcpProviders;
+    _mcpProviders.codex = codexMcpProviders;
     const resolveDesiredCodexSubagentRoutingSignature = async (ctx: {
       credentialMode?: 'oauth-bearer' | 'gateway-key' | 'provider-oauth';
       hostPurpose?: 'control-plane' | 'review' | 'custom-context';
@@ -1323,6 +1390,7 @@ export function getMaker(): Maker {
         ?? 'default';
     };
     const codexAgent = new CodexAgent({
+      getDisabledSkillPaths: readDisabledSkillPaths,
       auth: desktopCodexAuthAdapter,
       runtimeConfig: desktopCodexRuntimeConfig,
       binaryPath: codexPath,
@@ -1392,15 +1460,16 @@ export function getMaker(): Maker {
       // Resolve settings by the actual provider route. Model specifications never
       // overwrite a native usage report; explicit settings configure the CLI itself.
       resolveModelContextLimit: (providerId, modelId) => {
-        const source = providerId ?? inferProviderIdForModel(modelId, 'codex');
+        const source = resolveDesktopModelContextProviderId(getDesktopSelectableCatalog(), 'codex', providerId, modelId);
         return source ? readModelContextLimit('codex', source, modelId) : null;
       },
       resolveVerifiedContextWindow: (providerId, modelId) =>
-        resolveVerifiedContextWindow(getDesktopSelectableCatalog(), 'codex', providerId, modelId),
+        resolveVerifiedContextWindow(getDesktopSelectableCatalog(), 'codex',
+          resolveDesktopModelContextProviderId(getDesktopSelectableCatalog(), 'codex', providerId, modelId), modelId),
       resolveCodexContextWindowInfo: (modelId, config, reportedUsableWindow) =>
         readCodexContextWindowInfo({ codexHome: getCodexHome(), binaryPath: codexPath, modelId, config, reportedUsableWindow }),
       resolveCodexThreadContextWindow: (providerId, modelId) => {
-        const source = providerId ?? inferProviderIdForModel(modelId, 'codex');
+        const source = resolveDesktopModelContextProviderId(getDesktopSelectableCatalog(), 'codex', providerId, modelId);
         const override = source ? readModelContextLimit('codex', source, modelId) : null;
         return override ?? resolveModelDefaultContextWindow(
           getDesktopSelectableCatalog(), 'codex', source, modelId,
@@ -1450,6 +1519,13 @@ export function getMaker(): Maker {
             extraEnv: {},
             codexProxyActive: false,
             codexBrowserUseAvailable: true,
+            buildSessionMcpConfig: (instance: string) =>
+              buildRemoteCodexSessionMcpConfig(ctx.remoteHostId!, instance, {
+                bridgeInstanceId: getActiveCodexBridgeInstanceId(),
+                serverNames: getActiveCodexBridgeServerNames() ?? [],
+                collabEnabled: pluginRegistry.isEnabled('collab'),
+                makerMemoryEnabled: _maker?.makerMemory?.isEnabled() ?? false,
+              }),
           };
         }
         const isControlPlane = ctx.hostPurpose === 'control-plane';
@@ -1704,6 +1780,8 @@ export function getMaker(): Maker {
             : {}),
         };
       },
+      withCodexMcpDiscoveryContext: (ctx, run) =>
+        withCodexMcpDiscoveryContext({ ...ctx, agentKind: 'codex' }, run),
       registerCodexMcpThreadContext: ({
         threadId,
         sessionId,
@@ -1959,6 +2037,7 @@ export function getMaker(): Maker {
       ...createDesktopMcpProviders(makerMemoryProviderDeps),
       orcaWorkerBridgeProvider,
     ];
+    _mcpProviders.pi = piMcpProviders;
     // 用户自定义 MCP:三个 agent 都必须注册其实际持有的数组引用，再统一做初始 refresh。
     // localDb onReady 可能在 Maker 构造前就已触发（此时 registry 无数组，refresh 空跑）；
     // 在此补一次 refresh，若 DB 尚未就绪则 refreshCustomMcpProviders 内部 catch 后静默跳过。
@@ -2286,35 +2365,8 @@ export function getMaker(): Maker {
         });
         return result.skills;
       },
-      listMcpServers: async ({ agentKind }) => {
-        const providers =
-          agentKind === 'claude-code'
-            ? claudeMcpProviders
-            : agentKind === 'codex'
-              ? codexMcpProviders
-              : piMcpProviders;
-        const builtinNames = new Set(getBuiltinMcpServerNames());
-        const customGenerations = new Map(
-          (await listCustomMcpRuntimeGenerations()).map((entry) => [
-            entry.id,
-            `${entry.transport}:${entry.updatedAt}`,
-          ]),
-        );
-        return [...new Map(
-          providers.map((provider) => [
-            provider.name,
-            {
-              name: provider.name,
-              source: builtinNames.has(provider.name) ? 'builtin' as const : 'custom' as const,
-              available: true,
-              generation: builtinNames.has(provider.name)
-                ? 'builtin:1'
-                : customGenerations.get(provider.name) ?? 'custom:unknown',
-            },
-          ]),
-        ).values()];
-      },
-      listToolsets: async ({ agentKind, workingDir, remoteHostId }) => {
+      listMcpServers: listBotRuntimeMcpServers,
+      listToolsets: async ({ botId, agentKind, workingDir, remoteHostId }) => {
         const registry = getPluginRegistry();
         return Promise.all(
           registry.getPlugins().map(async (plugin) => {
@@ -2325,7 +2377,9 @@ export function getMaker(): Maker {
               essential: ESSENTIAL_PLUGIN_IDS.has(plugin.id),
               available:
                 state.effectiveEnabled &&
-                isBotToolsetAvailableOnTarget({
+                isBotToolsetAvailable({
+                  botId,
+                  workingDir,
                   agentKind,
                   remoteHostId,
                   toolsetId: plugin.id,
@@ -2398,6 +2452,8 @@ export function getMaker(): Maker {
               { code: ACCOUNT_PROVIDER_NOT_READY_CODE },
             );
           }
+          // 所有创建路径共用的派发边界,opts.providerId 此刻已是本次启动的终值。
+          freezeSessionProviderAtStart(sessionId, opts.providerId);
           await preparePersistedOrcaSessionStart(sessionId, opts as MakerSessionCreateOpts);
           if (opts.agentKind === 'pi' && opts.thinkingEnabled === undefined) {
             const thinkingEnabled = getThinkingEnabledFromMemory(
@@ -2414,6 +2470,10 @@ export function getMaker(): Maker {
           const createOpts = opts as MakerSessionCreateOpts;
           createOpts.id ??= sessionId;
           await prepareBotWorkspaceRuntime(createOpts);
+          if (!createOpts.remoteHostId && createOpts.workingDir) {
+            const lease = await acquireWorktreeRuntimeLease(sessionId, createOpts.workingDir);
+            if (lease) worktreeRuntimeLeases.set(opts, lease);
+          }
           let skillLinksChanged = false;
           if (!createOpts.remoteHostId && createOpts.workingDir) {
             const result = await prepareSharedProjectSkillLinks({
@@ -2509,7 +2569,13 @@ export function getMaker(): Maker {
             }
           }
         },
-        onStartFailed: async ({ sessionId, stage, error }) => {
+        onStartFailed: async ({ sessionId, options, stage, error, runtimeMayBeAlive }) => {
+          const lease = worktreeRuntimeLeases.get(options);
+          if (lease && !runtimeMayBeAlive) {
+            await releaseWorktreeRuntimeLease(lease).catch((error) => {
+              desktopMakerLogger.warn('worktree runtime lease release postponed', { sessionId, code: (error as NodeJS.ErrnoException).code });
+            });
+          }
           const snapshot = pendingBotRuntimeSnapshots.get(sessionId);
           if (!snapshot) return;
           try {
@@ -2525,11 +2591,25 @@ export function getMaker(): Maker {
             pendingBotRuntimeSnapshots.delete(sessionId);
           }
         },
+        onStartCleanupSucceeded: async (sessionId, options) => {
+          const lease = worktreeRuntimeLeases.get(options);
+          if (lease) {
+            await releaseWorktreeRuntimeLease(lease).catch((error) => {
+              desktopMakerLogger.warn('worktree runtime lease release postponed', { sessionId, code: (error as NodeJS.ErrnoException).code });
+            });
+          }
+        },
         getCodexHistoryHasProductPrompt: (sessionId) => readCodexHistoryHasProductPrompt(sessionId),
         onCodexProductPromptDelivery: async ({ sessionId, historyHasProductPrompt }) => {
           await writeCodexHistoryHasProductPrompt(sessionId, historyHasProductPrompt);
         },
-        onClose: async (sessionId) => {
+        onClose: async (sessionId, options) => {
+          const lease = worktreeRuntimeLeases.get(options);
+          if (lease) {
+            await releaseWorktreeRuntimeLease(lease).catch((error) => {
+              desktopMakerLogger.warn('worktree runtime lease release postponed', { sessionId, code: (error as NodeJS.ErrnoException).code });
+            });
+          }
           // rehydrate close suppression 只跳过 worktree / temp file 这类重副作用;
           // registry 必须先清,后续 resume 会在首个 /responses 前重新登记,避免旧 thread prompt 驻留。
           unregisterCodexProxyPrompt(sessionId);
@@ -2680,6 +2760,7 @@ export function resetMaker(): void {
   botRuntimeResourcePreflight = null;
   _registerPiAgent = null;
   _codexAgent = null;
+  _mcpProviders = {};
   // coordinator 闭包捕获了刚作废的那个 maker —— 不清掉的话,换账号窗口期内到达的 auth
   // 事件会拿旧实例去拉模型清单(串号)。下次 getMaker() 会带着干净记账重建它。
   _codexModelBackfill = null;
