@@ -372,12 +372,18 @@ describe('Scheduler', () => {
       model: 'gpt-6-astra',
       providerId: 'openai',
       effort: 'medium',
+      fastMode: true,
     });
     const switched = await h.scheduler.update(sch.id, { agentKind: 'claude-code' });
     expect(switched.agentKind).toBe('claude-code');
     expect(switched.model).toBeUndefined();
     expect(switched.providerId).toBeUndefined();
     expect(switched.effort).toBeUndefined();
+    // 旧引擎的 Fast 开关不能潜伏到下次切回 Codex/Pi 时复活
+    expect(switched.fastMode).toBe(false);
+    const back = await h.scheduler.update(sch.id, { agentKind: 'codex' });
+    expect(back.fastMode).toBe(false);
+    expect(back.model).toBeUndefined();
     // 落库 patch 必须带 key(storage 按 hasOwnProperty 清列),不能只是省略
     const stored = h.storage.schedules.get(sch.id)!;
     expect(Object.prototype.hasOwnProperty.call(stored, 'model')).toBe(true);
@@ -390,10 +396,12 @@ describe('Scheduler', () => {
       agentKind: 'codex',
       model: 'gpt-6-astra',
       providerId: 'openai',
+      fastMode: true,
     });
     const same = await h.scheduler.update(sch2.id, { agentKind: 'codex', prompt: 'p2' });
     expect(same.model).toBe('gpt-6-astra');
     expect(same.providerId).toBe('openai');
+    expect(same.fastMode).toBe(true);
     const untouched = await h.scheduler.update(sch2.id, { prompt: 'p3' });
     expect(untouched.model).toBe('gpt-6-astra');
 
@@ -406,6 +414,10 @@ describe('Scheduler', () => {
     expect(explicit.model).toBe('claude-fable-5-1');
     expect(explicit.providerId).toBe('anthropic');
     expect(explicit.effort).toBeUndefined();
+    expect(explicit.fastMode).toBe(false);
+    // 显式带 fastMode 按调用方意图
+    const keepFast = await h.scheduler.update(sch2.id, { agentKind: 'codex', fastMode: true });
+    expect(keepFast.fastMode).toBe(true);
   });
 
   it('update() 给了真实 workingDir 时翻成 project(与 create 推断对称)', async () => {

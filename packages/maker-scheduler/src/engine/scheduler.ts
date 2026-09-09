@@ -1382,11 +1382,14 @@ export class Scheduler extends EventEmitter {
     // fire 时路由守卫对「没有任何来源提供该模型」的组合放行,runner 再把绑定会话的
     // 凭证/模型切到这条跑不通的路由上,每轮都以上游拒绝失败,会话 meta 也被写坏
     // (伙伴接管期用 Codex 模型钉过的任务改回 Claude Code 后即复现)。
-    // 显式给了(含带 key 的 undefined)按调用方意图,不覆盖。
+    // 显式给了(含带 key 的 undefined)按调用方意图,不覆盖。fastMode 同属完整运行路由
+    // (harness + provider + model + effort + fastMode),旧引擎的 Fast 开关同样不该
+    // 潜伏到下一次切回 Codex/Pi 时复活(codex review),未显式给则关掉。
     if (patch.agentKind !== undefined && patch.agentKind !== existing.agentKind) {
       for (const key of ['model', 'providerId', 'effort'] as const) {
         if (!Object.prototype.hasOwnProperty.call(patch, key)) updates[key] = undefined;
       }
+      if (!Object.prototype.hasOwnProperty.call(patch, 'fastMode')) updates.fastMode = false;
     }
     const candidate: Schedule = { ...existing, ...updates };
     validateScheduleExecutionShape(
