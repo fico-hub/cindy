@@ -454,6 +454,7 @@ export function ProjectsSection({
       }
     };
     for (const project of projects) for (const session of project.sessions) considerRemote(session);
+    for (const bot of bots) for (const session of bot.sessions) considerRemote(session);
     for (const session of dialogues) considerRemote(session);
     for (const session of unclassified) considerRemote(session);
 
@@ -480,6 +481,7 @@ export function ProjectsSection({
     projects,
     dialogues,
     unclassified,
+    bots,
     remoteActivityRevision,
     viewedIdForSort,
   ]);
