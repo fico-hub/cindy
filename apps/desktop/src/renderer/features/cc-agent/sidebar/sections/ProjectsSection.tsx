@@ -121,6 +121,9 @@ const MANUAL_PROJECT_SORT_FILTER = 'button, input, textarea, select, a, [data-no
 
 /** 设备段折叠/对话组折叠共用的段 key:本机段 'local',远程段用 deviceId。 */
 const deviceSectionKey = (deviceId: string | null) => deviceId ?? 'local';
+// 单段保留既有伙伴 key;设备分组与对话组同样按段独立记忆,不依赖任务顺序或组名。
+const botGroupKey = (botId: string, sectionKey: string) =>
+  sectionKey === DIALOGUE_GROUP_ALL_KEY ? `bot:${botId}` : `bot:${botId}:${sectionKey}`;
 
 // 优先级排序的「看的时候钉住;只有从完成未读切走才置顶」是模块生命周期内的展示态,
 // 不落盘。放模块级而不是组件 ref:ProjectsSection 重挂(含 React Strict Mode
@@ -522,9 +525,10 @@ export function ProjectsSection({
     }
     for (const session of dialogues) considerRemote(session);
     for (const session of unclassified) considerRemote(session);
+    for (const bot of bots) for (const session of bot.sessions) considerRemote(session);
     absorbSessionStarting(settled);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- remoteActivityRevision 代表 getRemoteSessionActivity 读到的整表内容
-  }, [projects, dialogues, unclassified, remoteActivityRevision]);
+  }, [projects, dialogues, unclassified, bots, remoteActivityRevision]);
 
   // E 期「按设备分组」:有远程设备连接 + 开关开 → 按设备切段(本机在前,
   // 远程按设备切换栏顺序);其余情况单段直渲。切段后按当前排序重排本段。
@@ -707,17 +711,19 @@ export function ProjectsSection({
   // 组层 = 项目行 + 自动任务组 + 「对话」组行。项目侧复用 ProjectNode 折叠状态,
   // 自动任务组复用 owner-scoped 持久化状态,对话组沿用本地显示偏好。
   const hasGroupLayer = mixedEntries.some((entry) => entry.kind !== 'session');
-  // 当前可见的对话组 key:设备分组下 = 各含对话组条目的设备段;否则单一组。
+  // 当前可见的对话/伙伴组 key:设备分组下按段记忆;否则保留单段 key。
   // 「收起/展开所有分组」只作用于这些可见 key,不动其它模式下的记忆。
   const visibleDialogueGroupKeys = useMemo<string[]>(() => {
-    if (!deviceGroupingActive) {
-      return visibleMixedEntries.some((entry) => entry.kind === 'dialogue-group')
-        ? [DIALOGUE_GROUP_ALL_KEY]
-        : [];
-    }
-    return deviceSections
-      .filter((section) => section.entries.some((entry) => entry.kind === 'dialogue-group'))
-      .map((section) => deviceSectionKey(section.deviceId));
+    const keysFor = (entries: readonly MainListEntry[], sectionKey: string) =>
+      entries.flatMap((entry) => {
+        if (entry.kind === 'dialogue-group') return [sectionKey];
+        if (entry.kind === 'bot-group') return [botGroupKey(entry.bot.botId, sectionKey)];
+        return [];
+      });
+    if (!deviceGroupingActive) return keysFor(visibleMixedEntries, DIALOGUE_GROUP_ALL_KEY);
+    return deviceSections.flatMap((section) =>
+      keysFor(section.entries, deviceSectionKey(section.deviceId)),
+    );
   }, [deviceGroupingActive, visibleMixedEntries, deviceSections]);
   const allDialogueGroupsCollapsed =
     visibleDialogueGroupKeys.length === 0 ||
@@ -916,11 +922,11 @@ export function ProjectsSection({
       );
     }
     if (entry.kind === 'bot-group') {
-      const groupKey = `bot:${entry.bot.botId}`;
+      const groupKey = botGroupKey(entry.bot.botId, dialogueGroupKey);
       const isCollapsed = collapsedDialogueGroups.has(groupKey);
       return (
         <SessionGroupNode
-          key={`bot-group:${entry.bot.botId}`}
+          key={groupKey}
           sessions={entry.bot.sessions}
           lamp={lampAgg(entry.bot.sessions)}
           foldExemptSessionIds={lampFoldExemptIds}
