@@ -72,13 +72,21 @@ export interface ResolvedAuth {
    */
   pinnedIdentityFiles: string[];
   /**
-   * For a filtered agent: how many pinned identities the agent actually held
-   * on its last enumeration (`FilteredAgent.lastOfferedCount`); `null` before
-   * enumeration or on enumeration failure. Absent for unfiltered agents and
-   * key files. Kept as an accessor so RemoteHost never has to import the ssh2
-   * agent classes (tests mock `ssh2` wholesale).
+   * For a filtered agent: what the agent did on the last attempt —
+   * `offeredCount` pinned identities held (null before enumeration or on
+   * enumeration failure), `signedCount` signatures the agent produced and
+   * `signFailureCount` local sign failures (agent locked, hardware key touch
+   * refused). Absent for unfiltered agents and key files. Kept as an accessor
+   * so RemoteHost never has to import the ssh2 agent classes (tests mock
+   * `ssh2` wholesale).
    */
-  readOfferedIdentityCount?: () => number | null;
+  readAgentAuthOutcome?: () => AgentAuthOutcome;
+}
+
+export interface AgentAuthOutcome {
+  offeredCount: number | null;
+  signedCount: number;
+  signFailureCount: number;
 }
 
 export async function resolveAuth(host: HostConfig): Promise<ResolvedAuth> {
@@ -141,7 +149,11 @@ export async function resolveAuth(host: HostConfig): Promise<ResolvedAuth> {
             ? 'ssh-agent[filtered]'
             : `ssh-agent[filtered:${allowedFingerprints.length}]`,
           pinnedIdentityFiles,
-          readOfferedIdentityCount: () => filtered.lastOfferedCount,
+          readAgentAuthOutcome: () => ({
+            offeredCount: filtered.lastOfferedCount,
+            signedCount: filtered.signedCount,
+            signFailureCount: filtered.signFailureCount,
+          }),
         };
       } catch (err) {
         throwUnsupported((err as Error).message);

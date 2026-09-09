@@ -100,18 +100,42 @@ describe('authFailureHint names the identity set and keeps the real reason (#420
   });
 
   it('pinned agent, nothing offered (key not loaded): says so and points at ssh-add, not at the remote', () => {
-    const hint = authFailureHint(pinnedCfg, { homeDir: '/home/u', offeredIdentityCount: 0 });
+    const hint = authFailureHint(pinnedCfg, {
+      homeDir: '/home/u',
+      agentOutcome: { offeredCount: 0, signedCount: 0, signFailureCount: 0 },
+    });
     expect(hint).toContain('none of the configured identities (IdentityFile: ~/.ssh/id_ed25519_github) is currently loaded in ssh-agent');
     expect(hint).toContain('ssh-add');
     expect(hint).not.toContain('rejected');
     expect(isAuthFailure(hint)).toBe(true);
   });
 
-  it('pinned agent, keys were offered: says the remote rejected them and does not send the user to ssh-add', () => {
-    const hint = authFailureHint(pinnedCfg, { homeDir: '/home/u', offeredIdentityCount: 1 });
+  it('pinned agent, key offered AND signed: says the remote rejected it and does not send the user to ssh-add', () => {
+    const hint = authFailureHint(pinnedCfg, {
+      homeDir: '/home/u',
+      agentOutcome: { offeredCount: 1, signedCount: 1, signFailureCount: 0 },
+    });
     expect(hint).toContain('the remote rejected every key ssh-agent offered from the configured identity set (IdentityFile: ~/.ssh/id_ed25519_github)');
     expect(hint).not.toContain('ssh-add');
     expect(isAuthFailure(hint)).toBe(true);
+  });
+
+  it('pinned agent, key offered but the agent could not sign: local problem, never blamed on the remote', () => {
+    const hint = authFailureHint(pinnedCfg, {
+      homeDir: '/home/u',
+      agentOutcome: { offeredCount: 1, signedCount: 0, signFailureCount: 1 },
+    });
+    expect(hint).toContain('ssh-agent could not sign with the configured identity (IdentityFile: ~/.ssh/id_ed25519_github)');
+    expect(hint).not.toContain('rejected');
+    expect(isAuthFailure(hint)).toBe(true);
+    // 枚举到了但一次签名都没发生(ssh2 未走到该 key)→ 不能断言远端拒绝,回到中性措辞
+    const neutral = authFailureHint(pinnedCfg, {
+      homeDir: '/home/u',
+      agentOutcome: { offeredCount: 1, signedCount: 0, signFailureCount: 0 },
+    });
+    expect(neutral).toContain('with the configured identity set');
+    expect(neutral).not.toContain('rejected every key');
+    expect(isAuthFailure(neutral)).toBe(true);
   });
 
   it('names only the identities the attempt was actually limited to (explicit pin beats unrelated ssh_config entries)', () => {

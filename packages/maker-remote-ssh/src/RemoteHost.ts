@@ -23,7 +23,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { Client, type ConnectConfig, type ClientChannel, type TcpConnectionDetails } from 'ssh2';
 
 import type { HostConfig, HostSnapshot, RemoteStatus } from './types.js';
-import { resolveAuth, type ResolvedAuth } from './credentials.js';
+import { resolveAuth, type AgentAuthOutcome, type ResolvedAuth } from './credentials.js';
 import { type HostKeyStore, hostKeyFingerprint, hostKeyId, decideHostKey } from './hostKeys.js';
 
 export interface RemoteHostDeps {
@@ -296,12 +296,13 @@ export interface AuthFailureHintOptions {
   /** Identity files the attempt was limited to (from `ResolvedAuth`). */
   pinnedIdentityFiles?: readonly string[];
   /**
-   * How many pinned identities the agent actually held and offered
-   * (`FilteredAgent.lastOfferedCount`). `0` = nothing was offered (key not
-   * loaded), `> 0` = the remote rejected what was offered, `null`/omitted =
-   * unknown (unfiltered agent or enumeration never happened).
+   * What the filtered agent actually did (`ResolvedAuth.readAgentAuthOutcome`).
+   * `offeredCount === 0` = nothing was offered (key not loaded);
+   * `signFailureCount > 0` = the agent could not sign (local problem);
+   * `offeredCount > 0 && signedCount > 0` with no sign failure = the remote
+   * rejected a signed attempt. Anything else is unknown → neutral wording.
    */
-  offeredIdentityCount?: number | null;
+  agentOutcome?: AgentAuthOutcome | null;
   /** Test seam for home-directory abbreviation. */
   homeDir?: string;
 }
@@ -335,14 +336,20 @@ export function authFailureHint(cfg: HostConfig, options: AuthFailureHintOptions
       || (cfg.sshAuthentication?.allowedAgentFingerprints?.length ?? 0) > 0;
     if (pinned) {
       const identitySet = identities ? ` (IdentityFile: ${identities})` : '';
-      const offered = options.offeredIdentityCount;
-      if (offered === 0) {
+      const outcome = options.agentOutcome;
+      if (outcome?.offeredCount === 0) {
         return withCause(
           `Authentication failed for ${who}: none of the configured identities${identitySet} is currently loaded in ssh-agent, so no key was offered. `
             + 'Load it with `ssh-add`, or re-add this host with the identity that is loaded.',
         );
       }
-      if (typeof offered === 'number' && offered > 0) {
+      if (outcome && outcome.signFailureCount > 0) {
+        return withCause(
+          `Authentication failed for ${who}: ssh-agent could not sign with the configured identity${identitySet} (agent locked, hardware-key confirmation refused, or signer error). `
+            + 'Unlock the agent or retry the key confirmation, then try again.',
+        );
+      }
+      if (outcome && (outcome.offeredCount ?? 0) > 0 && outcome.signedCount > 0) {
         return withCause(
           `Authentication failed for ${who}: the remote rejected every key ssh-agent offered from the configured identity set${identitySet}. `
             + 'Verify that identity\'s public key is installed on the remote, or re-add this host with the right identity.',
@@ -1412,7 +1419,7 @@ export class RemoteHost {
             ? authFailureHint(attemptConfig, {
                 cause: err.message,
                 pinnedIdentityFiles: auth.pinnedIdentityFiles,
-                offeredIdentityCount: auth.readOfferedIdentityCount?.() ?? null,
+                agentOutcome: auth.readAgentAuthOutcome?.() ?? null,
               })
             : err.message;
         this.client = null;
