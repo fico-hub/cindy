@@ -86,31 +86,70 @@ describe('authFailureHint names the identity set and keeps the real reason (#420
     },
   });
 
-  it('pinned agent: says the remote rejected the configured identity set, names the IdentityFile, and does not assert the key is missing from the agent', () => {
+  it('pinned agent, offered count unknown: neutral wording that names the IdentityFile and never asserts a cause', () => {
     const hint = authFailureHint(pinnedCfg, { homeDir: '/home/u' });
     expect(hint).toContain('IdentityFile: ~/.ssh/id_ed25519_github');
-    expect(hint).toContain('was rejected by the remote');
+    expect(hint).toContain('Authentication failed for deploy@10.0.0.5 with the configured identity set');
     expect(hint).not.toContain('has no key');
+    expect(hint).not.toContain('rejected every key');
+    expect(hint).not.toContain('no key was offered');
     // 绝对路径不进用户可见文案(主目录缩写),也不猜 .pub 文件名。
     expect(hint).not.toContain('/home/u/.ssh');
     expect(hint).not.toContain('.pub');
     expect(isAuthFailure(hint)).toBe(true);
   });
 
-  it('pinned agent: explicit Cindy identity marker is listed first, de-duplicated against ssh_config entries', () => {
+  it('pinned agent, nothing offered (key not loaded): says so and points at ssh-add, not at the remote', () => {
+    const hint = authFailureHint(pinnedCfg, { homeDir: '/home/u', offeredIdentityCount: 0 });
+    expect(hint).toContain('none of the configured identities (IdentityFile: ~/.ssh/id_ed25519_github) is currently loaded in ssh-agent');
+    expect(hint).toContain('ssh-add');
+    expect(hint).not.toContain('rejected');
+    expect(isAuthFailure(hint)).toBe(true);
+  });
+
+  it('pinned agent, keys were offered: says the remote rejected them and does not send the user to ssh-add', () => {
+    const hint = authFailureHint(pinnedCfg, { homeDir: '/home/u', offeredIdentityCount: 1 });
+    expect(hint).toContain('the remote rejected every key ssh-agent offered from the configured identity set (IdentityFile: ~/.ssh/id_ed25519_github)');
+    expect(hint).not.toContain('ssh-add');
+    expect(isAuthFailure(hint)).toBe(true);
+  });
+
+  it('names only the identities the attempt was actually limited to (explicit pin beats unrelated ssh_config entries)', () => {
+    // marker auth=agent + explicit Cindy pin, IdentitiesOnly unset: resolveAuth pins
+    // only cfg.identityFile; the other IdentityFile entries never reach the agent.
     const hint = authFailureHint(
       cfg({
-        ...pinnedCfg,
+        authMethod: 'agent',
         identityFile: '/home/u/.ssh/id_ed25519_github',
         sshAuthentication: {
-          ...pinnedCfg.sshAuthentication!,
-          configuredIdentityFiles: ['/home/u/.ssh/id_ed25519_github', '/home/u/.ssh/id_rsa'],
+          identitiesOnly: false,
+          configuredIdentityFiles: ['/home/u/.ssh/id_rsa', '/home/u/.ssh/id_ed25519_github', '/home/u/.ssh/other'],
+          identityFileDirectiveSeen: true,
+          identityFileNoneSeen: false,
         },
       }),
       { homeDir: '/home/u' },
     );
-    expect(hint).toContain('IdentityFile: ~/.ssh/id_ed25519_github, ~/.ssh/id_rsa');
-    expect(hint.split('id_ed25519_github').length - 1).toBe(1);
+    expect(hint).toContain('IdentityFile: ~/.ssh/id_ed25519_github)');
+    expect(hint).not.toContain('id_rsa');
+    expect(hint).not.toContain('other');
+    // The resolved auth's list wins over any derivation from config.
+    const explicit = authFailureHint(pinnedCfg, {
+      homeDir: '/home/u',
+      pinnedIdentityFiles: ['/home/u/.ssh/only_this'],
+    });
+    expect(explicit).toContain('IdentityFile: ~/.ssh/only_this)');
+    expect(explicit).not.toContain('id_ed25519_github');
+  });
+
+  it('keeps distinct files that share a basename instead of merging them', () => {
+    const hint = authFailureHint(pinnedCfg, {
+      homeDir: '/home/u',
+      pinnedIdentityFiles: ['/srv/a/id_rsa', '/opt/b/id_rsa', '/srv/a/id_rsa'],
+    });
+    expect(hint).toContain('IdentityFile: a/id_rsa, b/id_rsa)');
+    expect(hint).not.toContain('/srv/');
+    expect(hint).not.toContain('/opt/');
   });
 
   it('appends the underlying ssh2 reason once, and not when the text already says it', () => {

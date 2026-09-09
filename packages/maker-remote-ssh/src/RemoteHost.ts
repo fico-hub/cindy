@@ -23,7 +23,7 @@ import { StringDecoder } from 'node:string_decoder';
 import { Client, type ConnectConfig, type ClientChannel, type TcpConnectionDetails } from 'ssh2';
 
 import type { HostConfig, HostSnapshot, RemoteStatus } from './types.js';
-import { resolveAuth } from './credentials.js';
+import { resolveAuth, type ResolvedAuth } from './credentials.js';
 import { type HostKeyStore, hostKeyFingerprint, hostKeyId, decideHostKey } from './hostKeys.js';
 
 export interface RemoteHostDeps {
@@ -246,18 +246,43 @@ export function describeIdentityPath(identityPath: string, homeDir: string = os.
   return path.basename(trimmed);
 }
 
-/** Effective identities the connect attempt was limited to: explicit marker first, then ssh_config IdentityFile entries. */
-function describeConfiguredIdentities(cfg: HostConfig, homeDir?: string): string {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const raw of [cfg.identityFile, ...(cfg.sshAuthentication?.configuredIdentityFiles ?? [])]) {
-    if (typeof raw !== 'string') continue;
-    const shown = describeIdentityPath(raw, homeDir);
-    if (!shown || seen.has(shown)) continue;
-    seen.add(shown);
-    out.push(shown);
+/**
+ * Identity files the attempt was actually limited to. Prefer the resolved
+ * auth's list (single source of truth); without it, mirror `resolveAuth`:
+ * ssh_config IdentityFile entries only count when they produced
+ * `allowedAgentFingerprints`, otherwise only the explicit Cindy pin does.
+ */
+function pinnedIdentityFilesFor(cfg: HostConfig, explicit?: readonly string[]): string[] {
+  if (explicit) return [...explicit];
+  if (cfg.authMethod === 'agent') {
+    if ((cfg.sshAuthentication?.allowedAgentFingerprints?.length ?? 0) > 0) {
+      return [...(cfg.sshAuthentication?.configuredIdentityFiles ?? [])];
+    }
+    return cfg.identityFile ? [cfg.identityFile] : [];
   }
-  return out.join(', ');
+  return cfg.identityFile ? [cfg.identityFile] : [];
+}
+
+/**
+ * Render the identity set: de-duplicate by raw path (two different files may
+ * share a basename), then disambiguate colliding labels with the parent
+ * directory name so nothing configured is silently dropped.
+ */
+function describeIdentityFiles(files: readonly string[], homeDir?: string): string {
+  const raws: string[] = [];
+  for (const raw of files) {
+    const trimmed = typeof raw === 'string' ? raw.trim() : '';
+    if (trimmed && !raws.includes(trimmed)) raws.push(trimmed);
+  }
+  const labels = raws.map((raw) => describeIdentityPath(raw, homeDir));
+  return labels
+    .map((label, index) => {
+      if (labels.indexOf(label) === labels.lastIndexOf(label)) return label;
+      const parent = path.basename(path.dirname(raws[index]!));
+      return parent && parent !== '.' ? `${parent}/${label}` : label;
+    })
+    .filter((label) => label.length > 0)
+    .join(', ');
 }
 
 export interface AuthFailureHintOptions {
@@ -268,6 +293,15 @@ export interface AuthFailureHintOptions {
    * material; callers must not pass passphrases or agent sockets here.
    */
   cause?: string;
+  /** Identity files the attempt was limited to (from `ResolvedAuth`). */
+  pinnedIdentityFiles?: readonly string[];
+  /**
+   * How many pinned identities the agent actually held and offered
+   * (`FilteredAgent.lastOfferedCount`). `0` = nothing was offered (key not
+   * loaded), `> 0` = the remote rejected what was offered, `null`/omitted =
+   * unknown (unfiltered agent or enumeration never happened).
+   */
+  offeredIdentityCount?: number | null;
   /** Test seam for home-directory abbreviation. */
   homeDir?: string;
 }
@@ -279,37 +313,53 @@ export interface AuthFailureHintOptions {
  * this into structured fields for full i18n.
  *
  * #4201: the message is chosen by auth *shape*, but it must not assert a
- * cause it cannot see. For `agent` + pinned identities the only fact we have
- * is "the remote rejected every key from the configured identity set", so
- * say that and name the identity set (a wrong cached IdentityFile is the
- * common cause) instead of unconditionally sending the user to `ssh-add`.
+ * cause it cannot see. For `agent` + pinned identities we name the identity
+ * set the attempt was actually limited to (a wrong cached IdentityFile is the
+ * common cause) and only claim "nothing was loaded" / "the remote rejected
+ * the offered keys" when the FilteredAgent recorded that fact; otherwise the
+ * wording stays neutral. Every variant keeps a phrase `isAuthFailure()`
+ * recognizes (see the invariant test).
  */
 export function authFailureHint(cfg: HostConfig, options: AuthFailureHintOptions = {}): string {
   const portArg = cfg.port && cfg.port !== 22 ? `-p ${cfg.port} ` : '';
+  const who = `${cfg.user}@${cfg.hostname}`;
   const withCause = (text: string): string => {
     const cause = options.cause?.trim();
     if (!cause || text.toLowerCase().includes(cause.toLowerCase())) return text;
     return `${text} (ssh: ${cause})`;
   };
+  const pinnedFiles = pinnedIdentityFilesFor(cfg, options.pinnedIdentityFiles);
+  const identities = describeIdentityFiles(pinnedFiles, options.homeDir);
   if (cfg.authMethod === 'agent') {
-    const identities = describeConfiguredIdentities(cfg, options.homeDir);
-    const pinned = !!cfg.identityFile
+    const pinned = pinnedFiles.length > 0
       || (cfg.sshAuthentication?.allowedAgentFingerprints?.length ?? 0) > 0;
     if (pinned) {
       const identitySet = identities ? ` (IdentityFile: ${identities})` : '';
+      const offered = options.offeredIdentityCount;
+      if (offered === 0) {
+        return withCause(
+          `Authentication failed for ${who}: none of the configured identities${identitySet} is currently loaded in ssh-agent, so no key was offered. `
+            + 'Load it with `ssh-add`, or re-add this host with the identity that is loaded.',
+        );
+      }
+      if (typeof offered === 'number' && offered > 0) {
+        return withCause(
+          `Authentication failed for ${who}: the remote rejected every key ssh-agent offered from the configured identity set${identitySet}. `
+            + 'Verify that identity\'s public key is installed on the remote, or re-add this host with the right identity.',
+        );
+      }
       return withCause(
-        `Every key ssh-agent offered from the configured identity set${identitySet} was rejected by the remote for ${cfg.user}@${cfg.hostname}. `
+        `Authentication failed for ${who} with the configured identity set${identitySet}. `
           + 'Verify that identity\'s public key is installed on the remote, re-add this host with the right identity, or load the matching key with `ssh-add` if it is not in the agent.',
       );
     }
-    return withCause(`SSH agent has no key the remote accepts. Run \`ssh-copy-id ${portArg}${cfg.user}@${cfg.hostname}\` from your terminal to install your pubkey, or re-add this host with "Identity file" auth.`);
+    return withCause(`SSH agent has no key the remote accepts. Run \`ssh-copy-id ${portArg}${who}\` from your terminal to install your pubkey, or re-add this host with "Identity file" auth.`);
   }
   if (cfg.authMethod === 'key') {
-    const identity = cfg.identityFile ? describeIdentityPath(cfg.identityFile, options.homeDir) : '';
-    const which = identity ? `The configured identity file (${identity})` : 'The configured identity file';
-    return withCause(`${which} was rejected by the remote. Verify it is the right key for ${cfg.user}@${cfg.hostname}, or run \`ssh-copy-id ${portArg}-i <public-key-file> ${cfg.user}@${cfg.hostname}\` with its matching public key.`);
+    const which = identities ? `The configured identity file (${identities})` : 'The configured identity file';
+    return withCause(`${which} was rejected by the remote. Verify it is the right key for ${who}, or run \`ssh-copy-id ${portArg}-i <public-key-file> ${who}\` with its matching public key.`);
   }
-  return withCause(`Authentication failed connecting as ${cfg.user}@${cfg.hostname}.`);
+  return withCause(`Authentication failed connecting as ${who}.`);
 }
 
 function wrapChannel(channel: ClientChannel): ExecStreamHandle {
@@ -1260,7 +1310,7 @@ export class RemoteHost {
     this.hostKeyError = null;
     this.lastAuthError = null;
 
-    let auth;
+    let auth: ResolvedAuth;
     try {
       auth = await resolveAuth(attemptConfig);
     } catch (err) {
@@ -1359,7 +1409,11 @@ export class RemoteHost {
         this.lastError = this.hostKeyError
           ? this.hostKeyError
           : isAuthFailure(err.message)
-            ? authFailureHint(attemptConfig, { cause: err.message })
+            ? authFailureHint(attemptConfig, {
+                cause: err.message,
+                pinnedIdentityFiles: auth.pinnedIdentityFiles,
+                offeredIdentityCount: auth.readOfferedIdentityCount?.() ?? null,
+              })
             : err.message;
         this.client = null;
         this.setStatus('failed');

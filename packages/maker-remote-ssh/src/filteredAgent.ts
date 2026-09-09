@@ -79,6 +79,14 @@ export class FilteredAgent extends BaseAgent<ParsedKey> {
   private readonly upstream: BaseAgent<ParsedKey>;
   /** Full `SHA256:...` forms, de-duplicated in OpenSSH configuration order. */
   private readonly allowedFingerprints: string[];
+  /**
+   * How many allowed identities the upstream agent actually held on the last
+   * `getIdentities` call (= how many keys ssh2 could offer). `null` until the
+   * agent has been enumerated, or when enumeration itself failed. Lets the
+   * connect failure path tell "nothing was offered (key not loaded)" apart
+   * from "the remote rejected what was offered" (#4201).
+   */
+  lastOfferedCount: number | null = null;
 
   constructor(upstream: BaseAgent<ParsedKey>, allowedFingerprints: string | readonly string[]) {
     super();
@@ -94,7 +102,10 @@ export class FilteredAgent extends BaseAgent<ParsedKey> {
 
   getIdentities(cb: (err: Error | undefined, publicKeys?: ParsedKey[]) => void): void {
     this.upstream.getIdentities((err, keys) => {
-      if (err) return cb(err);
+      if (err) {
+        this.lastOfferedCount = null;
+        return cb(err);
+      }
       const byFingerprint = new Map<string, ParsedKey>();
       for (const item of keys ?? []) {
         const key = asParsedKey(item);
@@ -105,6 +116,7 @@ export class FilteredAgent extends BaseAgent<ParsedKey> {
       const matches = this.allowedFingerprints
         .map((fingerprint) => byFingerprint.get(fingerprint))
         .filter((key): key is ParsedKey => key !== undefined);
+      this.lastOfferedCount = matches.length;
       cb(undefined, matches);
     });
   }

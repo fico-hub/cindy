@@ -156,6 +156,9 @@ describe('resolveAuth OpenSSH agent metadata', () => {
           ? '\\\\.\\pipe\\openssh-ssh-agent'
           : '/tmp/cindy-test-agent.sock',
         label: 'ssh-agent',
+        // #4201: an unfiltered agent pins nothing, so the failure hint must not
+        // name the external IdentityFile entries that never reached the agent.
+        pinnedIdentityFiles: [],
       });
     } finally {
       if (previous === undefined) delete process.env.SSH_AUTH_SOCK;

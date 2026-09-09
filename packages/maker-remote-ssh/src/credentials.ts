@@ -62,6 +62,23 @@ export interface ResolvedAuth {
   passphrase?: string;
   /** Human-readable label used in logs / errors so we don't leak the path. */
   label: string;
+  /**
+   * Identity files this attempt was actually limited to, in the order they
+   * restrict the agent (or the single private key for `authMethod='key'`).
+   * Empty for an unfiltered agent. Mirrors the branch taken above so a
+   * failure hint never names an IdentityFile that was not part of the pin
+   * (#4201): ssh_config entries only count when they produced
+   * `allowedAgentFingerprints`; otherwise only the explicit Cindy pin does.
+   */
+  pinnedIdentityFiles: string[];
+  /**
+   * For a filtered agent: how many pinned identities the agent actually held
+   * on its last enumeration (`FilteredAgent.lastOfferedCount`); `null` before
+   * enumeration or on enumeration failure. Absent for unfiltered agents and
+   * key files. Kept as an accessor so RemoteHost never has to import the ssh2
+   * agent classes (tests mock `ssh2` wholesale).
+   */
+  readOfferedIdentityCount?: () => number | null;
 }
 
 export async function resolveAuth(host: HostConfig): Promise<ResolvedAuth> {
@@ -76,6 +93,9 @@ export async function resolveAuth(host: HostConfig): Promise<ResolvedAuth> {
 
   if (host.authMethod === 'agent') {
     let allowedFingerprints = host.sshAuthentication?.allowedAgentFingerprints;
+    let pinnedIdentityFiles: string[] = allowedFingerprints && allowedFingerprints.length > 0
+      ? [...(host.sshAuthentication?.configuredIdentityFiles ?? [])]
+      : [];
 
     // A marker-authenticated agent host may carry an explicit Cindy pin even
     // when IdentitiesOnly is no. External IdentityFile metadata never enters
@@ -83,6 +103,7 @@ export async function resolveAuth(host: HostConfig): Promise<ResolvedAuth> {
     if (!allowedFingerprints && host.identityFile) {
       const resolved = await resolveIdentityFingerprints(host.identityFile);
       allowedFingerprints = resolved.fingerprints;
+      pinnedIdentityFiles = [host.identityFile];
       if (allowedFingerprints.length === 0) {
         const e = new Error(
           `agent + pinned key failed: ${host.identityFile} is not a readable public key `
@@ -119,12 +140,14 @@ export async function resolveAuth(host: HostConfig): Promise<ResolvedAuth> {
           label: allowedFingerprints.length === 1
             ? 'ssh-agent[filtered]'
             : `ssh-agent[filtered:${allowedFingerprints.length}]`,
+          pinnedIdentityFiles,
+          readOfferedIdentityCount: () => filtered.lastOfferedCount,
         };
       } catch (err) {
         throwUnsupported((err as Error).message);
       }
     }
-    return { agent: endpoint, label: 'ssh-agent' };
+    return { agent: endpoint, label: 'ssh-agent', pinnedIdentityFiles: [] };
   }
 
   if (host.authMethod === 'key') {
@@ -150,7 +173,11 @@ export async function resolveAuth(host: HostConfig): Promise<ResolvedAuth> {
       (e as { code?: string }).code = KEY_FILE_UNREADABLE_CODE;
       throw e;
     }
-    return { privateKey, label: `key:${baseName(host.identityFile)}` };
+    return {
+      privateKey,
+      label: `key:${baseName(host.identityFile)}`,
+      pinnedIdentityFiles: [host.identityFile],
+    };
   }
 
   throw new Error(`unsupported authMethod: ${(host as { authMethod: string }).authMethod}`);

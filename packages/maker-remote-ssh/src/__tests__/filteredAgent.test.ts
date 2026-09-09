@@ -151,6 +151,23 @@ describe('FilteredAgent.getIdentities', () => {
     expect(keys).toEqual([]);
   });
 
+  it('records how many allowed identities were actually offered (#4201)', async () => {
+    const keyA = makeKey(Buffer.from('keyA-pub-bytes'));
+    const keyB = makeKey(Buffer.from('keyB-pub-bytes'));
+    const loaded = new FilteredAgent(new MockUpstreamAgent([keyA, keyB]), [sshFingerprint(keyB)]);
+    expect(loaded.lastOfferedCount).toBeNull();
+    await new Promise<void>((resolve, reject) => {
+      loaded.getIdentities((err) => (err ? reject(err) : resolve()));
+    });
+    expect(loaded.lastOfferedCount).toBe(1);
+
+    const notLoaded = new FilteredAgent(new MockUpstreamAgent([keyA]), [sshFingerprint(keyB)]);
+    await new Promise<void>((resolve, reject) => {
+      notLoaded.getIdentities((err) => (err ? reject(err) : resolve()));
+    });
+    expect(notLoaded.lastOfferedCount).toBe(0);
+  });
+
   it('propagates upstream errors', async () => {
     const boom = new Error('agent unreachable');
     const upstream = new MockUpstreamAgent([], boom);
