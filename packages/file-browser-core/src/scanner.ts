@@ -33,14 +33,24 @@ const PDF_SIGNATURE_WINDOW = 1024;
 /**
  * 文本读取 / 覆写前的二进制判定,readFile 与 writeFile 共用:
  *   - 前 4 KiB 含 NUL → PNG/FBX/DLL 等常见二进制;
- *   - 前 1 KiB 内出现 `%PDF-` → PDF。合法 PDF 不一定含 NUL(对象流未压缩、纯 ASCII 时
- *     整份文件都可能没有 NUL),只靠 NUL 探测会把它当 UTF-8 文本交给渲染层,显示成
- *     `%PDF-1.4 ... obj ... stream` 原始语法(issue #4158)。判成二进制后渲染层按扩展名
- *     走既有 PdfPreview 分支。
+ *   - `.pdf` 文件前 1 KiB 内出现 `%PDF-` → PDF。合法 PDF 不一定含 NUL(对象流未压缩、
+ *     纯 ASCII 时整份文件都可能没有 NUL),只靠 NUL 探测会把它当 UTF-8 文本交给渲染层,
+ *     显示成 `%PDF-1.4 ... obj ... stream` 原始语法(issue #4158)。判成二进制后渲染层按
+ *     扩展名走既有 PdfPreview 分支。
+ *     文件头判定只对 `.pdf` 扩展名生效:渲染层的 PDF 预览本来就以扩展名为准,其他扩展名
+ *     判成二进制只会得到不可渲染占位、还会让编辑器拒绝保存;而 markdown / 日志 / 源码
+ *     在开头引用 `%PDF-` 很常见,不能误伤。
  */
-function isBinaryProbe(probe: Buffer): boolean {
+function isBinaryProbe(probe: Buffer, relPath: string): boolean {
   if (probe.includes(0)) return true;
+  if (!hasPdfExtension(relPath)) return false;
   return probe.subarray(0, PDF_SIGNATURE_WINDOW).includes(PDF_SIGNATURE);
+}
+
+function hasPdfExtension(relPath: string): boolean {
+  const name = relPath.slice(relPath.lastIndexOf('/') + 1);
+  const dot = name.lastIndexOf('.');
+  return dot > 0 && name.slice(dot).toLowerCase() === '.pdf';
 }
 
 /**
@@ -342,8 +352,8 @@ export async function listDir(
 
 /**
  * Read one file, capped at MAX_FILE_BYTES. Returns UTF-8 string + truncation
- * flag. Binary files (NULL byte in first 4KB, or a PDF header) raise an error
- * so the renderer can render the placeholder / PDF preview instead.
+ * flag. Binary files (NULL byte in first 4KB, or a `.pdf` with a PDF header)
+ * raise an error so the renderer can render the placeholder / PDF preview instead.
  */
 export async function readFile(
   workdir: string,
@@ -364,11 +374,11 @@ export async function readFile(
       await handle.read(buf, 0, buf.length, 0);
     }
     // Quick binary detection: NULL byte in first 4 KiB (PNG/FBX/DLL etc.) or a
-    // PDF header (see isBinaryProbe). UTF-16 text files contain NULL bytes too
-    // but are rare in dev workflows; renderer can still fall back to "open in
-    // OS" if needed.
+    // PDF header in a `.pdf` file (see isBinaryProbe). UTF-16 text files contain
+    // NULL bytes too but are rare in dev workflows; renderer can still fall back
+    // to "open in OS" if needed.
     const probe = buf.subarray(0, Math.min(buf.length, 4096));
-    if (isBinaryProbe(probe)) {
+    if (isBinaryProbe(probe, sub)) {
       const err = new Error(`binary file: ${relPath}`);
       (err as Error & { code?: string }).code = 'BINARY_FILE';
       throw err;
@@ -453,8 +463,8 @@ export async function readFileChunk(
  *   - Refuses files >MAX_FILE_BYTES on disk (the read path truncates large
  *     files; saving back would silently lose data).
  *   - Refuses content >MAX_FILE_BYTES (defense against giant paste).
- *   - Refuses binary files (NULL byte in first 4KB, or a PDF header) — same
- *     probe as readFile, so the editor never opens binaries to begin with.
+ *   - Refuses binary files (NULL byte in first 4KB, or a `.pdf` with a PDF
+ *     header) — same probe as readFile, so the editor never opens binaries.
  */
 export async function writeFile(
   workdir: string,
@@ -487,7 +497,7 @@ export async function writeFile(
   try {
     const probe = Buffer.alloc(Math.min(st.size, 4096));
     if (probe.length > 0) await probeHandle.read(probe, 0, probe.length, 0);
-    if (isBinaryProbe(probe)) {
+    if (isBinaryProbe(probe, sub)) {
       throw new Error(`binary file: ${relPath}`);
     }
   } finally {

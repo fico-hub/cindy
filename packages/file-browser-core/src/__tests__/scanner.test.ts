@@ -255,13 +255,37 @@ describe('readFile binary detection', () => {
     }
   });
 
-  it('still returns plain text that only mentions %PDF- past the header window', async () => {
+  it('keeps a non-.pdf text file that quotes %PDF- in its first line as text', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-file-browser-'));
+    try {
+      const notes = `# PDF header\nEvery PDF starts with %PDF-1.x followed by objects.\n`;
+      await fsWriteFile(path.join(root, 'notes.md'), notes, 'utf8');
+      const result = await readFile(root, 'notes.md');
+      expect(result.content).toBe(notes);
+      await writeFile(root, 'notes.md', `${notes}edited\n`);
+      expect(await fsReadFile(path.join(root, 'notes.md'), 'utf8')).toBe(`${notes}edited\n`);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('matches the .pdf extension case-insensitively', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-file-browser-'));
+    try {
+      await fsWriteFile(path.join(root, 'SCAN.PDF'), MINIMAL_NUL_FREE_PDF, 'latin1');
+      await expectBinaryFileError(readFile(root, 'SCAN.PDF'));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('still returns a .pdf-named text file when the header lies past the 1 KiB window', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-file-browser-'));
     try {
       const notes = `${'# PDF notes\n'.repeat(120)}The header is %PDF-1.7 followed by objects.\n`;
       expect(notes.indexOf('%PDF-')).toBeGreaterThan(1024);
-      await fsWriteFile(path.join(root, 'notes.md'), notes, 'utf8');
-      const result = await readFile(root, 'notes.md');
+      await fsWriteFile(path.join(root, 'notes.pdf'), notes, 'utf8');
+      const result = await readFile(root, 'notes.pdf');
       expect(result.content).toBe(notes);
       expect(result.truncated).toBe(false);
     } finally {
