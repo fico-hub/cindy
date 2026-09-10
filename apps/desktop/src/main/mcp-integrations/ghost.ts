@@ -25,6 +25,7 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 
 import { buildGhostRosterPrompt } from 'cindy-tools';
+import { writeDocsOutput } from '../doc-tools/docsOutputWriter.js';
 import type {
   CindyForgeInstallResult,
   CindyForgePackResult,
@@ -330,6 +331,7 @@ async function withForgeOwnerLease<T>(operation: () => Promise<T>): Promise<T> {
 
 async function getForgeSessionFsGate(
   sessionContext: LiziMcpSessionContext | undefined,
+  requireAutomaticWrite = false,
 ): Promise<ForgeSessionFsGate> {
   const sessionId = sessionContext?.sessionId ?? null;
   if (!sessionId) {
@@ -347,7 +349,8 @@ async function getForgeSessionFsGate(
       message: 'Forge cannot use a remote or unverified session workdir on the local host',
     };
   }
-  if (workdirWriteVerdict(snapshot.permissionMode, snapshot.planModeEnabled) === 'deny') {
+  const verdict = workdirWriteVerdict(snapshot.permissionMode, snapshot.planModeEnabled);
+  if (verdict === 'deny' || (requireAutomaticWrite && verdict !== 'allow')) {
     return {
       ok: false,
       errorCode: 'WORKDIR_READ_ONLY',
@@ -1363,6 +1366,20 @@ export function getCindyGhostsMcpDeps(
     message: '当前伙伴配置未启用该插件；不要重试，改用已授权能力，或让用户更新伙伴配置后再试。',
   });
   return {
+    saveLargeGhostResult: async (text) => withForgeOwnerLease(async () => {
+      const context = resolveSessionContext();
+      const gate = await getForgeSessionFsGate(context, true);
+      if (!gate.ok || !context?.sessionId) throw new Error('Tool result storage unavailable');
+      // Keep media referenced by the full response alive even when the SDK only
+      // receives its bounded projection. The existing ledger owns cleanup.
+      const committed = await commitMessageMediaRefs({ sessionId: context.sessionId, role: 'tool', content: text });
+      if (committed && committed.failed > 0) throw new Error('Tool result media references unavailable');
+      const relativePath = path.join('tool-results', `ghost-${randomUUID()}.json`);
+      // Reuse the root-anchored, no-overwrite writer, including its symlink/race
+      // checks. No plugin-controlled filename or raw fs write enters this path.
+      await writeDocsOutput({ root: gate.workingDir, path: path.join(gate.workingDir, relativePath), data: Buffer.from(text, 'utf8'), overwrite: false });
+      return relativePath;
+    }),
     connectAccount: async (target) => {
       if (target.kind === 'plugin' && !isGhostAllowedByFrozenProfile(target.id))
         return frozenProfileDenied();

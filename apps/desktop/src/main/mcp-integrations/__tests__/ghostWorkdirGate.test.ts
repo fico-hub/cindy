@@ -22,6 +22,12 @@ import type {
   GhostSetupEnsureResult,
 } from '../../cindy-brain/ghostSetupCoordinator';
 import { t } from '../../i18n';
+import type { WriteDocsOutputFn } from '@cindy/mcps';
+import { runDocsOutputWriteForTest } from '../../doc-tools/docsOutputWriterUtilityProcess.js';
+import { handleGhostCall } from 'cindy-tools';
+
+const { writeDocsOutputMock } = vi.hoisted(() => ({ writeDocsOutputMock: vi.fn<WriteDocsOutputFn>(async () => {}) }));
+vi.mock('../../doc-tools/docsOutputWriter.js', () => ({ writeDocsOutput: writeDocsOutputMock }));
 
 const tmpUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'ghost-workdir-gate-'));
 const prefsFile = () => path.join(tmpUserData, 'ghost-workdir-prefs.json');
@@ -233,8 +239,15 @@ vi.mock('../../plugin-publisher/host.js', () => ({
   getPluginPublisherOrchestrator: vi.fn(),
   startPluginPublish: startPluginPublishMock,
 }));
-vi.mock('../../cindy-media/blobStore.js', () => ({ mimeForExt: () => 'image/png' }));
+vi.mock('../../cindy-media/blobStore.js', () => ({
+  mimeForExt: () => 'image/png',
+  parseBlobUrl: (url: string) => {
+    const match = /^cindy-media:\/\/blobs\/([a-f0-9]{64})\.png$/.exec(url);
+    return match ? { hash: match[1], ext: '.png' } : null;
+  },
+}));
 vi.mock('../../cindy-media/ledger.js', () => ({
+  pinBlob: vi.fn(async () => {}),
   hasRef: ledgerHasRefMock,
   hasGhostToolGrant: ledgerHasGhostToolGrantMock,
   addRef: ledgerAddRefMock,
@@ -306,6 +319,8 @@ function clearAllPrefs(): void {
 }
 
 beforeEach(() => {
+  writeDocsOutputMock.mockReset();
+  writeDocsOutputMock.mockResolvedValue(undefined);
   authorizationRequestMock.mockClear();
   isAuthorizationSessionMock.mockResolvedValue(false);
   fs.mkdirSync(outsideDir, { recursive: true });
@@ -2195,4 +2210,81 @@ it.each([false, true])('only marks a teammate setup plan as reauthorization with
   expect(authorizationRequestMock).toHaveBeenCalledWith('s1', {
     kind: 'plugin', id: 'art', ...(reauth ? { reauthorize: true } : {}),
   }, setupPlan);
+});
+
+describe('oversized ghost result Host storage', () => {
+  it('roundtrips a production handler result through the safe filesystem writer', async () => {
+    const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ghost-safe-spill-'));
+    try {
+      const deps = makeDeps();
+      sessionSnapshotMock.mockResolvedValue({ workingDir: root, remoteHostId: null, permissionMode: 'auto', planModeEnabled: false });
+      writeDocsOutputMock.mockImplementation(async input => {
+        const realRoot = await fs.promises.realpath(root);
+        const stat = await fs.promises.lstat(realRoot, { bigint: true });
+        await runDocsOutputWriteForTest({
+          expectedRoot: { realPath: realRoot, dev: stat.dev, ino: stat.ino },
+          expectedParent: null,
+          parentRelativePath: path.relative(input.root, path.dirname(input.path)),
+          targetName: path.basename(input.path), data: input.data, overwrite: input.overwrite,
+        }, realRoot);
+      });
+      const data = '\\'.repeat(641694);
+      const response = await handleGhostCall({ ...deps, callGhostTool: async () => ({ ok: true, result: { data } }) }, { ghost_id: 'synthetic', tool: 'read' });
+      const projection = JSON.parse(response.content[0].text);
+      expect(projection.complete_result_saved).toBe(true);
+      const stored = JSON.parse(await fs.promises.readFile(path.join(root, projection.saved_to), 'utf8'));
+      expect(stored.result.data).toBe(data);
+      expect(Buffer.byteLength(JSON.stringify(response))).toBeLessThanOrEqual(64 * 1024);
+    } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
+  });
+
+  it('pins media that only occurs beyond the inline preview before externalizing', async () => {
+    const deps = makeDeps();
+    const hash = 'b'.repeat(64);
+    await deps.saveLargeGhostResult!(JSON.stringify({ result: { text: 'x'.repeat(70000), image: `cindy-media://blobs/${hash}.png` } }));
+    expect(ledgerRefs).toContainEqual(expect.objectContaining({ hash, refKind: 'session-attachment', refId: 's1', originKind: 'tool' }));
+    expect(ledgerAddRefMock.mock.invocationCallOrder[0]).toBeLessThan(writeDocsOutputMock.mock.invocationCallOrder[0]!);
+  });
+
+  it.each<TestAgentKind>(['claude-code', 'codex', 'pi'])('uses the authoritative local root and safe writer for %s', async agentKind => {
+    const deps = makeDeps(agentKind);
+    const text = JSON.stringify({ ok: true, result: { data: 'x'.repeat(70000) } });
+    const saved = await deps.saveLargeGhostResult!(text);
+    expect(sessionSnapshotMock).toHaveBeenCalledWith('s1');
+    expect(path.dirname(saved)).toBe('tool-results');
+    expect(path.basename(saved)).toMatch(/^ghost-[0-9a-f-]+\.json$/);
+    expect(writeDocsOutputMock).toHaveBeenCalledWith({
+      root: WORKDIR, path: path.join(WORKDIR, saved), data: Buffer.from(text), overwrite: false,
+    });
+    expect(captureMutationOwnerMock).toHaveBeenCalledOnce();
+    expect(releaseMutationMock).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { remoteHostId: 'remote', permissionMode: 'auto', planModeEnabled: false },
+    { remoteHostId: null, permissionMode: 'plan', planModeEnabled: false },
+    { remoteHostId: null, permissionMode: 'ask', planModeEnabled: false },
+    { remoteHostId: null, permissionMode: 'unknown', planModeEnabled: false },
+    { remoteHostId: null, permissionMode: 'auto', planModeEnabled: true },
+  ])('does not spill into an unauthorized local filesystem (%j)', async state => {
+    const deps = makeDeps('codex');
+    sessionSnapshotMock.mockResolvedValue({ workingDir: WORKDIR, ...state });
+    await expect(deps.saveLargeGhostResult!('result')).rejects.toThrow();
+    expect(writeDocsOutputMock).not.toHaveBeenCalled();
+    expect(releaseMutationMock).toHaveBeenCalledOnce();
+  });
+
+  it('does not fall back to the cwd when the caller session is unknown', async () => {
+    const deps = makeDeps('codex', null);
+    await expect(deps.saveLargeGhostResult!('result')).rejects.toThrow();
+    expect(writeDocsOutputMock).not.toHaveBeenCalled();
+  });
+
+  it('propagates a failed safe write and releases the owner lease', async () => {
+    const deps = makeDeps();
+    writeDocsOutputMock.mockRejectedValueOnce(new Error('disk full'));
+    await expect(deps.saveLargeGhostResult!('result')).rejects.toThrow('disk full');
+    expect(writeDocsOutputMock).toHaveBeenCalledOnce();
+    expect(releaseMutationMock).toHaveBeenCalledOnce();
+  });
 });
