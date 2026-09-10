@@ -529,6 +529,19 @@ function validateMessageOpResult(p: Record<string, unknown>): string | null {
   ) {
     return 'msg.op.result.retryAfterMs must be a non-negative finite number or null';
   }
+  if (p.deliveryState !== undefined && !['sent', 'not_sent', 'unknown'].includes(String(p.deliveryState))) return 'invalid deliveryState';
+  if (p.sentMessage !== undefined) {
+    const m = p.sentMessage;
+    if (!isPlainObject(m) || !isNonEmptyString(m.chatId) || typeof m.text !== 'string' ||
+        !['html', 'plain'].includes(String(m.tier)) || !Array.isArray(m.entities)) return 'invalid sentMessage';
+    for (const e of m.entities) {
+      if (!isPlainObject(e) || !isNonEmptyString(e.type) || !Number.isSafeInteger(e.offset) ||
+          !Number.isSafeInteger(e.length) || Number(e.offset) < 0 || Number(e.length) <= 0 ||
+          Number(e.offset) + Number(e.length) > m.text.length ||
+          (e.url !== undefined && typeof e.url !== 'string') ||
+          (e.language !== undefined && typeof e.language !== 'string')) return 'invalid sentMessage entity';
+    }
+  }
   return null;
 }
 

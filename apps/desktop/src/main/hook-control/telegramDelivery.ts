@@ -20,6 +20,7 @@ export interface TelegramDeliveryTarget {
 export interface TelegramDeliveryStatus {
   connected: boolean;
   supported: boolean;
+  sendEpoch?: string;
   target: TelegramDeliveryTarget | null;
   code?: string;
 }
@@ -43,7 +44,7 @@ export interface TelegramDeliveryReceipt {
   createdAt: string;
   result?: MessageOpResultPayload;
   code?: string;
-  /** msg.op.result does not return actual text/entities or negotiated tier. */
+  /** Actual format comparison belongs to the caller holding the expected presentation. */
   formatVerified: false;
 }
 export interface TelegramDeliveryBridge {
@@ -71,6 +72,16 @@ export function selectTelegramDeliveryTarget(
     bindingId: binding.bindingId, principalId: binding.principalId,
     principalName: binding.principalName, externalKey: candidate.externalKey, botId: candidate.botId, botName: binding.scopeName,
   } : null;
+}
+
+/** A message ID alone cannot prove the bound recipient received this send. */
+function stateFromResult(row: TelegramDeliveryReceipt, result: MessageOpResultPayload | null): TelegramDeliveryReceipt['state'] {
+  if (!result || result.opId !== row.opId) return 'unknown';
+  if (!result.ok && result.deliveryState === 'not_sent') return 'not_sent';
+  return result.ok && result.deliveryState === 'sent' && /^[1-9]\d*$/.test(result.messageId ?? '') &&
+    result.sentMessage?.chatId === row.target.principalId &&
+    typeof result.sentMessage.text === 'string' && Array.isArray(result.sentMessage.entities) &&
+    result.sentMessage.tier === row.requestedTier ? 'sent' : 'unknown';
 }
 
 const hash = (value: string): string => createHash('sha256').update(value).digest('hex');
@@ -106,7 +117,7 @@ export function createTelegramDeliveryBridge(deps: {
       try {
         const row = JSON.parse(fs.readFileSync(file, 'utf8')) as TelegramDeliveryReceipt;
         if (row.opId !== result.opId || row.state === 'sent') return;
-        row.state = result.ok && result.messageId?.trim() ? 'sent' : 'unknown';
+        row.state = stateFromResult(row, result);
         row.result = result;
         if (row.state === 'sent') delete row.code;
         saveFile(file, row);
@@ -130,7 +141,7 @@ export function createTelegramDeliveryBridge(deps: {
       }
       const status = deps.status();
       const target = status.target;
-      if (!status.connected || !status.supported || !target ||
+      if (!status.connected || !status.supported || !status.sendEpoch || !target ||
           target.bindingId !== input.target.bindingId ||
           target.principalId !== input.target.principalId ||
           target.externalKey !== input.target.externalKey ||
@@ -157,11 +168,10 @@ export function createTelegramDeliveryBridge(deps: {
       try {
         const result = await deps.send({
           opId: row.opId, scope: { externalKey: target.externalKey },
-          action: { kind: 'send', text: input.text, tier: input.tier },
+          action: { kind: 'send', text: input.text, tier: input.tier,
+            delivery: { bindingId: target.bindingId, epoch: status.sendEpoch, expiresAt: Date.now() + 60_000 } },
         });
-        // Negative server results lack a typed "definitely not sent" guarantee.
-        // Keep them unknown too; record the original error for reconciliation.
-        row.state = result?.ok && result.opId === row.opId && result.messageId?.trim() ? 'sent' : 'unknown';
+        row.state = stateFromResult(row, result);
         if (result) row.result = result;
         if (row.state === 'unknown') row.code = 'DELIVERY_OUTCOME_UNKNOWN';
       } catch { row.state = 'unknown'; row.code = 'DELIVERY_OUTCOME_UNKNOWN'; }

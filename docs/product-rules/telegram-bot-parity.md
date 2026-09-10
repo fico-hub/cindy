@@ -218,3 +218,10 @@ Cindy 有两个 Telegram bot，用户看到的是同一个产品：
 - 呈现大脑：`apps/desktop/src/main/im/shared/turnPresenter.ts`
 - 呈现能力契约：`packages/lizi-im/src/telegram/presentationCapabilities.ts`
 - 任务 / 对话 / 消息的用词：`docs/product-rules/task-and-conversation-naming.md`
+
+
+### 官方本人 DM 主动投递补充
+
+官方 hook 的主动正文必须双方宣告 `telegram-dm-send-v1`，并有 `telegram-send-epoch:<UUID>`；`msg-op-v1` 单独只证明表情能力。实现正本：`hook-control/manager.ts` 的连接门控与 `telegramDelivery.ts` 的 owner-scoped 持久日志；配套服务端 owner-DM gateway 负责当前绑定/设备/lane 校验和单次 Bot API 发送。个人 bot 继续自己的 token transport，本次不改。
+
+新回执附带 Telegram 实际 text/entities/chatId/tier，Host 仅在目标匹配时认定 sent；调用者对照冻结展示稿验证正文与格式。`formatVerified=false` 表示 Host 未替调用者做展示稿比较，不表示回执没有实际 entities。旧服务器不支持时直接拒发。发送前持久 claim、超时未知不重发、迟到回执核对原记录；进程 epoch 和 60 秒期限阻止服务端重启后旧帧再发。该能力为源码契约，不能据此宣称已在运行应用加载或完成真实投递。

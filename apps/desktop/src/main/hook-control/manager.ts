@@ -21,6 +21,8 @@ import {
   HOOK_FEATURE_GROUP_RELAY,
   DEFAULT_TELEGRAM_BEHAVIOR,
   HOOK_FEATURE_MESSAGE_OPS,
+  HOOK_FEATURE_TELEGRAM_DM_SEND,
+  HOOK_TELEGRAM_SEND_EPOCH_PREFIX,
   HOOK_FEATURE_GROUP_RELAY_RECIPIENT,
   HOOK_FEATURE_LIFECYCLE_ANNOUNCEMENT,
   HOOK_FEATURE_MULTI_TEAM,
@@ -701,6 +703,7 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
       // 只给 Telegram 声明: msg.op 目前只有 Telegram 的执行器, X 的渲染路径
       // 不接入(#1855 的红线之一)。
       HOOK_FEATURE_MESSAGE_OPS,
+      HOOK_FEATURE_TELEGRAM_DM_SEND,
       HOOK_FEATURE_SESSION_NEW,
     ],
     isEnabled: () => store.get().telegramEnabled,
@@ -962,11 +965,14 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
     const connected = accountActive && !disposed && isAvailable() && store.get().telegramEnabled &&
       lane.status === 'connected' && lane.serverWelcomeReceived && !lane.awaitingStateSnapshot &&
       laneCapabilityReady(lane);
-    const supported = connected && lane.serverFeatures.includes(HOOK_FEATURE_MESSAGE_OPS);
+    const epochs = lane.serverFeatures.filter(f => f.startsWith(HOOK_TELEGRAM_SEND_EPOCH_PREFIX));
+    const sendEpoch = epochs.length === 1 ? epochs[0]!.slice(HOOK_TELEGRAM_SEND_EPOCH_PREFIX.length) : undefined;
+    const supported = connected && lane.serverFeatures.includes(HOOK_FEATURE_MESSAGE_OPS) &&
+      lane.serverFeatures.includes(HOOK_FEATURE_TELEGRAM_DM_SEND) && !!sendEpoch;
     const target = connected && lane.binding?.state === 'confirmed'
       ? selectTelegramDeliveryTarget(lane.binding, deps.listTelegramDeliveryKeys?.(dispatchId('telegram')) ?? [])
       : null;
-    return { connected, supported, target,
+    return { connected, supported, target, sendEpoch,
       ...(!connected ? { code: 'HOOK_NOT_CONNECTED' } : !supported ? { code: 'SERVER_TOO_OLD' }
         : !target ? { code: 'OWNER_DM_TARGET_UNAVAILABLE' } : {}),
     };
@@ -2989,7 +2995,9 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
     sendTelegramDelivery(payload) {
       const status = telegramDeliveryStatus();
       if (!status.supported || !status.target ||
-          status.target.externalKey !== payload.scope.externalKey || payload.action.kind !== 'send') {
+          status.target.externalKey !== payload.scope.externalKey || payload.action.kind !== 'send' ||
+          payload.action.delivery?.epoch !== status.sendEpoch ||
+          payload.action.delivery?.bindingId !== status.target.bindingId) {
         return Promise.resolve(null);
       }
       if (pendingDeliveries.has(payload.opId)) return Promise.resolve(null);
