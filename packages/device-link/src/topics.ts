@@ -190,6 +190,9 @@ const ACCOUNT_CHANNELS: ReadonlySet<string> = new Set([
   // (maker:claude-session-route-changed 不在此表 —— payload 带 sessionId,走
   // topicForPush 的 session-scoped 兜底路由到 session:<id>。)
   'usage:codex-account-changed',
+  // Same provider-scoped payloads consumed by the local usage hooks.
+  'usage:codex-provider-account-changed',
+  'usage:subscription-provider-account-changed',
   'usage:claude-account-changed',
   'usage:xai-subscription-changed',
   'usage:xai-rate-limit-changed',

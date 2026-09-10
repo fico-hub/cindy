@@ -326,3 +326,19 @@ describe('claude subscription snapshot hydration race', () => {
     expect(mocks.tapWindowBroadcast).toHaveBeenCalledWith('usage:xai-rate-limit-changed', null);
   });
 });
+
+
+it('keeps named Codex and subscription pushes in their provider-scoped channels', async () => {
+  vi.resetModules();
+  mocks.tapWindowBroadcast.mockClear();
+  mocks.queryOne.mockResolvedValue(null);
+  const broadcaster = await import('../usageBroadcaster');
+  await broadcaster.recordCodexAccountUsageSnapshot({ source: 'codex-app-server',
+    primary: { usedPercent: 70 } }, 'second-account');
+  expect(mocks.tapWindowBroadcast).not.toHaveBeenCalledWith('usage:codex-account-changed', expect.anything());
+  expect(mocks.tapWindowBroadcast).toHaveBeenCalledWith('usage:codex-provider-account-changed',
+    expect.objectContaining({ providerId: 'second-account', snapshot: expect.objectContaining({ primary: { usedPercent: 70 } }) }));
+  broadcaster.broadcastSubscriptionAccountUsage('claude-2', null);
+  expect(mocks.tapWindowBroadcast).toHaveBeenCalledWith('usage:subscription-provider-account-changed',
+    { providerId: 'claude-2', snapshot: null });
+});

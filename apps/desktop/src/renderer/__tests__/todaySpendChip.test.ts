@@ -81,7 +81,7 @@ describe('TodaySpendChip dashboard routing', () => {
     );
     expect(compact(source)).toContain(compact('const isDeviceLinkRemoteClaudeSubscription ='));
     expect(compact(source)).toContain(
-      compact('isDeviceLinkRemoteClaudeSubscription ? (deviceLinkDeviceId ?? null) : null,'),
+      compact('isDeviceLinkRemoteClaudeSubscription && !isSubscriptionBridge ? (deviceLinkDeviceId ?? null) : null,'),
     );
     // 本机订阅快照 hook 对 device-link 关闭(两个 hook 的 enabled 互斥)
     expect(compact(source)).toContain(
@@ -226,7 +226,7 @@ describe('TodaySpendChip dashboard routing', () => {
     expect(compact(source)).toContain(
       compact(
         'if (isDeviceLinkRemoteClaudeSubscription && deviceLinkDeviceId) {\n' +
-          '        requestRemoteClaudeSubscriptionRefresh(deviceLinkDeviceId);\n' +
+          "        requestRemoteClaudeSubscriptionRefresh(deviceLinkDeviceId, providerId ?? 'anthropic');\n" +
           '      } else if (!isDeviceLinkRemote) {\n' +
           "        requestClaudeSubscriptionRefresh(providerId ?? 'anthropic');\n" +
           '      }',

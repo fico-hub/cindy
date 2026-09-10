@@ -641,6 +641,9 @@ export const PUSH_FORWARD_ALLOWLIST: ReadonlySet<string> = new Set([
   // 控制端远程 codex / chatgpt-bridge 会话 chip 镜像被控端限额窗口。频率上限:
   // app-server 每 turn 记录一次、WHAM 后台刷新 10s 节流。
   'usage:codex-account-changed',
+  // Same provider-scoped payloads consumed by the local usage hooks.
+  'usage:codex-provider-account-changed',
+  'usage:subscription-provider-account-changed',
   // Claude 网关配额变化(LiteLLM 月度/今日,账号级):控制端远程网关形态会话 chip
   // 镜像被控端 daily/monthly。被控端刷新自带 10s 节流 + turn-done 触发。
   'usage:claude-account-changed',

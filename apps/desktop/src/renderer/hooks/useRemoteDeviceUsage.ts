@@ -39,6 +39,8 @@ const codexAccountMirror = createRemoteDeviceUsageMirror<RemoteCodexAccountUsage
   invokeChannel: 'maker:usage:account',
   invokeArgs: ['codex'],
   pushChannel: 'usage:codex-account-changed',
+  defaultProviderId: 'openai',
+  providerPushChannel: 'usage:codex-provider-account-changed',
 });
 const claudeAccountMirror = createRemoteDeviceUsageMirror<ClaudeAccountUsageSnapshot>({
   invokeChannel: 'maker:usage:account',
@@ -48,6 +50,8 @@ const claudeAccountMirror = createRemoteDeviceUsageMirror<ClaudeAccountUsageSnap
 const xaiSubscriptionMirror = createRemoteDeviceUsageMirror<XaiSubscriptionUsageSnapshot>({
   invokeChannel: 'maker:usage:xai-subscription',
   pushChannel: 'usage:xai-subscription-changed',
+  defaultProviderId: 'xai',
+  providerPushChannel: 'usage:subscription-provider-account-changed',
 });
 const xaiRateLimitMirror = createRemoteDeviceUsageMirror<XaiRateLimitSnapshot>({
   invokeChannel: null,
@@ -57,12 +61,13 @@ const xaiRateLimitMirror = createRemoteDeviceUsageMirror<XaiRateLimitSnapshot>({
 /** 被控端 Codex 账号组合 payload 镜像(远程 codex / chatgpt-bridge 会话 chip 用)。 */
 export function useRemoteCodexAccountUsage(
   deviceId: string | null,
+  providerId?: string,
 ): RemoteCodexAccountUsagePayload | null {
-  return codexAccountMirror.useMirror(deviceId);
+  return codexAccountMirror.useMirror(deviceId, providerId);
 }
 
-export function requestRemoteCodexAccountRefresh(deviceId: string): void {
-  codexAccountMirror.request(deviceId);
+export function requestRemoteCodexAccountRefresh(deviceId: string, providerId?: string): void {
+  codexAccountMirror.request(deviceId, providerId);
 }
 
 /** 被控端 Claude 网关配额(LiteLLM daily/monthly)镜像(远程网关形态会话 chip 用)。 */
@@ -75,12 +80,13 @@ export function useRemoteClaudeAccountUsage(
 /** 被控端 xAI 订阅周用量镜像(远程 xai 形态会话 chip 用)。 */
 export function useRemoteXaiSubscriptionUsage(
   deviceId: string | null,
+  providerId?: string,
 ): XaiSubscriptionUsageSnapshot | null {
-  return xaiSubscriptionMirror.useMirror(deviceId);
+  return xaiSubscriptionMirror.useMirror(deviceId, providerId);
 }
 
-export function requestRemoteXaiSubscriptionRefresh(deviceId: string): void {
-  xaiSubscriptionMirror.request(deviceId);
+export function requestRemoteXaiSubscriptionRefresh(deviceId: string, providerId?: string): void {
+  xaiSubscriptionMirror.request(deviceId, providerId);
 }
 
 /** 被控端 xAI 限流头镜像(push-only,tooltip 尽力显示)。 */

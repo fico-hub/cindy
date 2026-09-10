@@ -197,3 +197,11 @@ describe('expandMakerEventBatchPayload', () => {
       .toBe('session:s7');
   });
 });
+
+
+it.each(['usage:codex-provider-account-changed', 'usage:subscription-provider-account-changed'])(
+  '%s forwards both scoped usage and account clears on the sessions topic', channel => {
+    expect(topicForPush(channel, { providerId: 'account-2', snapshot: { primary: { usedPercent: 10 } } })).toBe('sessions');
+    expect(topicForPush(channel, { providerId: 'account-2', snapshot: null })).toBe('sessions');
+  },
+);

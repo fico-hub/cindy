@@ -6,6 +6,7 @@
  * handler 时拉起 Electron / runtime config 副作用。
  */
 
+import type { XaiSubscriptionUsageSnapshot } from '../../shared/xaiSubscriptionUsage.js';
 import { scryptSync } from 'node:crypto';
 import { readSubscriptionAccountUsage, triggerSubscriptionAccountUsage, syncSubscriptionAccountUsage, setSubscriptionAccountUsageBroadcaster } from '../usage/subscriptionAccountUsage.js';
 import { broadcastSubscriptionAccountUsage } from '../usageBroadcaster.js';
@@ -228,8 +229,16 @@ export function triggerXaiSubscriptionUsageRefresh(providerId?: string): void {
  * (被控开关 + 撤销黑名单 + allowlist)后直读本函数,不进 ipcMain。cached-first,
  * 与本机 renderer 读到的快照同形。
  */
-export function readXaiSubscriptionUsageSnapshotForDeviceLink(): Promise<unknown | null> {
-  return xaiSubscriptionUsageReader.read();
+export async function readXaiSubscriptionUsageSnapshotForDeviceLink(providerId?: string): Promise<XaiSubscriptionUsageSnapshot | null> {
+  if (!providerId || providerId === 'xai') return xaiSubscriptionUsageReader.read();
+  if (subscriptionAccountKind(providerId) !== 'xai') return null;
+  return await readSubscriptionAccountUsage(providerId) as XaiSubscriptionUsageSnapshot | null;
+}
+
+export async function readClaudeSubscriptionUsageSnapshotForDeviceLink(providerId?: string): Promise<import('../../shared/claudeSubscriptionUsage.js').ClaudeSubscriptionUsageSnapshot | null> {
+  if (!providerId || providerId === 'anthropic') return claudeSubscriptionUsageReader.read();
+  if (subscriptionAccountKind(providerId) !== 'claude') return null;
+  return await readSubscriptionAccountUsage(providerId) as import('../../shared/claudeSubscriptionUsage.js').ClaudeSubscriptionUsageSnapshot | null;
 }
 
 /** SuperGrok 登录 / 登出 / 换号后强制同步(先清再拉)。调用方应 await 后再广播连接态。 */
@@ -343,16 +352,8 @@ export function registerMakerUsageIpc(maker: Maker): void {
       return { ...result, providerId: providerId ?? 'openai',
         rateLimits: result.rateLimits ? { ...result.rateLimits, providerId: providerId ?? 'openai' } : null };
     },
-    readClaudeSubscriptionUsageSnapshot: async (providerId) => {
-      if (!providerId || providerId === 'anthropic') return claudeSubscriptionUsageReader.read();
-      if (subscriptionAccountKind(providerId) !== 'claude') return null;
-      return await readSubscriptionAccountUsage(providerId) as import('../../shared/claudeSubscriptionUsage.js').ClaudeSubscriptionUsageSnapshot | null;
-    },
-    readXaiSubscriptionUsageSnapshot: async (providerId) => {
-      if (!providerId || providerId === 'xai') return xaiSubscriptionUsageReader.read();
-      if (subscriptionAccountKind(providerId) !== 'xai') return null;
-      return await readSubscriptionAccountUsage(providerId) as import('../../shared/xaiSubscriptionUsage.js').XaiSubscriptionUsageSnapshot | null;
-    },
+    readClaudeSubscriptionUsageSnapshot: readClaudeSubscriptionUsageSnapshotForDeviceLink,
+    readXaiSubscriptionUsageSnapshot: readXaiSubscriptionUsageSnapshotForDeviceLink,
     assertTrustedSender: (event) => {
       assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]);
     },

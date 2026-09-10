@@ -15,6 +15,9 @@ import type { ClaudeSubscriptionUsageSnapshot } from '../../../../shared/claudeS
 import type { SessionUsageMoney } from '@/hooks/useSessionUsageMoney';
 
 const mocks = vi.hoisted(() => ({
+  localProviders: [] as Array<{ id: string; auth: { native: string } }>,
+  deviceProviders: [] as Array<{ id: string; auth: { native: string } }>,
+  remoteProviderIds: [] as Array<string | undefined>,
   localClaudeSnapshot: null as ClaudeSubscriptionUsageSnapshot | null,
   remoteClaudeSnapshot: null as ClaudeSubscriptionUsageSnapshot | null,
   remoteHookDeviceIds: [] as Array<string | null>,
@@ -67,6 +70,9 @@ vi.mock('react-i18next', () => ({
   }),
 }));
 
+vi.mock('@/hooks/useProviders', () => ({ useProviders: () => ({ providers: mocks.localProviders }) }));
+vi.mock('@/hooks/useDeviceProviders', () => ({ useDeviceProviders: () => ({ providers: mocks.deviceProviders }) }));
+
 vi.mock('@/hooks/useApiKey', () => ({
   useApiKey: () => ({ hasSavedKey: false, isReconciling: false }),
 }));
@@ -97,7 +103,8 @@ vi.mock('@/hooks/useClaudeSubscriptionUsage', () => ({
 }));
 vi.mock('@/hooks/useRemoteClaudeSubscriptionUsage', () => ({
   requestRemoteClaudeSubscriptionRefresh: mocks.requestRemoteRefresh,
-  useRemoteClaudeSubscriptionUsage: (deviceId: string | null) => {
+  useRemoteClaudeSubscriptionUsage: (deviceId: string | null, providerId?: string) => {
+    mocks.remoteProviderIds.push(providerId);
     mocks.remoteHookDeviceIds.push(deviceId);
     return deviceId ? mocks.remoteClaudeSnapshot : null;
   },
@@ -161,6 +168,9 @@ function renderRemoteChip(providerId: string | null) {
 
 beforeEach(() => {
   vi.useFakeTimers();
+  mocks.localProviders = [];
+  mocks.deviceProviders = [];
+  mocks.remoteProviderIds = [];
   mocks.localClaudeSnapshot = null;
   mocks.remoteClaudeSnapshot = null;
   mocks.remoteHookDeviceIds = [];
@@ -364,5 +374,34 @@ describe('TodaySpendChip device-link remote sessions', () => {
     );
 
     expect(container.textContent).toContain('剩余 75%');
+  });
+});
+
+
+describe('existing UI with remote account data', () => {
+  it('renders the same subscription label and classes for identical local and remote data', () => {
+    const snapshot: ClaudeSubscriptionUsageSnapshot = {
+      source: 'oauth-endpoint', fiveHour: { utilization: 12 }, sevenDay: { utilization: 25 },
+    };
+    mocks.localClaudeSnapshot = snapshot;
+    mocks.remoteClaudeSnapshot = snapshot;
+    const local = render(<TodaySpendChip vendorKey="cc" providerId="anthropic" modelId="claude-fable-5[1m]" />);
+    const label = local.container.textContent;
+    const className = local.container.querySelector('button')?.className;
+    local.unmount();
+    const remote = renderRemoteChip('anthropic');
+    expect(remote.container.textContent).toBe(label);
+    expect(remote.container.querySelector('button')?.className).toBe(className);
+  });
+
+  it.each(['cc', 'pi', 'codex'] as const)('reads the selected remote Claude account for %s', vendorKey => {
+    mocks.deviceProviders = [{ id: 'second-account', auth: { native: 'claude' } }];
+    // Same id on the controller belongs to a different vendor and must be ignored.
+    mocks.localProviders = [{ id: 'second-account', auth: { native: 'xai' } }];
+    mocks.remoteClaudeSnapshot = { source: 'oauth-endpoint', fiveHour: { utilization: 12 } };
+    const { container } = render(<TodaySpendChip vendorKey={vendorKey} providerId="second-account"
+      modelId="claude-fable-5[1m]" deviceLinkDeviceId="device-abc" />);
+    expect(container.textContent).toContain('5h 剩余 88%');
+    expect(mocks.remoteProviderIds).toContain('second-account');
   });
 });

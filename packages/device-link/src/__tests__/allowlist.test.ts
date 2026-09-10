@@ -392,6 +392,8 @@ describe('PUSH_FORWARD_ALLOWLIST', () => {
       'usage:session-tokens-changed',
       'usage:claude-subscription-changed',
       'usage:codex-account-changed',
+      'usage:codex-provider-account-changed',
+      'usage:subscription-provider-account-changed',
       'usage:claude-account-changed',
       'usage:xai-subscription-changed',
       'usage:xai-rate-limit-changed',

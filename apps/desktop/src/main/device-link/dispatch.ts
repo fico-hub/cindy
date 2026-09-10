@@ -296,11 +296,15 @@ export function setRemoteReviewInputGuard(guard: RemoteReviewInputGuard | null):
  * 模块图保持纯净(usage 面会拖进 runtime-configs 等 app 依赖,纯 dispatch 单测只
  * mock 极小 Electron 面)。
  */
-type RemoteXaiSubscriptionUsageReader = () => Promise<unknown | null>;
-let remoteXaiSubscriptionUsageReader: RemoteXaiSubscriptionUsageReader | null = null;
+type RemoteSubscriptionUsageReader = (providerId?: string) => Promise<unknown | null>;
+let remoteXaiSubscriptionUsageReader: RemoteSubscriptionUsageReader | null = null;
+let remoteClaudeSubscriptionUsageReader: RemoteSubscriptionUsageReader | null = null;
+export function setRemoteClaudeSubscriptionUsageReader(reader: RemoteSubscriptionUsageReader | null): void {
+  remoteClaudeSubscriptionUsageReader = reader;
+}
 
 export function setRemoteXaiSubscriptionUsageReader(
-  reader: RemoteXaiSubscriptionUsageReader | null,
+  reader: RemoteSubscriptionUsageReader | null,
 ): void {
   remoteXaiSubscriptionUsageReader = reader;
 }
@@ -3459,21 +3463,28 @@ export async function runInvoke(
   // assertTrustedAppRendererEvent, 合成 event 必然不可信 —— 那道闸不该为远程下线
   // 放宽), 故在此拦截。已过三道 gate, 等同受信本地访问。只切轮询、不碰凭证:
   // 远程能让它停收消息, 但拿不走也删不掉绑定(解绑仍只能本机操作)。
-  // maker:usage:xai-subscription 的 ipcMain handler 挂了 assertTrustedSender(合成
-  // event 必然不可信,那道闸不为远程下线放宽)—— 与 telegram:* 同先例在此拦截,
+  // Subscription IPC validates local senders (Claude for named accounts, xAI always).
+  // Keep that check; authorized device-link reads use the same injected data readers.
   // 直读注入的 usage reader(cached-first,只读快照,无副作用)。已过三道 gate。
-  if (payload.channel === 'maker:usage:xai-subscription') {
-    if (!remoteXaiSubscriptionUsageReader) {
+  if (payload.channel === 'maker:usage:xai-subscription' || payload.channel === 'maker:usage:claude-subscription') {
+    const reader = payload.channel === 'maker:usage:xai-subscription'
+      ? remoteXaiSubscriptionUsageReader : remoteClaudeSubscriptionUsageReader;
+    const providerId = (payload.args ?? [])[0];
+    if (providerId !== undefined && (typeof providerId !== 'string' || providerId.trim().length === 0)) {
+      return { ok: false, error: { code: 'IPC_ERROR', message: '[INVALID_PARAMS] providerId must be a non-empty string' } };
+    }
+    if (!reader) {
       // usage 面尚未注入(启动窗口):非 CHANNEL_NOT_ALLOWED —— 控制端不得据此
       // 进入「老被控端」负缓存,保留现值稍后重试即可。
-      return { ok: false, error: { code: 'IPC_ERROR', message: 'xai usage reader not ready' } };
+      return { ok: false, error: { code: 'IPC_ERROR', message: 'subscription usage reader not ready' } };
     }
     try {
-      const result = await remoteXaiSubscriptionUsageReader();
+      const snapshot = await reader(providerId as string | undefined);
+      const result = snapshot && providerId ? { ...snapshot as object, providerId } : snapshot;
       return { ok: true, result };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      log.warn(`usage:xai-subscription read failed from ${shortId(src)}: ${message}`);
+      log.warn(`subscription usage read failed from ${shortId(src)}: ${message}`);
       return { ok: false, error: { code: 'IPC_ERROR', message } };
     }
   }
@@ -3724,6 +3735,7 @@ export const __testing = {
     presenceOfflineCheck = null;
     remoteReviewInputGuard = null;
     remoteXaiSubscriptionUsageReader = null;
+    remoteClaudeSubscriptionUsageReader = null;
   },
   getActiveControllers,
   getUpdateRelaunchControllers,

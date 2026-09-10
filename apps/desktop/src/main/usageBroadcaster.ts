@@ -1154,7 +1154,8 @@ function broadcastCodexAccountUsage(payload: RateLimitSnapshot | null, providerI
   }
   // device-link:控制端远程 codex / chatgpt-bridge 会话 chip 镜像被控端限额窗口。
   // 频率上限:app-server 每 turn 记录一次、WHAM 刷新 10s 节流;无链路时 O(1) no-op。
-  tapWindowBroadcast(USAGE_CODEX_ACCOUNT_CHANGED, payload);
+  if (providerId === 'openai') tapWindowBroadcast(USAGE_CODEX_ACCOUNT_CHANGED, payload);
+  else tapWindowBroadcast('usage:codex-provider-account-changed', { providerId, snapshot: payload });
 }
 
 function broadcastClaudeSubscriptionUsage(payload: ClaudeSubscriptionUsageSnapshot | null): void {
@@ -1173,6 +1174,7 @@ export function broadcastSubscriptionAccountUsage(providerId: string, snapshot: 
     if (!isTrustedAppRendererWindow(win)) continue;
     win.webContents.send('usage:subscription-provider-account-changed', { providerId, snapshot });
   }
+  tapWindowBroadcast('usage:subscription-provider-account-changed', { providerId, snapshot });
 }
 
 function broadcastXaiSubscriptionUsage(payload: XaiSubscriptionUsageSnapshot | null): void {

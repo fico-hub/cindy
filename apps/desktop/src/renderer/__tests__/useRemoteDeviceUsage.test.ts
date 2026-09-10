@@ -186,3 +186,60 @@ describe('useRemoteClaudeSessionRoute', () => {
     expect(result.current).toBe('gateway');
   });
 });
+
+
+describe('remote account parity', () => {
+  it('keeps builtin and named provider reads, pushes and clears separate on one device', async () => {
+    mocks.invoke.mockImplementation(async (_device, _channel, args) => args[1]
+      ? { providerId: args[1], primary: { usedPercent: 70 } }
+      : { primary: { usedPercent: 10 } });
+    const builtin = renderHook(() => useRemoteCodexAccountUsage('device-1'));
+    const named = renderHook(() => useRemoteCodexAccountUsage('device-1', 'account-2'));
+    await flushMicrotasks();
+    expect(mocks.invoke).toHaveBeenCalledWith('device-1', 'maker:usage:account', ['codex', 'account-2']);
+    expect(builtin.result.current?.primary?.usedPercent).toBe(10);
+    expect(named.result.current?.primary?.usedPercent).toBe(70);
+    act(() => emitPush({ deviceId: 'device-1', channel: 'usage:codex-provider-account-changed',
+      payload: { providerId: 'account-2', snapshot: { primary: { usedPercent: 80 } } } }));
+    expect(named.result.current?.primary?.usedPercent).toBe(80);
+    expect(builtin.result.current?.primary?.usedPercent).toBe(10);
+    act(() => emitPush({ deviceId: 'device-1', channel: 'usage:codex-account-changed', payload: null }));
+    expect(builtin.result.current).toBeNull();
+    expect(named.result.current?.primary?.usedPercent).toBe(80);
+    act(() => emitPush({ deviceId: 'device-1', channel: 'usage:codex-provider-account-changed',
+      payload: { providerId: 'account-2', snapshot: null } }));
+    expect(named.result.current).toBeNull();
+  });
+
+  it('rejects a legacy host builtin response when a named account was requested', async () => {
+    mocks.invoke.mockResolvedValue({ primary: { usedPercent: 10 } });
+    const { result } = renderHook(() => useRemoteCodexAccountUsage('device-1', 'account-2'));
+    await flushMicrotasks();
+    expect(result.current).toBeNull();
+  });
+
+  it('does not let a late initial read overwrite a newer usage push', async () => {
+    let finish!: (value: unknown) => void;
+    mocks.invoke.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+    const { result } = renderHook(() => useRemoteCodexAccountUsage('device-1'));
+    act(() => emitPush({ deviceId: 'device-1', channel: 'usage:codex-account-changed',
+      payload: { primary: { usedPercent: 80 } } }));
+    await act(async () => finish({ primary: { usedPercent: 10 } }));
+    expect(result.current?.primary?.usedPercent).toBe(80);
+  });
+
+  it('does not expose another device snapshot during a device switch', async () => {
+    mocks.invoke.mockResolvedValueOnce({ primary: { usedPercent: 10 } });
+    const seen: unknown[] = [];
+    const { rerender } = renderHook(({ device }) => {
+      const snapshot = useRemoteCodexAccountUsage(device);
+      seen.push(snapshot);
+      return snapshot;
+    }, { initialProps: { device: 'device-1' } });
+    await flushMicrotasks();
+    mocks.invoke.mockReturnValue(new Promise(() => {}));
+    seen.length = 0;
+    rerender({ device: 'device-2' });
+    expect(seen).toEqual([null]);
+  });
+});
