@@ -59,6 +59,7 @@ import {
 import { classifyLocalAttachmentPath } from '../cindy-brain/ghostLocalPathGrant.js';
 import { toolNotFoundMessage } from '../cindy-brain/pipeDispatcher.js';
 import { getSessionFsSnapshot } from '../localDb/ipc/sessions.js';
+import { getRemoteFileBrowser } from '../file-browser/remote-deps.js';
 import { getActiveAppSession, isAppSessionBoundaryPending } from '../appSessionState.js';
 import {
   deriveGhostSessionContext,
@@ -98,7 +99,7 @@ import {
 } from '../plugin-publisher/host.js';
 import { workdirWriteVerdict } from '../cindy-brain/fsSlot.js';
 import * as blobStore from '../cindy-media/blobStore.js';
-import { commitMessageMediaRefs } from '../cindy-media/chatAttachments.js';
+import { collectCindyMediaUrls as collectChatMediaUrls, commitMessageMediaRefs } from '../cindy-media/chatAttachments.js';
 import { callCindyMedia } from '../cindy-media/invocationService.js';
 import type { MediaDownloadContext } from '../cindy-media/mediaDownload.js';
 import * as ledger from '../cindy-media/ledger.js';
@@ -184,6 +185,8 @@ async function packForgeSource(
 export interface GhostGrantLiveSessionState {
   permissionMode: PermissionMode | null;
   remoteHostId: string | null;
+  /** 运行时计划模式;null = 该 harness 无法现读,调用方回退到持久化行。 */
+  planModeEnabled?: boolean | null;
   reviewAction?: (action: ReviewableAction) => Promise<AutoReviewDecision>;
 }
 
@@ -358,6 +361,109 @@ async function getForgeSessionFsGate(
     };
   }
   return { ok: true, workingDir: snapshot.workingDir };
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+ * 超大工具结果外置(#4245):写入前只认当前活跃实例的运行时真相。权限热切换
+ * runtime-first、DB-second,持久化行在合法窗口内会滞后;实例重建后 business
+ * sessionId 复用,旧 MCP 请求不得借新实例的目录与权限。任何缺失/不一致 fail
+ * closed。远程会话的 workingDir 在被控端:经 remote-file-service 写到远端任务
+ * 目录并返回远端可读的相对路径,不落本机。
+ * ──────────────────────────────────────────────────────────────────────── */
+
+interface LargeResultSpillTarget {
+  sessionId: string;
+  workingDir: string;
+  remoteHostId: string | null;
+}
+
+const LARGE_RESULT_DIR = 'tool-results';
+
+async function resolveLargeResultSpillTarget(
+  sessionContext: LiziMcpSessionContext | undefined,
+  getLiveSessionGrantState: CindyGhostsHostDeps['getLiveSessionGrantState'],
+): Promise<LargeResultSpillTarget> {
+  const sessionId = sessionContext?.sessionId ?? null;
+  const sessionInstanceId = sessionContext?.sessionInstanceId ?? null;
+  if (!sessionId || !sessionInstanceId || !getLiveSessionGrantState) {
+    throw new Error('Tool result storage requires the live session');
+  }
+  // 实例不匹配 / 会话不再 active / 运行时异常 → null,一律 fail closed。
+  const live = getLiveSessionGrantState(sessionId, sessionInstanceId);
+  if (!live) throw new Error('Tool result storage requires the live session');
+  const snapshot = await getSessionFsSnapshot(sessionId);
+  if (!snapshot?.workingDir || (snapshot.remoteHostId ?? null) !== live.remoteHostId) {
+    throw new Error('Tool result storage requires an authoritative session workdir');
+  }
+  const planModeEnabled = typeof live.planModeEnabled === 'boolean' ? live.planModeEnabled : snapshot.planModeEnabled;
+  if (workdirWriteVerdict(live.permissionMode ?? '', planModeEnabled) !== 'allow') {
+    throw new Error('Tool result storage is disabled while the session is read-only or in plan mode');
+  }
+  return { sessionId, workingDir: snapshot.workingDir, remoteHostId: live.remoteHostId };
+}
+
+/**
+ * 远端写:remote-file-service 的 writeFile 只改已存在文件、不建父目录,所以按
+ * createFolder(已存在则复用)→ createFile → writeFile 三步;任一步失败把本次
+ * 新建的空文件删掉,不留半成品。路径一律 POSIX(远端 daemon 只支持 POSIX)。
+ */
+async function writeLargeResultToRemote(
+  remoteHostId: string,
+  workdir: string,
+  relPath: string,
+  text: string,
+): Promise<void> {
+  const remote = getRemoteFileBrowser();
+  const dir = path.posix.dirname(relPath);
+  try {
+    await remote.request(remoteHostId, 'createFolder', { workdir, relPath: dir });
+  } catch (err) {
+    const existing = await remote.request(remoteHostId, 'stat', { workdir, relPath: dir }).catch(() => null);
+    if (existing?.type !== 'directory') throw err;
+  }
+  await remote.request(remoteHostId, 'createFile', { workdir, relPath });
+  try {
+    await remote.request(remoteHostId, 'writeFile', { workdir, relPath, content: text });
+  } catch (err) {
+    await remote.request(remoteHostId, 'deleteEntry', { workdir, relPath }).catch(() => undefined);
+    throw err;
+  }
+}
+
+async function discardLargeResultFile(target: LargeResultSpillTarget, relPath: string): Promise<void> {
+  try {
+    if (target.remoteHostId) {
+      await getRemoteFileBrowser().request(target.remoteHostId, 'deleteEntry', { workdir: target.workingDir, relPath });
+    } else {
+      await fs.promises.unlink(path.join(target.workingDir, relPath));
+    }
+  } catch {
+    /* best-effort: the write already failed to be accounted for; keep the original error */
+  }
+}
+
+/**
+ * 只在字节落盘成功后才给完整结果里的媒体挂 session-attachment 引用;挂账
+ * 失败则撤销本次新增的引用(此前已有的引用不动)并删掉刚写的文件,不留
+ * 没有结果文件却长期占着 blob 的孤立引用。
+ */
+async function commitLargeResultMediaRefs(target: LargeResultSpillTarget, relPath: string, text: string): Promise<void> {
+  const hashes = new Set<string>();
+  for (const url of collectChatMediaUrls(text)) {
+    const parsed = blobStore.parseBlobUrl(url);
+    if (parsed) hashes.add(parsed.hash);
+  }
+  const fresh: string[] = [];
+  for (const hash of hashes) {
+    if (!(await ledger.hasRef({ hash, refKind: 'session-attachment', refId: target.sessionId }))) fresh.push(hash);
+  }
+  const committed = await commitMessageMediaRefs({ sessionId: target.sessionId, role: 'tool', content: text });
+  if (!committed || committed.failed === 0) return;
+  for (const hash of fresh) {
+    await ledger.removeSessionAttachmentRefIfUnreferencedByLiveMessage({ sessionId: target.sessionId, hash }).catch(() => 0);
+  }
+  await discardLargeResultFile(target, relPath);
+  throw new Error('Tool result media references unavailable');
 }
 
 /** 意识显示名(确认卡标题用;查不到回落 id)。 */
@@ -1367,17 +1473,23 @@ export function getCindyGhostsMcpDeps(
   });
   return {
     saveLargeGhostResult: async (text) => withForgeOwnerLease(async () => {
-      const context = resolveSessionContext();
-      const gate = await getForgeSessionFsGate(context, true);
-      if (!gate.ok || !context?.sessionId) throw new Error('Tool result storage unavailable');
-      // Keep media referenced by the full response alive even when the SDK only
-      // receives its bounded projection. The existing ledger owns cleanup.
-      const committed = await commitMessageMediaRefs({ sessionId: context.sessionId, role: 'tool', content: text });
-      if (committed && committed.failed > 0) throw new Error('Tool result media references unavailable');
-      const relativePath = path.join('tool-results', `ghost-${randomUUID()}.json`);
+      // Live instance + runtime permission are re-read immediately before any
+      // side effect; the persisted row only supplies the workdir path.
+      const target = await resolveLargeResultSpillTarget(resolveSessionContext(), hostDeps.getLiveSessionGrantState);
+      const fileName = `ghost-${randomUUID()}.json`;
+      if (target.remoteHostId) {
+        const relativePath = path.posix.join(LARGE_RESULT_DIR, fileName);
+        await writeLargeResultToRemote(target.remoteHostId, target.workingDir, relativePath, text);
+        await commitLargeResultMediaRefs(target, relativePath, text);
+        return relativePath;
+      }
+      const relativePath = path.join(LARGE_RESULT_DIR, fileName);
       // Reuse the root-anchored, no-overwrite writer, including its symlink/race
       // checks. No plugin-controlled filename or raw fs write enters this path.
-      await writeDocsOutput({ root: gate.workingDir, path: path.join(gate.workingDir, relativePath), data: Buffer.from(text, 'utf8'), overwrite: false });
+      await writeDocsOutput({ root: target.workingDir, path: path.join(target.workingDir, relativePath), data: Buffer.from(text, 'utf8'), overwrite: false });
+      // Keep media referenced by the full response alive even when the SDK only
+      // receives its bounded projection; refs are committed after the bytes are durable.
+      await commitLargeResultMediaRefs(target, relativePath, text);
       return relativePath;
     }),
     connectAccount: async (target) => {

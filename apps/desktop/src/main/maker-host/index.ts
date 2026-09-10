@@ -926,6 +926,8 @@ export function getMaker(): Maker {
         return {
           permissionMode: permission.mode,
           remoteHostId: session.remoteHostId,
+          // 计划模式同样 runtime-first;harness 不支持现读时给 null,消费方回退持久化行。
+          planModeEnabled: session.getPlanMode(),
           reviewAction: async (action: import('@cindy/maker-core').ReviewableAction) => {
             const decision = await session.reviewHostPermissionAction(action);
             return _maker?.getSession(sessionId) === session

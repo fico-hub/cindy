@@ -107,6 +107,15 @@ const ledgerAddRefMock = vi.fn(async (params: TestLedgerRef) => {
   ledgerRefs.push({ ...params });
   return `ref-${ledgerRefs.length}`;
 });
+const ledgerRemoveSessionAttachmentRefMock = vi.fn(async (params: { sessionId: string; hash: string }) => {
+  const before = ledgerRefs.length;
+  for (let i = ledgerRefs.length - 1; i >= 0; i -= 1) {
+    const ref = ledgerRefs[i]!;
+    if (ref.refKind === 'session-attachment' && ref.refId === params.sessionId && ref.hash === params.hash) ledgerRefs.splice(i, 1);
+  }
+  return before - ledgerRefs.length;
+});
+const remoteFsRequestMock = vi.fn<(hostId: string, method: string, params: Record<string, unknown>) => Promise<unknown>>(async () => ({}));
 const callCindyMediaMock = vi.fn();
 const dirDepositMock = vi.fn(() => ({ ok: true, receipt: { token: 'dir-ticket' } }));
 const saveDepositMock = vi.fn(() => ({ ok: true, receipt: { token: 'save-ticket' } }));
@@ -251,6 +260,10 @@ vi.mock('../../cindy-media/ledger.js', () => ({
   hasRef: ledgerHasRefMock,
   hasGhostToolGrant: ledgerHasGhostToolGrantMock,
   addRef: ledgerAddRefMock,
+  removeSessionAttachmentRefIfUnreferencedByLiveMessage: ledgerRemoveSessionAttachmentRefMock,
+}));
+vi.mock('../../file-browser/remote-deps.js', () => ({
+  getRemoteFileBrowser: () => ({ request: remoteFsRequestMock }),
 }));
 vi.mock('../../cindy-media/invocationService.js', () => ({
   callCindyMedia: callCindyMediaMock,
@@ -419,6 +432,9 @@ beforeEach(() => {
   saveDepositMock.mockClear();
   liveGrantStateMock.mockReset();
   liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: null });
+  remoteFsRequestMock.mockReset();
+  remoteFsRequestMock.mockResolvedValue({});
+  ledgerRemoveSessionAttachmentRefMock.mockClear();
   callCindyMediaMock.mockReset();
   alsSessionContextMock.mockReset();
   logWarnMock.mockClear();
@@ -2238,53 +2254,190 @@ describe('oversized ghost result Host storage', () => {
     } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
   });
 
-  it('pins media that only occurs beyond the inline preview before externalizing', async () => {
+  it('pins media that only occurs beyond the inline preview once the bytes are durable', async () => {
     const deps = makeDeps();
     const hash = 'b'.repeat(64);
     await deps.saveLargeGhostResult!(JSON.stringify({ result: { text: 'x'.repeat(70000), image: `cindy-media://blobs/${hash}.png` } }));
     expect(ledgerRefs).toContainEqual(expect.objectContaining({ hash, refKind: 'session-attachment', refId: 's1', originKind: 'tool' }));
-    expect(ledgerAddRefMock.mock.invocationCallOrder[0]).toBeLessThan(writeDocsOutputMock.mock.invocationCallOrder[0]!);
+    // Greptile P2: refs are committed after the safe write so a failed write never leaves an orphan ref.
+    expect(writeDocsOutputMock.mock.invocationCallOrder[0]).toBeLessThan(ledgerAddRefMock.mock.invocationCallOrder[0]!);
   });
 
   it.each<TestAgentKind>(['claude-code', 'codex', 'pi'])('uses the authoritative local root and safe writer for %s', async agentKind => {
     const deps = makeDeps(agentKind);
     const text = JSON.stringify({ ok: true, result: { data: 'x'.repeat(70000) } });
     const saved = await deps.saveLargeGhostResult!(text);
+    expect(liveGrantStateMock).toHaveBeenCalledWith('s1', 's1-instance');
     expect(sessionSnapshotMock).toHaveBeenCalledWith('s1');
     expect(path.dirname(saved)).toBe('tool-results');
     expect(path.basename(saved)).toMatch(/^ghost-[0-9a-f-]+\.json$/);
     expect(writeDocsOutputMock).toHaveBeenCalledWith({
       root: WORKDIR, path: path.join(WORKDIR, saved), data: Buffer.from(text), overwrite: false,
     });
+    expect(remoteFsRequestMock).not.toHaveBeenCalled();
     expect(captureMutationOwnerMock).toHaveBeenCalledOnce();
     expect(releaseMutationMock).toHaveBeenCalledOnce();
   });
 
+  // Codex P1: the persisted row lags runtime permission changes and a rebuilt
+  // instance reuses the business id; only the exact live instance may authorize.
+  it.each([
+    { name: 'stale instance', live: null },
+    { name: 'runtime switched to ask', live: { permissionMode: 'ask', remoteHostId: null } },
+    { name: 'runtime switched to plan', live: { permissionMode: 'plan', remoteHostId: null } },
+    { name: 'runtime permission unknown', live: { permissionMode: null, remoteHostId: null } },
+    { name: 'runtime plan mode on', live: { permissionMode: 'auto', remoteHostId: null, planModeEnabled: true } },
+    { name: 'runtime remote but row local', live: { permissionMode: 'auto', remoteHostId: 'remote' } },
+  ])('does not spill on a persisted auto row when the live session says otherwise (%s)', async ({ live }) => {
+    const deps = makeDeps('codex');
+    sessionSnapshotMock.mockResolvedValue({ workingDir: WORKDIR, remoteHostId: null, permissionMode: 'auto', planModeEnabled: false });
+    liveGrantStateMock.mockReturnValue(live);
+    await expect(deps.saveLargeGhostResult!('result')).rejects.toThrow();
+    expect(liveGrantStateMock).toHaveBeenCalledWith('s1', 's1-instance');
+    expect(writeDocsOutputMock).not.toHaveBeenCalled();
+    expect(remoteFsRequestMock).not.toHaveBeenCalled();
+    expect(ledgerAddRefMock).not.toHaveBeenCalled();
+    expect(releaseMutationMock).toHaveBeenCalledOnce();
+  });
+
+  it('prefers the live plan-mode reading over a stale persisted row', async () => {
+    const deps = makeDeps('codex');
+    sessionSnapshotMock.mockResolvedValue({ workingDir: WORKDIR, remoteHostId: null, permissionMode: 'ask', planModeEnabled: true });
+    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: null, planModeEnabled: false });
+    await expect(deps.saveLargeGhostResult!('result')).resolves.toMatch(/^tool-results/);
+    expect(writeDocsOutputMock).toHaveBeenCalledOnce();
+  });
+
   it.each([
     { remoteHostId: 'remote', permissionMode: 'auto', planModeEnabled: false },
-    { remoteHostId: null, permissionMode: 'plan', planModeEnabled: false },
-    { remoteHostId: null, permissionMode: 'ask', planModeEnabled: false },
-    { remoteHostId: null, permissionMode: 'unknown', planModeEnabled: false },
     { remoteHostId: null, permissionMode: 'auto', planModeEnabled: true },
-  ])('does not spill into an unauthorized local filesystem (%j)', async state => {
+  ])('does not spill when the persisted row disagrees with the live session (%j)', async state => {
     const deps = makeDeps('codex');
     sessionSnapshotMock.mockResolvedValue({ workingDir: WORKDIR, ...state });
     await expect(deps.saveLargeGhostResult!('result')).rejects.toThrow();
     expect(writeDocsOutputMock).not.toHaveBeenCalled();
+    expect(remoteFsRequestMock).not.toHaveBeenCalled();
     expect(releaseMutationMock).toHaveBeenCalledOnce();
   });
 
-  it('does not fall back to the cwd when the caller session is unknown', async () => {
-    const deps = makeDeps('codex', null);
+  it.each([
+    { name: 'unknown session', sessionId: null, sessionInstanceId: null },
+    { name: 'missing instance id', sessionId: 's1', sessionInstanceId: null },
+  ])('does not fall back to the cwd or the persisted row (%s)', async ({ sessionId, sessionInstanceId }) => {
+    const deps = makeDeps('codex', sessionId, sessionInstanceId);
+    await expect(deps.saveLargeGhostResult!('result')).rejects.toThrow();
+    expect(liveGrantStateMock).not.toHaveBeenCalled();
+    expect(writeDocsOutputMock).not.toHaveBeenCalled();
+  });
+
+  it('does not spill when the host cannot read the live session', async () => {
+    alsSessionContextMock.mockReturnValue({ agentKind: 'codex', workingDir: WORKDIR, sessionId: 's1', sessionInstanceId: 's1-instance' });
+    const deps = getCindyGhostsMcpDeps(undefined, { getAppVersion: appVersionMock });
     await expect(deps.saveLargeGhostResult!('result')).rejects.toThrow();
     expect(writeDocsOutputMock).not.toHaveBeenCalled();
   });
 
-  it('propagates a failed safe write and releases the owner lease', async () => {
+  it('propagates a failed safe write, commits no media refs and releases the owner lease', async () => {
     const deps = makeDeps();
+    const hash = 'c'.repeat(64);
     writeDocsOutputMock.mockRejectedValueOnce(new Error('disk full'));
-    await expect(deps.saveLargeGhostResult!('result')).rejects.toThrow('disk full');
+    await expect(deps.saveLargeGhostResult!(JSON.stringify({ image: `cindy-media://blobs/${hash}.png` }))).rejects.toThrow('disk full');
     expect(writeDocsOutputMock).toHaveBeenCalledOnce();
+    expect(ledgerAddRefMock).not.toHaveBeenCalled();
     expect(releaseMutationMock).toHaveBeenCalledOnce();
+  });
+
+  it('rolls back only the refs it added and removes the file when media accounting fails', async () => {
+    const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ghost-spill-rollback-'));
+    try {
+      const deps = makeDeps();
+      sessionSnapshotMock.mockResolvedValue({ workingDir: root, remoteHostId: null, permissionMode: 'auto', planModeEnabled: false });
+      writeDocsOutputMock.mockImplementation(async input => {
+        await fs.promises.mkdir(path.dirname(input.path), { recursive: true });
+        await fs.promises.writeFile(input.path, input.data);
+      });
+      const existing = 'd'.repeat(64);
+      const fresh = 'e'.repeat(64);
+      const broken = 'f'.repeat(64);
+      ledgerRefs.push({ hash: existing, refKind: 'session-attachment', refId: 's1', originKind: 'tool' });
+      ledgerAddRefMock.mockImplementation(async (params: TestLedgerRef) => {
+        if (params.hash === broken) throw new Error('FOREIGN KEY constraint failed');
+        ledgerRefs.push({ ...params });
+        return `ref-${ledgerRefs.length}`;
+      });
+      const text = JSON.stringify({ a: `cindy-media://blobs/${existing}.png`, b: `cindy-media://blobs/${fresh}.png`, c: `cindy-media://blobs/${broken}.png` });
+      await expect(deps.saveLargeGhostResult!(text)).rejects.toThrow('media references unavailable');
+      expect(ledgerRemoveSessionAttachmentRefMock).toHaveBeenCalledWith({ sessionId: 's1', hash: fresh });
+      expect(ledgerRemoveSessionAttachmentRefMock).not.toHaveBeenCalledWith({ sessionId: 's1', hash: existing });
+      expect(ledgerRefs).toContainEqual(expect.objectContaining({ hash: existing }));
+      expect(ledgerRefs).not.toContainEqual(expect.objectContaining({ hash: fresh }));
+      const written = writeDocsOutputMock.mock.calls[0]![0].path;
+      await expect(fs.promises.access(written)).rejects.toThrow();
+      expect(releaseMutationMock).toHaveBeenCalledOnce();
+    } finally {
+      ledgerAddRefMock.mockImplementation(async (params: TestLedgerRef) => {
+        ledgerRefs.push({ ...params });
+        return `ref-${ledgerRefs.length}`;
+      });
+      await fs.promises.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  // Codex P1: an SSH remote session's workdir lives on the remote host. Route
+  // the spill through remote-file-service instead of failing closed.
+  it.each<TestAgentKind>(['codex', 'pi'])('spills a remote session result through remote-file-service for %s', async agentKind => {
+    const deps = makeDeps(agentKind);
+    sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
+    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1' });
+    const hash = 'a'.repeat(64);
+    const text = JSON.stringify({ ok: true, result: { data: 'x'.repeat(70000), image: `cindy-media://blobs/${hash}.png` } });
+    const saved = await deps.saveLargeGhostResult!(text);
+    expect(saved).toMatch(/^tool-results\/ghost-[0-9a-f-]+\.json$/);
+    expect(writeDocsOutputMock).not.toHaveBeenCalled();
+    expect(remoteFsRequestMock.mock.calls.map(call => call.slice(0, 2))).toEqual([
+      ['host-1', 'createFolder'], ['host-1', 'createFile'], ['host-1', 'writeFile'],
+    ]);
+    expect(remoteFsRequestMock).toHaveBeenCalledWith('host-1', 'createFolder', { workdir: '/srv/work', relPath: 'tool-results' });
+    expect(remoteFsRequestMock).toHaveBeenCalledWith('host-1', 'createFile', { workdir: '/srv/work', relPath: saved });
+    expect(remoteFsRequestMock).toHaveBeenCalledWith('host-1', 'writeFile', { workdir: '/srv/work', relPath: saved, content: text });
+    expect(remoteFsRequestMock.mock.invocationCallOrder.at(-1)).toBeLessThan(ledgerAddRefMock.mock.invocationCallOrder[0]!);
+    expect(ledgerRefs).toContainEqual(expect.objectContaining({ hash, refKind: 'session-attachment', refId: 's1' }));
+    expect(releaseMutationMock).toHaveBeenCalledOnce();
+  });
+
+  it('reuses an existing remote tool-results folder', async () => {
+    const deps = makeDeps('codex');
+    sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
+    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1' });
+    remoteFsRequestMock.mockImplementation(async (_host, method) => {
+      if (method === 'createFolder') throw new Error('EEXIST: file already exists');
+      if (method === 'stat') return { relPath: 'tool-results', type: 'directory', size: 0, mtimeMs: 0 };
+      return {};
+    });
+    await expect(deps.saveLargeGhostResult!('result')).resolves.toMatch(/^tool-results\//);
+    expect(remoteFsRequestMock.mock.calls.map(call => call[1])).toEqual(['createFolder', 'stat', 'createFile', 'writeFile']);
+  });
+
+  it('deletes the half-written remote file and commits no refs when the remote write fails', async () => {
+    const deps = makeDeps('codex');
+    sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
+    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1' });
+    remoteFsRequestMock.mockImplementation(async (_host, method) => {
+      if (method === 'writeFile') throw new Error('content too large (>2097152 bytes)');
+      return {};
+    });
+    const hash = 'a'.repeat(64);
+    await expect(deps.saveLargeGhostResult!(JSON.stringify({ image: `cindy-media://blobs/${hash}.png` }))).rejects.toThrow('content too large');
+    expect(remoteFsRequestMock.mock.calls.map(call => call[1])).toEqual(['createFolder', 'createFile', 'writeFile', 'deleteEntry']);
+    expect(ledgerAddRefMock).not.toHaveBeenCalled();
+    expect(releaseMutationMock).toHaveBeenCalledOnce();
+  });
+
+  it('does not spill a remote session result when the live instance disagrees about the host', async () => {
+    const deps = makeDeps('codex');
+    sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
+    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-2' });
+    await expect(deps.saveLargeGhostResult!('result')).rejects.toThrow();
+    expect(remoteFsRequestMock).not.toHaveBeenCalled();
   });
 });
