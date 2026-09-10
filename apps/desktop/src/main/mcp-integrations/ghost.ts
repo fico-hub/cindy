@@ -375,6 +375,11 @@ interface LargeResultSpillTarget {
   sessionId: string;
   workingDir: string;
   remoteHostId: string | null;
+  /**
+   * 再次现读活跃实例:每个 await 之后(写文件前、挂媒体引用前)都要重验,实例
+   * 已换 / 会话已结束 / 权限已收紧 / 远端归属变化时抛错。
+   */
+  revalidate(): void;
 }
 
 const LARGE_RESULT_DIR = 'tool-results';
@@ -389,17 +394,26 @@ async function resolveLargeResultSpillTarget(
     throw new Error('Tool result storage requires the live session');
   }
   // 实例不匹配 / 会话不再 active / 运行时异常 → null,一律 fail closed。
-  const live = getLiveSessionGrantState(sessionId, sessionInstanceId);
-  if (!live) throw new Error('Tool result storage requires the live session');
+  const first = getLiveSessionGrantState(sessionId, sessionInstanceId);
+  if (!first) throw new Error('Tool result storage requires the live session');
   const snapshot = await getSessionFsSnapshot(sessionId);
-  if (!snapshot?.workingDir || (snapshot.remoteHostId ?? null) !== live.remoteHostId) {
-    throw new Error('Tool result storage requires an authoritative session workdir');
-  }
-  const planModeEnabled = typeof live.planModeEnabled === 'boolean' ? live.planModeEnabled : snapshot.planModeEnabled;
-  if (workdirWriteVerdict(live.permissionMode ?? '', planModeEnabled) !== 'allow') {
-    throw new Error('Tool result storage is disabled while the session is read-only or in plan mode');
-  }
-  return { sessionId, workingDir: snapshot.workingDir, remoteHostId: live.remoteHostId };
+  if (!snapshot?.workingDir) throw new Error('Tool result storage requires an authoritative session workdir');
+  const workingDir = snapshot.workingDir;
+  const remoteHostId = first.remoteHostId;
+  const revalidate = (): void => {
+    const live = getLiveSessionGrantState(sessionId, sessionInstanceId);
+    if (!live) throw new Error('Tool result storage requires the live session');
+    if ((snapshot.remoteHostId ?? null) !== live.remoteHostId || live.remoteHostId !== remoteHostId) {
+      throw new Error('Tool result storage requires an authoritative session workdir');
+    }
+    const planModeEnabled = typeof live.planModeEnabled === 'boolean' ? live.planModeEnabled : snapshot.planModeEnabled;
+    if (workdirWriteVerdict(live.permissionMode ?? '', planModeEnabled) !== 'allow') {
+      throw new Error('Tool result storage is disabled while the session is read-only or in plan mode');
+    }
+  };
+  // The snapshot read above is an async boundary; check the live state once more before returning.
+  revalidate();
+  return { sessionId, workingDir, remoteHostId, revalidate };
 }
 
 /**
@@ -425,9 +439,21 @@ async function writeLargeResultToRemote(
   try {
     await remote.request(remoteHostId, 'writeFile', { workdir, relPath, content: text });
   } catch (err) {
+    // 变更类 RPC 断链时结果未知:daemon 可能已写完、只是响应没回来。此时不能
+    // 盲删唯一副本,用幂等 stat 核验字节数:一致 = 成功;缺失或不一致才算失败。
+    if (isRemoteTransportLoss(err)) {
+      const stat = await remote.request(remoteHostId, 'stat', { workdir, relPath }).catch(() => null);
+      if (stat?.type === 'file' && stat.size === Buffer.byteLength(text, 'utf8')) return;
+      if (!stat) throw err;
+    }
     await remote.request(remoteHostId, 'deleteEntry', { workdir, relPath }).catch(() => undefined);
     throw err;
   }
+}
+
+function isRemoteTransportLoss(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return code === 'CHANNEL_CLOSED' || code === 'CHANNEL_ERROR';
 }
 
 async function discardLargeResultFile(target: LargeResultSpillTarget, relPath: string): Promise<void> {
@@ -1477,16 +1503,25 @@ export function getCindyGhostsMcpDeps(
       // side effect; the persisted row only supplies the workdir path.
       const target = await resolveLargeResultSpillTarget(resolveSessionContext(), hostDeps.getLiveSessionGrantState);
       const fileName = `ghost-${randomUUID()}.json`;
+      const relativePath = target.remoteHostId
+        ? path.posix.join(LARGE_RESULT_DIR, fileName)
+        : path.join(LARGE_RESULT_DIR, fileName);
+      target.revalidate();
       if (target.remoteHostId) {
-        const relativePath = path.posix.join(LARGE_RESULT_DIR, fileName);
         await writeLargeResultToRemote(target.remoteHostId, target.workingDir, relativePath, text);
-        await commitLargeResultMediaRefs(target, relativePath, text);
-        return relativePath;
+      } else {
+        // Reuse the root-anchored, no-overwrite writer, including its symlink/race
+        // checks. No plugin-controlled filename or raw fs write enters this path.
+        await writeDocsOutput({ root: target.workingDir, path: path.join(target.workingDir, relativePath), data: Buffer.from(text, 'utf8'), overwrite: false });
       }
-      const relativePath = path.join(LARGE_RESULT_DIR, fileName);
-      // Reuse the root-anchored, no-overwrite writer, including its symlink/race
-      // checks. No plugin-controlled filename or raw fs write enters this path.
-      await writeDocsOutput({ root: target.workingDir, path: path.join(target.workingDir, relativePath), data: Buffer.from(text, 'utf8'), overwrite: false });
+      // The write is another async boundary: an instance that ended or lost its
+      // automatic-write grant meanwhile must not have refs booked in its name.
+      try {
+        target.revalidate();
+      } catch (err) {
+        await discardLargeResultFile(target, relativePath);
+        throw err;
+      }
       // Keep media referenced by the full response alive even when the SDK only
       // receives its bounded projection; refs are committed after the bytes are durable.
       await commitLargeResultMediaRefs(target, relativePath, text);

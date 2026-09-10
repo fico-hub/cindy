@@ -2433,6 +2433,65 @@ describe('oversized ghost result Host storage', () => {
     expect(releaseMutationMock).toHaveBeenCalledOnce();
   });
 
+  // Codex P1 (round 3): the live gate is re-read after every await, not cached once.
+  it.each([
+    { name: 'before the write', sequence: ['auto', 'auto', 'ask'] },
+    { name: 'during the snapshot read', sequence: ['auto', 'ask'] },
+  ])('does not write when the runtime grant changes %s', async ({ sequence }) => {
+    const deps = makeDeps('codex');
+    const modes = [...sequence];
+    liveGrantStateMock.mockImplementation(() => ({ permissionMode: modes.length > 1 ? modes.shift()! : modes[0]!, remoteHostId: null }));
+    await expect(deps.saveLargeGhostResult!('result')).rejects.toThrow();
+    expect(writeDocsOutputMock).not.toHaveBeenCalled();
+    expect(ledgerAddRefMock).not.toHaveBeenCalled();
+  });
+
+  it('discards the written file and books no refs when the instance ends during the write', async () => {
+    const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ghost-spill-revalidate-'));
+    try {
+      const deps = makeDeps('codex');
+      sessionSnapshotMock.mockResolvedValue({ workingDir: root, remoteHostId: null, permissionMode: 'auto', planModeEnabled: false });
+      let calls = 0;
+      liveGrantStateMock.mockImplementation(() => (++calls <= 3 ? { permissionMode: 'auto', remoteHostId: null } : null));
+      writeDocsOutputMock.mockImplementation(async input => {
+        await fs.promises.mkdir(path.dirname(input.path), { recursive: true });
+        await fs.promises.writeFile(input.path, input.data);
+      });
+      const hash = 'a'.repeat(64);
+      await expect(deps.saveLargeGhostResult!(JSON.stringify({ image: `cindy-media://blobs/${hash}.png` }))).rejects.toThrow('live session');
+      expect(writeDocsOutputMock).toHaveBeenCalledOnce();
+      await expect(fs.promises.access(writeDocsOutputMock.mock.calls[0]![0].path)).rejects.toThrow();
+      expect(ledgerAddRefMock).not.toHaveBeenCalled();
+      expect(liveGrantStateMock).toHaveBeenCalledTimes(4);
+    } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
+  });
+
+  // Codex P1 (round 3): a lost RPC response is not a failed write; verify before deleting.
+  it.each([
+    { name: 'keeps a fully written file after a lost response', statResult: { type: 'file', size: null as number | null }, expectDelete: false, expectOk: true },
+    { name: 'deletes a partial file after a lost response', statResult: { type: 'file', size: 3 }, expectDelete: true, expectOk: false },
+    { name: 'gives up without deleting when the file is missing after a lost response', statResult: null, expectDelete: false, expectOk: false },
+  ])('$name', async ({ statResult, expectDelete, expectOk }) => {
+    const deps = makeDeps('codex');
+    sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
+    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1' });
+    const text = JSON.stringify({ ok: true, result: 'x'.repeat(100) });
+    remoteFsRequestMock.mockImplementation(async (_host, method) => {
+      if (method === 'writeFile') throw Object.assign(new Error('channel closed'), { code: 'CHANNEL_CLOSED' });
+      if (method === 'stat') {
+        if (!statResult) throw new Error('OPERATION_FAILED: ENOENT');
+        return { relPath: 'x', mtimeMs: 0, type: statResult.type, size: statResult.size ?? Buffer.byteLength(text, 'utf8') };
+      }
+      return {};
+    });
+    const outcome = deps.saveLargeGhostResult!(text);
+    if (expectOk) await expect(outcome).resolves.toMatch(/^tool-results\//);
+    else await expect(outcome).rejects.toThrow('channel closed');
+    const methods = remoteFsRequestMock.mock.calls.map(call => call[1]);
+    expect(methods.includes('deleteEntry')).toBe(expectDelete);
+    expect(methods.slice(0, 4)).toEqual(['createFolder', 'createFile', 'writeFile', 'stat']);
+  });
+
   it('does not spill a remote session result when the live instance disagrees about the host', async () => {
     const deps = makeDeps('codex');
     sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
