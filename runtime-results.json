@@ -1,0 +1,74 @@
+[
+  {
+    "state": "bot-expanded",
+    "chips": 1,
+    "collapsed": 0,
+    "floating": 0
+  },
+  {
+    "state": "bot-collapsed",
+    "chips": 0,
+    "collapsed": 1,
+    "floating": 0
+  },
+  {
+    "state": "bot-expanded-again",
+    "chips": 1,
+    "collapsed": 0,
+    "floating": 0
+  },
+  {
+    "state": "settings-fallback",
+    "chips": 1,
+    "collapsed": 0,
+    "floating": 1
+  },
+  {
+    "state": "bot-list-redirects-to-chat",
+    "chips": 1,
+    "collapsed": 0,
+    "floating": 0
+  },
+  {
+    "state": "unavailable-bot-fallback",
+    "chips": 1,
+    "collapsed": 0,
+    "floating": 1
+  },
+  {
+    "state": "bot-return",
+    "chips": 1,
+    "collapsed": 0,
+    "floating": 0
+  },
+  {
+    "state": "disconnected",
+    "chips": 0,
+    "collapsed": 0,
+    "floating": 0
+  },
+  {
+    "state": "reconnected",
+    "chips": 1,
+    "collapsed": 0,
+    "floating": 0
+  },
+  {
+    "state": "bot-light-expanded",
+    "chips": 1,
+    "collapsed": 0,
+    "floating": 0
+  },
+  {
+    "state": "bot-light-collapsed",
+    "chips": 0,
+    "collapsed": 1,
+    "floating": 0
+  },
+  {
+    "state": "bot-narrow-expanded",
+    "chips": 1,
+    "collapsed": 0,
+    "floating": 0
+  }
+]

@@ -1,0 +1,38 @@
+[
+  {
+    "state": "ordinary-task-expanded",
+    "chips": 1,
+    "collapsed": 0,
+    "floating": 0
+  },
+  {
+    "state": "ordinary-task-collapsed",
+    "chips": 0,
+    "collapsed": 1,
+    "floating": 0
+  },
+  {
+    "state": "one-column",
+    "chips": 1,
+    "collapsed": 0,
+    "floating": 0
+  },
+  {
+    "state": "two-columns",
+    "chips": 1,
+    "collapsed": 0,
+    "floating": 0
+  },
+  {
+    "state": "three-columns",
+    "chips": 1,
+    "collapsed": 0,
+    "floating": 0
+  },
+  {
+    "state": "rail",
+    "chips": 1,
+    "collapsed": 0,
+    "floating": 0
+  }
+]
