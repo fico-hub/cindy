@@ -115,6 +115,117 @@ describe('isTransientRemoteError', () => {
 
 describe('refreshRemoteDeviceSessions retry', () => {
   it.each(['merge', 'replace'] as const)(
+    '%s archived refresh reconciles companions deleted while disconnected',
+    async (snapshotMode) => {
+      const d = did();
+      const bots = ['deleted', 'missing', 'kept', 'restored', 'timeout'].map((id) =>
+        session(id, { source: 'bot', status: 'archived', model: 'gpt-6-astra' }),
+      );
+      remoteProjectsStore.mergeDeviceSessions(d, 'MacBook', bots, 'archived');
+      remoteProjectsStore.markDeviceDisconnected(d);
+      invoke.mockImplementation(async (_device, channel, args) => {
+        if (channel === 'local-db:sessions:list') return [];
+        if (args[0] === 'missing') throw new Error('[NOT_FOUND] removed');
+        if (args[0] === 'timeout') throw new Error('[DEVICE_LINK_TIMEOUT] unavailable');
+        const bot = bots.find((row) => row.id === args[0])!;
+        return {
+          ...bot,
+          status: bot.id === 'deleted' ? 'deleted' : bot.id === 'restored' ? 'active' : 'archived',
+        };
+      });
+
+      await refreshRemoteDeviceSessions(d, 'MacBook', { status: 'archived', snapshotMode });
+
+      expect(remoteProjectsStore.getDeviceSessions(d, 'archived').map((row) => row.id)).toEqual([
+        'kept',
+        'timeout',
+      ]);
+      expect(remoteProjectsStore.getDeviceSessions(d, 'active').map((row) => row.id)).toEqual([
+        'restored',
+      ]);
+      expect(
+        remoteProjectsStore.getDeviceSessions(d).every((row) => row.model === 'gpt-6-astra'),
+      ).toBe(true);
+      expect(invoke).toHaveBeenCalledTimes(6);
+    },
+  );
+
+  it('keeps independent bounded probe rotation for active and archived companions', async () => {
+    const d = did();
+    const bots = ['active', 'archived'].flatMap((status) =>
+      Array.from({ length: 9 }, (_, i) =>
+        session(`${status}-${i}`, {
+          source: 'bot',
+          status: status as Session['status'],
+        }),
+      ),
+    );
+    for (const status of ['active', 'archived'] as const) {
+      remoteProjectsStore.mergeDeviceSessions(
+        d,
+        'MacBook',
+        bots.filter((row) => row.status === status),
+        status,
+      );
+    }
+    const probed: string[] = [];
+    invoke.mockImplementation(async (_device, channel, args) => {
+      if (channel === 'local-db:sessions:list') return [];
+      probed.push(args[0]);
+      return bots.find((row) => row.id === args[0]);
+    });
+    for (const status of ['active', 'archived', 'active', 'archived'] as const) {
+      const before = probed.length;
+      await refreshRemoteDeviceSessions(d, 'MacBook', { status });
+      expect(probed.length - before).toBe(8);
+    }
+    expect(new Set(probed).size).toBe(18);
+    expect(remoteProjectsStore.getDeviceSessions(d)).toHaveLength(18);
+  });
+
+  it('does not invalidate an archived detail probe when the active bucket refreshes', async () => {
+    const d = did();
+    const bot = session('archived-concurrent', { source: 'bot', status: 'archived' });
+    remoteProjectsStore.mergeDeviceSessions(d, 'MacBook', [bot], 'archived');
+    const detail = deferred<Session>();
+    invoke.mockImplementation(async (_device, channel) =>
+      channel === 'local-db:sessions:list' ? [] : detail.promise,
+    );
+    const refresh = refreshRemoteDeviceSessions(d, 'MacBook', { status: 'archived' });
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
+    await refreshRemoteDeviceSessions(d, 'MacBook');
+    await refreshRemoteDeviceSessions(d, 'MacBook');
+    detail.resolve({ ...bot, status: 'deleted' });
+    await expect(refresh).resolves.toBe('ok');
+    expect(remoteProjectsStore.getDeviceSessions(d)).toEqual([]);
+  });
+
+  it('fences archived detail responses against disconnect and newer pushes', async () => {
+    const d = did();
+    const bot = session('archived-late', {
+      source: 'bot',
+      status: 'archived',
+      model: 'gpt-6-astra',
+    });
+    remoteProjectsStore.mergeDeviceSessions(d, 'MacBook', [bot], 'archived');
+    for (const change of ['push', 'disconnect'] as const) {
+      const detail = deferred<Session>();
+      invoke
+        .mockReset()
+        .mockImplementation(async (_device, channel) =>
+          channel === 'local-db:sessions:list' ? [] : detail.promise,
+        );
+      const refresh = refreshRemoteDeviceSessions(d, 'MacBook', { status: 'archived' });
+      await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
+      if (change === 'push') remoteProjectsStore.applyPatch(d, bot.id, { model: 'new-model' });
+      else remoteProjectsStore.markDeviceDisconnected(d);
+      detail.resolve({ ...bot, status: 'deleted' });
+      await expect(refresh).resolves.toBe(change === 'push' ? 'ok' : 'superseded');
+      expect(remoteProjectsStore.getDeviceSessions(d)[0]?.model).toBe('new-model');
+    }
+  });
+
+  it.each(['merge', 'replace'] as const)(
     '%s refresh preserves a remote companion omitted by the ordinary task list',
     async (snapshotMode) => {
       const d = did();

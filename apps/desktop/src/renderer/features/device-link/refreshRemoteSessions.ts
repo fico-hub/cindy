@@ -237,22 +237,22 @@ function refreshTaskKey(deviceId: string, status: RemoteSessionStatus): string {
 }
 
 /**
- * 满窗口缺席行的轮询队列(per-device)。不能用 snapshot epoch 推导数组下标：前一轮
+ * 满窗口缺席行的轮询队列(per-device + status)。不能用 snapshot epoch 推导数组下标：前一轮
  * 确认终态并移除候选后，数组会收缩，重算下标会跳过紧邻项。队列在每轮开始时与当前
  * missing ids 对账，保留旧轮询顺序、移除已不缺席项，并把新缺席项追加到队尾。
  */
 const missingStatusProbeQueues = new Map<string, string[]>();
 
 function reconcileMissingStatusProbeQueue(
-  deviceId: string,
+  queueKey: string,
   missingSessionIds: readonly string[],
 ): string[] {
   if (missingSessionIds.length === 0) {
-    missingStatusProbeQueues.delete(deviceId);
+    missingStatusProbeQueues.delete(queueKey);
     return [];
   }
   const missingIds = new Set(missingSessionIds);
-  const previous = missingStatusProbeQueues.get(deviceId) ?? [];
+  const previous = missingStatusProbeQueues.get(queueKey) ?? [];
   const queuedIds = new Set<string>();
   const queue: string[] = [];
   for (const sessionId of previous) {
@@ -265,7 +265,7 @@ function reconcileMissingStatusProbeQueue(
     queuedIds.add(sessionId);
     queue.push(sessionId);
   }
-  missingStatusProbeQueues.set(deviceId, queue);
+  missingStatusProbeQueues.set(queueKey, queue);
   return queue;
 }
 
@@ -332,8 +332,10 @@ async function probeMissingSessionStatuses(
   deviceId: string,
   epoch: number,
   missingSessionIds: readonly string[],
+  status: RemoteSessionStatus,
 ): Promise<void> {
-  const queue = reconcileMissingStatusProbeQueue(deviceId, missingSessionIds);
+  const queueKey = refreshTaskKey(deviceId, status);
+  const queue = reconcileMissingStatusProbeQueue(queueKey, missingSessionIds);
   if (queue.length === 0) return;
   const count = Math.min(MISSING_STATUS_PROBE_LIMIT, queue.length);
   const candidates = queue.slice(0, count);
@@ -355,7 +357,7 @@ async function probeMissingSessionStatuses(
     }),
   );
   // 更强的 refresh / remove / disconnect 已使本轮失效时，不应用迟到的补查结果。
-  if (!remoteProjectsStore.isLatestSnapshotEpoch(deviceId, epoch, 'active')) return;
+  if (!remoteProjectsStore.isLatestSnapshotEpoch(deviceId, epoch, status)) return;
   const terminalIds = new Set<string>();
   for (const result of results) {
     // A live push accepted while this GET was in flight is newer than its
@@ -373,7 +375,7 @@ async function probeMissingSessionStatuses(
     if (!result.value || typeof result.value !== 'object') continue;
     const session = result.value as Partial<Session>;
     if (session.id !== result.sessionId) continue;
-    if (session.status === 'archived' || session.status === 'deleted') {
+    if (session.status === 'deleted' || (status === 'active' && session.status === 'archived')) {
       terminalIds.add(result.sessionId);
       remoteProjectsStore.applyPatch(deviceId, result.sessionId, {
         status: session.status,
@@ -382,8 +384,9 @@ async function probeMissingSessionStatuses(
       removeRemoteSessionActivityEntry(result.sessionId);
       continue;
     }
-    // sessions:get 返回窗口外 active 行时同样是权威快照，回填 title / pinnedAt / model 等
+    // sessions:get 返回缺席行时同样是权威快照，回填 title / pinnedAt / model 等
     // 元数据；否则丢失 patched push 后会永久保留旧字段。
+    if (session.status !== status) terminalIds.add(result.sessionId);
     remoteProjectsStore.applyPatch(deviceId, result.sessionId, { ...session });
   }
   const nextQueue = [
@@ -391,9 +394,9 @@ async function probeMissingSessionStatuses(
     ...candidates.filter((sessionId) => !terminalIds.has(sessionId)),
   ];
   if (nextQueue.length === 0) {
-    missingStatusProbeQueues.delete(deviceId);
+    missingStatusProbeQueues.delete(queueKey);
   } else {
-    missingStatusProbeQueues.set(deviceId, nextQueue);
+    missingStatusProbeQueues.set(queueKey, nextQueue);
   }
 }
 
@@ -453,20 +456,16 @@ async function runRefreshRemoteDeviceSessions(
               }
             }
             remoteProjectsStore.setDeviceSessions(deviceId, deviceName, sessions, status);
-            if (status === 'active') {
-              await probeMissingSessionStatuses(deviceId, epoch, missingCompanionIds);
-            }
+            await probeMissingSessionStatuses(deviceId, epoch, missingCompanionIds, status);
           } else {
             remoteProjectsStore.mergeDeviceSessions(deviceId, deviceName, sessions, status);
             if (status === 'active') {
-              await probeMissingSessionStatuses(deviceId, epoch, missingSessionIds);
+              await probeMissingSessionStatuses(deviceId, epoch, missingSessionIds, status);
             }
           }
         } else {
           remoteProjectsStore.setDeviceSessions(deviceId, deviceName, sessions, status);
-          if (status === 'active') {
-            await probeMissingSessionStatuses(deviceId, epoch, missingCompanionIds);
-          }
+          await probeMissingSessionStatuses(deviceId, epoch, missingCompanionIds, status);
         }
       }
       if (opts.scope === 'schedule' || opts.scope === 'both') {
