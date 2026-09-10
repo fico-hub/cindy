@@ -29,7 +29,7 @@ export function registerTelegramDeliveryTools(registry: SchedulerToolRegistry, d
   });
   registry.register({
     name: 'schedule_telegram_send', category: 'scheduler',
-    description: '经官方 Telegram IM 直接发送定时结果或用户明确授权的测试。先查 status，完整复用 target；按分段持久保存唯一 idempotencyKey 和原文/展示哈希。text 是最终 HTML 或纯文本。started/unknown 不得换 key 重发；sent 仅证明收到消息 ID，formatVerified=false 表示实际富文本尚未验真。',
+    description: '经官方 Telegram IM 直接发送定时结果或用户明确授权的测试。先查 status，完整复用 target；按分段持久保存唯一 idempotencyKey 和原文/展示哈希。text 是最终 HTML 或纯文本。started/unknown 不得换 key 重发；sent 表示真实消息 ID 与绑定目标匹配；result.sentMessage 包含实际正文/entities，调用者应对照预期展示稿验真。formatVerified=false 表示 Host 未代替调用者比较格式。',
     inputShape: {
       idempotencyKey: z.string().min(1).max(200), target,
       text: z.string().min(1).max(16000), tier: z.enum(['html', 'plain']),
@@ -40,7 +40,7 @@ export function registerTelegramDeliveryTools(registry: SchedulerToolRegistry, d
   });
   registry.register({
     name: 'schedule_telegram_receipt', category: 'scheduler',
-    description: '只读查询原幂等键的持久 IM 发送记录，不发送、不重试。started/unknown 表示结果未确认，不能当未发送；sent 包含服务端真实消息 ID，但现协议不回传实际正文/entities。',
+    description: '只读查询原幂等键的持久 IM 发送记录，不发送、不重试。started/unknown 表示结果未确认，不能当未发送；sent 包含真实消息 ID 与 result.sentMessage 的实际正文/entities；缺这些字段的旧回执不能当作格式证据。',
     inputShape: { idempotencyKey: z.string().min(1).max(200) },
     handler: async ({ idempotencyKey }) => invoke(bridge => bridge.receipt(idempotencyKey)),
   });

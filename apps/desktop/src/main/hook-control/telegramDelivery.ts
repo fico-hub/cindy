@@ -169,7 +169,7 @@ export function createTelegramDeliveryBridge(deps: {
         const result = await deps.send({
           opId: row.opId, scope: { externalKey: target.externalKey },
           action: { kind: 'send', text: input.text, tier: input.tier,
-            delivery: { bindingId: target.bindingId, epoch: status.sendEpoch, expiresAt: Date.now() + 60_000 } },
+            delivery: { bindingId: target.bindingId, epoch: status.sendEpoch, expiresAt: Date.now() + 30_000 } },
         });
         row.state = stateFromResult(row, result);
         if (result) row.result = result;
