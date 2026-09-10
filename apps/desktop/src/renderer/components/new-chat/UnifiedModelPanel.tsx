@@ -1,3 +1,4 @@
+import { matchesModelName } from '@/lib/modelDisplayNames';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Check, TriangleAlert } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -57,6 +58,7 @@ const FAVORITE_FEEDBACK_MS = 700;
 const RAIL_ALL: UnifiedRailFilter = { kind: 'all' };
 /** 定宽 sizer 的行不接交互。 */
 const noop = (): void => {};
+const NO_FAVORITES: readonly ModelFavoriteItem[] = [];
 
 export interface UnifiedSelectedRow {
   /** 该行**生效**引擎(推荐 ⊕ override ⊕ 会话内 pinnedEngine ⊕ 收藏副本)。 */
@@ -127,12 +129,14 @@ export interface UnifiedModelPanelProps {
   configurationEnabled?: boolean;
   isRouteDisabled?: (providerId: string, modelId: string, agent: AgentKind) => boolean;
   /**
+   * official = 模型优先的受限入口。忽略全局引擎偏好、模型记忆和收藏配置，
+   * 始终使用目录为该模型给出的官方推荐引擎与默认配置。
+   */
+  selectionPolicy?: 'personalized' | 'official';
+  /**
    * **会话内形态**(规格 §1.6)。传了它 = 这是一个已经在跑的会话:
-   *   - rail 顶部多一格「同引擎」(图标 = 当前引擎),**默认选中**;该视图列
-   *     引擎匹配的收藏 + 所有候选含当前引擎的模型(默认/选过的在前,仅兼容的在后);
-   *   - 该视图里的模型行**显示和点选都钉在当前轨引擎**上(π 轨里点就是 Pi);
-   *     排序仍按「默认/选过的在前」,不把主场改写成当前引擎。浮层不提供 Harness 切换。
-   *   - 显式切到「全部 / 供应商」视图时,列表顶部出现一行克制的有损警示;
+   *   - 默认展示全部，已有任务把当前模型和同引擎模型提升到「推荐」;
+   *   - 在「全部 / 供应商」视图时，列表顶部显示有损切换警示;
    *   - 「全部」里选中一行若生效引擎 ≠ 当前引擎,走 `onCrossEngineSelect`(调用方执行
    *     performAgentSwitch 那条既有事务链路),而不是普通的 onSelect。
    *
@@ -177,7 +181,11 @@ export interface UnifiedModelPanelProps {
    * 可选「跟随会话」行(opt-in,仅 scheduler 的 heartbeat 绑定会话任务)。
    * 语义与既有面板同名 prop 逐字一致:选中 = 模型留空、跟随绑定会话。
    */
-  followSession?: { active: boolean; label: string; onFollow: () => void | boolean | Promise<void | boolean> };
+  followSession?: {
+    active: boolean;
+    label: string;
+    onFollow: () => void | boolean | Promise<void | boolean>;
+  };
   /**
    * 行选中。第 4 个参数是该行**已经合成好的生效配置**(引擎 ⊕ 深度 ⊕ Fast ⊕ 收藏锚点)——
    * 调用方拿到它才能把「模型 + 引擎」当成一件事写下去(M5:草稿的 vendor 就按 `engine` 派生)。
@@ -270,6 +278,7 @@ export function UnifiedModelPanel({
   paymentRequiredUnlockLabel,
   onPaymentRequired,
   configurationEnabled = true,
+  selectionPolicy = 'personalized',
   isRouteDisabled,
   sessionEngineFilter,
   followSession,
@@ -283,7 +292,8 @@ export function UnifiedModelPanel({
   panelWidthFluid = false,
 }: UnifiedModelPanelProps) {
   const { t } = useTranslation();
-  const favorites = useModelFavorites();
+  const storedFavorites = useModelFavorites();
+  const favorites = selectionPolicy === 'official' ? NO_FAVORITES : storedFavorites;
   // 引擎 override / 深度 / Fast 三份 store 的版本号:任一变化都要重算行三元组与浮层
   // (其它窗口的 storage 事件、device-link 推送同样经这两个版本号进来)。
   const enginePrefsVersion = useModelEnginePrefsVersion();
@@ -291,17 +301,14 @@ export function UnifiedModelPanel({
 
   const sessionAgent = sessionEngineFilter?.currentAgent;
 
-  // 会话内默认停在「同引擎」视图(规格 §1.6:切引擎有损,默认给无损那一面)。
-  const [rail, setRail] = useState<UnifiedRailFilter>(() =>
-    sessionAgent ? { kind: 'engine', agent: sessionAgent } : { kind: 'all' },
-  );
-  // 会话引擎在外部变化(切换完成 / 换会话)时,把默认视图跟过去 —— 停在旧引擎的
-  // 「同引擎」视图上会把新引擎的模型全挡掉(与既有 browseVendor 重置同一动机)。
+  // 默认展示全部模型，避免当前引擎没有可用模型时把其它可选模型挡住。
+  const [rail, setRail] = useState<UnifiedRailFilter>({ kind: 'all' });
+  // 外部切换引擎后回到默认视图，避免继续按旧引擎过滤。
   const lastSessionAgentRef = useRef(sessionAgent);
   useEffect(() => {
     if (lastSessionAgentRef.current === sessionAgent) return;
     lastSessionAgentRef.current = sessionAgent;
-    setRail(sessionAgent ? { kind: 'engine', agent: sessionAgent } : { kind: 'all' });
+    setRail({ kind: 'all' });
   }, [sessionAgent]);
   const [flyAnchor, setFlyAnchor] = useState<UnifiedAnchor | null>(null);
   const [flyAnchorEl, setFlyAnchorEl] = useState<HTMLElement | null>(null);
@@ -370,8 +377,8 @@ export function UnifiedModelPanel({
   );
 
   const railItems = useMemo(
-    () => buildUnifiedRail(entries, sessionAgent, providerOrder),
-    [entries, sessionAgent, providerOrder],
+    () => buildUnifiedRail(entries, undefined, providerOrder),
+    [entries, providerOrder],
   );
   // rail 上的筛选目标消失(供应商断开 / 收藏清空)时回落「全部」,避免停在空视图。
   useEffect(() => {
@@ -379,7 +386,7 @@ export function UnifiedModelPanel({
     if (railItems.some((item) => railItemKey(item) === railItemKey(rail))) return;
     setRail({ kind: 'all' });
   }, [rail, railItems]);
-  const effectiveRail = rail;
+  const effectiveRail = query.trim() ? RAIL_ALL : rail;
 
   // ── 行配置合成 ────────────────────────────────────────────────────────────
   // 「正在用的引擎」的口径 = 上面推 keepModel 时用的那一个(liveEngineAgent),不另起一份。
@@ -449,19 +456,25 @@ export function UnifiedModelPanel({
       void memoryVersion;
       // 当前草稿 / 会话**实际在用**的模型行:引擎显示强制与事实一致(正在跑什么就画
       // 什么),不受推荐 / override / pinned 摆布 —— 2026-08-14 实测抓到草稿在 pi 上跑
-      // DeepSeek,行上却按推荐回落显示「Claude」。收藏被选中时不强制(live 的是那条收藏)。
+      // DeepSeek,行上却按推荐回落显示「Claude」。收藏配置被采用时，模型本体同样显示实际配置。
       const isSelectedModelRow =
-        !activeFavoriteUid &&
         entryMatchesModelId(entry, selected.modelId) &&
         (selected.providerId === null || selected.providerId === entry.providerId);
+      const personalized = selectionPolicy === 'personalized';
       const base = resolveUnifiedRowConfig({
         entry,
-        engineOverride: getModelEngineOverride(entry.providerId, entry.modelId),
+        ...(personalized
+          ? { engineOverride: getModelEngineOverride(entry.providerId, entry.modelId) }
+          : {}),
         // ★ 记忆表按 **wire id** 存取(既有消费方的口径),不是行的归一化身份。
-        memoryEffort: (agent) =>
-          modelMemory?.getEffort(agent, entry.providerId, wireModelIdOf(entry, agent)),
-        memoryFast: (agent) =>
-          modelMemory?.getFast(agent, entry.providerId, wireModelIdOf(entry, agent)),
+        ...(personalized
+          ? {
+              memoryEffort: (agent: AgentKind) =>
+                modelMemory?.getEffort(agent, entry.providerId, wireModelIdOf(entry, agent)),
+              memoryFast: (agent: AgentKind) =>
+                modelMemory?.getFast(agent, entry.providerId, wireModelIdOf(entry, agent)),
+            }
+          : {}),
         agentFastModeCapable,
         // 会话内:无主场(或主场就在当前引擎)的模型默认落在**当前会话引擎**上。
         // 同引擎轨再加一道:未选中行显示/点选都钉在轨上 —— leftover override 不能把
@@ -512,6 +525,7 @@ export function UnifiedModelPanel({
       selected.modelId,
       selected.providerId,
       selectedEffort,
+      selectionPolicy,
       sessionAgent,
     ],
   );
@@ -541,12 +555,13 @@ export function UnifiedModelPanel({
       }
       void enginePrefsVersion;
       const isSelectedModelRow =
-        !activeFavoriteUid &&
         entryMatchesModelId(entry, selected.modelId) &&
         (selected.providerId === null || selected.providerId === entry.providerId);
       return resolveUnifiedRowConfig({
         entry,
-        engineOverride: getModelEngineOverride(entry.providerId, entry.modelId),
+        ...(selectionPolicy === 'personalized'
+          ? { engineOverride: getModelEngineOverride(entry.providerId, entry.modelId) }
+          : {}),
         ...(sessionAgent ? { pinnedEngine: engineOfAgentKind(sessionAgent) } : {}),
         ...(isSelectedModelRow && liveEngineAgent
           ? { forceEngine: engineOfAgentKind(liveEngineAgent) }
@@ -559,6 +574,7 @@ export function UnifiedModelPanel({
       liveEngineAgent,
       selected.modelId,
       selected.providerId,
+      selectionPolicy,
       sessionAgent,
     ],
   );
@@ -569,16 +585,20 @@ export function UnifiedModelPanel({
         entries,
         favorites,
         query,
+        matchesQuery: (entry, q) => matchesModelName({
+          id: entry.modelId, displayName: entry.displayName, description: entry.description,
+        }, q, t),
         rail: effectiveRail,
         effectiveEngineOf,
         providerOrder,
+        ...(scope === 'session' && liveEngineAgent
+          ? { recommendation: { agent: liveEngineAgent, ...selected } }
+          : {}),
       }),
-    [entries, favorites, query, effectiveRail, effectiveEngineOf, providerOrder],
+    [entries, favorites, query, effectiveRail, effectiveEngineOf, providerOrder, t, scope, liveEngineAgent, selected.modelId, selected.providerId],
   );
 
-  // 列表变化时把选中行对齐到**可视区中部**(Chris 2026-08-19 实测反馈,详见
-  // computeSelectedRowScrollTop 的头注:此前是「最小滚动进可视区」,首开那一帧列表极矮,
-  // 等价于把选中行顶到最上沿,收藏 1、2 条被顶出去)。
+  // 打开或切视图时，把模型本体的当前行对齐到可视高度 35% 处；收藏可以滚出顶部。
   // 触发面不变:选中项自身变化(用户刚点了一行)不做任何对齐,否则点完列表会当场跳位;
   // **只有视图本身变化**(rail 切换 / 搜索词变化 / 首次打开)才对齐 —— 数据刷新
   // (目录轮询 / 收藏增删)不夺走用户的滚动位置(2026-08-13 实测:浏览到列表深处时,
@@ -707,16 +727,14 @@ export function UnifiedModelPanel({
 
   const isSelectedRow = useCallback(
     (anchor: UnifiedAnchor, entry: UnifiedModelEntry): boolean => {
-      if (anchor.kind === 'fav') return activeFavoriteUid === anchor.uid;
-      // 收藏锚点被选中时,模型行不同时打勾(锚点语义:选中的是那一条收藏)。
-      if (activeFavoriteUid) return false;
+      if (anchor.kind === 'fav') return false;
       // 会话 / 草稿存的是 wire id;按「行 id 或任一引擎 wire id 命中」解析(合并行契约)。
       return (
         entryMatchesModelId(entry, selected.modelId) &&
         (selected.providerId === null || selected.providerId === anchor.providerId)
       );
     },
-    [activeFavoriteUid, selected.modelId, selected.providerId],
+    [selected.modelId, selected.providerId],
   );
 
   /** ☆ 点亮 0.7s 后恢复(规格 §1.5:源头行不持有收藏态,只给一次动作反馈)。 */
@@ -783,7 +801,9 @@ export function UnifiedModelPanel({
     resolveDefaultRowConfig: (entry) =>
       resolveUnifiedRowConfig({
         entry,
-        engineOverride: getModelEngineOverride(entry.providerId, entry.modelId),
+        ...(selectionPolicy === 'personalized'
+          ? { engineOverride: getModelEngineOverride(entry.providerId, entry.modelId) }
+          : {}),
         agentFastModeCapable,
         ...(sessionAgent ? { pinnedEngine: engineOfAgentKind(sessionAgent) } : {}),
       }),
@@ -839,6 +859,8 @@ export function UnifiedModelPanel({
   const sectionLabel = (section: (typeof sections)[number]): string =>
     section.kind === 'favorites'
       ? t('newChat.modelSelector.unified.favoritesGroup')
+      : section.kind === 'recommended'
+        ? t('newChat.modelSelector.unified.recommended')
       : section.group
         ? providerLabel(section.group.providerId)
         : '';
@@ -847,7 +869,7 @@ export function UnifiedModelPanel({
   const hasRows = rows.length > 0;
 
   /**
-   * 行内价格 / 订阅签的派生(设计稿 v4 定稿 F 样式):付费行显示 $ 档串,折扣行亮段按
+   * 行内价格的派生(设计稿 v4 定稿 F 样式):付费行显示 $ 档串,折扣行亮段按
    * 折后价比例填充并尾随 ↓X%;限免显示淡染小徽标;无报价不渲染节点。
    * 价格按**该行生效引擎的 wire id**查(同一逻辑模型换引擎可能换一条报价)。
    *
@@ -858,45 +880,37 @@ export function UnifiedModelPanel({
     (
       entry: UnifiedModelEntry,
       config: UnifiedRowConfig,
-    ): {
-      priceDisplay: NonNullable<Parameters<typeof UnifiedModelRow>[0]['priceDisplay']> | null;
-      subscriptionRow: boolean;
-    } => {
+    ): NonNullable<Parameters<typeof UnifiedModelRow>[0]['priceDisplay']> | null => {
       const price = priceOf(entry.providerId, config.wireModelId ?? entry.modelId, config.agent);
-      // 订阅接入且拿不到按量报价的行:画「订阅」小签,不画 $ 档串(那类模型走套餐额度,
-      // 画钱会被读成按量计费)。判定用 provider.access.kind + 报价来源
-      // (subscription-reference = 只是价值估算,不是账单价)。
+      // 接入方式由来源区域说明,行内不重复标注。订阅价值估算不作为按量报价展示。
       const rowProvider = providers.find((item) => item.id === entry.providerId);
       const subscriptionRow =
         rowProvider?.access?.kind === 'subscription' &&
         (price === null ||
           price.kind !== 'priced' ||
           price.current.source === 'subscription-reference');
-      if (subscriptionRow) return { priceDisplay: null, subscriptionRow: true };
-      if (price?.kind === 'free') return { priceDisplay: { kind: 'free' }, subscriptionRow: false };
-      if (price?.kind !== 'priced') return { priceDisplay: null, subscriptionRow: false };
+      if (subscriptionRow) return null;
+      if (price?.kind === 'free') return { kind: 'free' };
+      if (price?.kind !== 'priced') return null;
       // 符号个数按**标准价**判(original;折扣不改变模型的价格档),点亮几格按折扣比例
       // 取整;颜色只由点亮格数决定(见 UnifiedModelRow priceDisplay 头注)。
       const basis = price.original ?? price.current;
       const discountPct = price.discount !== undefined ? Math.round(price.discount * 100) : 0;
       return {
-        subscriptionRow: false,
-        priceDisplay: {
-          kind: 'tier',
-          tier: priceTierOf(basis.outputPerMtok, basis.currency),
-          // 档串符号跟**报价币种**走(设计稿:中文报价是 ¥¥¥)。
-          symbol: basis.currency === 'CNY' ? '¥' : '$',
-          ...(discountPct > 0 && discountPct < 100
-            ? {
-                discountPct,
-                paidPct: 100 - discountPct,
-                title: t(
-                  'newChat.modelSelector.pricing.discount',
-                  modelPriceDiscountLabelValues(price.discount ?? 0),
-                ),
-              }
-            : {}),
-        },
+        kind: 'tier',
+        tier: priceTierOf(basis.outputPerMtok, basis.currency),
+        // 档串符号跟**报价币种**走(设计稿:中文报价是 ¥¥¥)。
+        symbol: basis.currency === 'CNY' ? '¥' : '$',
+        ...(discountPct > 0 && discountPct < 100
+          ? {
+              discountPct,
+              paidPct: 100 - discountPct,
+              title: t(
+                'newChat.modelSelector.pricing.discount',
+                modelPriceDiscountLabelValues(price.discount ?? 0),
+              ),
+            }
+          : {}),
       };
     },
     [priceOf, providers, t],
@@ -937,7 +951,7 @@ export function UnifiedModelPanel({
     <div className="flex min-h-0 min-w-0 flex-1">
       <UnifiedModelRail
         items={railItems}
-        active={rail}
+        active={effectiveRail}
         onSelect={setRail}
         providers={providers}
         providerLabel={providerLabel}
@@ -1048,7 +1062,7 @@ export function UnifiedModelPanel({
                 {section.rows.map((row) => {
                   const config = configOf(row.entry, row.favorite);
                   const key = anchorKey(row.anchor);
-                  const { priceDisplay, subscriptionRow } = priceDisplayOf(row.entry, config);
+                  const priceDisplay = priceDisplayOf(row.entry, config);
                   return (
                     <UnifiedModelRow
                       key={key}
@@ -1060,11 +1074,17 @@ export function UnifiedModelPanel({
                       isFavoriteRow={!!row.favorite}
                       justFavorited={justFavorited === key}
                       {...(priceDisplay ? { priceDisplay } : {})}
-                      {...(subscriptionRow
-                        ? { subscriptionLabel: t('settings.providers.models.subscription') }
-                        : {})}
+
                       configurationEnabled={configurationEnabled}
-                      interactionDisabled={interactionDisabled || actionPending || !!isRouteDisabled?.(row.entry.providerId, config.wireModelId ?? row.entry.modelId, config.agent)}
+                      interactionDisabled={
+                        interactionDisabled ||
+                        actionPending ||
+                        !!isRouteDisabled?.(
+                          row.entry.providerId,
+                          config.wireModelId ?? row.entry.modelId,
+                          config.agent,
+                        )
+                      }
                       paymentRequired={row.entry.availability === 'requires_payment'}
                       {...(paymentRequiredLabel ? { paymentRequiredLabel } : {})}
                       {...(paymentRequiredUnlockLabel ? { paymentRequiredUnlockLabel } : {})}
@@ -1074,10 +1094,13 @@ export function UnifiedModelPanel({
                       onReveal={revealFlyout}
                       onRevealForKeyboard={revealFlyoutForKeyboard}
                       onSelect={() => selectRow(row.anchor, config, row.favorite)}
-                      onStar={() =>
-                        row.favorite
-                          ? removeFavorite(row.anchor, row.entry)
-                          : addFavorite(row.anchor, config)
+                      onStar={
+                        selectionPolicy === 'personalized'
+                          ? () =>
+                              row.favorite
+                                ? removeFavorite(row.anchor, row.entry)
+                                : addFavorite(row.anchor, config)
+                          : undefined
                       }
                     />
                   );
@@ -1109,7 +1132,7 @@ export function UnifiedModelPanel({
                 </div>
                 {section.rows.map((row) => {
                   const config = configOf(row.entry, row.favorite, RAIL_ALL);
-                  const { priceDisplay, subscriptionRow } = priceDisplayOf(row.entry, config);
+                  const priceDisplay = priceDisplayOf(row.entry, config);
                   return (
                     <UnifiedModelRow
                       key={anchorKey(row.anchor)}
@@ -1121,9 +1144,7 @@ export function UnifiedModelPanel({
                       isFavoriteRow={!!row.favorite}
                       justFavorited={false}
                       {...(priceDisplay ? { priceDisplay } : {})}
-                      {...(subscriptionRow
-                        ? { subscriptionLabel: t('settings.providers.models.subscription') }
-                        : {})}
+
                       configurationEnabled={configurationEnabled}
                       interactionDisabled
                       paymentRequired={row.entry.availability === 'requires_payment'}
@@ -1176,7 +1197,15 @@ export function UnifiedModelPanel({
                 )}
                 effortLabelOf={effortLabelOf}
                 justFavorited={justFavorited === anchorKey(target.anchor)}
-                disabled={interactionDisabled || actionPending || !!isRouteDisabled?.(target.entry.providerId, config.wireModelId ?? target.entry.modelId, config.agent)}
+                disabled={
+                  interactionDisabled ||
+                  actionPending ||
+                  !!isRouteDisabled?.(
+                    target.entry.providerId,
+                    config.wireModelId ?? target.entry.modelId,
+                    config.agent,
+                  )
+                }
                 engineLocked={effectiveRail.kind === 'engine'}
                 onEngineChange={(engine) => {
                   if (effectiveRail.kind === 'engine') return;

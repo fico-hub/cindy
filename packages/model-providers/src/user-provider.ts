@@ -1,3 +1,12 @@
+import { providerMediaField } from "./providerMediaModels.js";
+import {
+  expandedRegistryEntries,
+  resolveModelMetadata,
+  applyModelMetadata,
+  pickModelMetadata,
+  runtimeUserModelMetadata,
+  type ModelMetadata,
+} from "./modelMetadataLayers.js";
 /**
  * 用户自定义供应商：把 `CustomProviderConfig` 展开成标准 `Provider`（纯逻辑，零依赖）。
  *
@@ -23,6 +32,11 @@ import type {
 } from "./types.js";
 import type { ModelRegistry } from "./modelAccessBean.js";
 import { isLoopbackProviderUrl } from "./provider-url.js";
+import {
+  clampEffortToSupported,
+  modelDefaultEffort,
+  defaultEffortForCapabilities,
+} from "./effortResolution.js";
 
 /** 自定义模型缺省上下文窗口（用户不填元数据时的保守默认，仅用于展示）。 */
 export const DEFAULT_CUSTOM_CONTEXT_WINDOW = 200_000;
@@ -45,6 +59,12 @@ export function storedCustomProviderId(providerId: string): string {
   return providerId === LEGACY_XAI_CUSTOM_PROVIDER_RUNTIME_ID
     ? "xai"
     : providerId;
+}
+
+function withoutTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value[end - 1] === "/") end -= 1;
+  return value.slice(0, end);
 }
 
 function isOfficialXaiApiUpstream(upstream: string | undefined): boolean {
@@ -116,19 +136,17 @@ export function xaiApiOfficialRuntimeAgents(
  * 自定义模型的默认 effort 档位（「参考默认设置」）——与内置当代旗舰模型对齐：
  *   - claude-code：low/medium/high/xhigh/max（同 opus / fable）；
  *   - codex：low/medium/high/xhigh/max（gpt-5.x 同款五档，ultra 仍仅限已登记模型）。
- * 让自定义模型像内置模型一样能在选择器里切 reasoning/thinking 强度（默认 high）。
+ * 让自定义模型像内置模型一样能在选择器里切 reasoning/thinking 强度（默认 medium）。
  * 端点是否真支持由其后端决定：cc 经 `thinking`、codex 经 reasoning effort 透传，
  * anthropic-compat-proxy 仅对个别内置 model id strip 字段、对自定义 id 一律字节透传。
  * 未登记模型（Registry 无法确认能力）也放开到 max：第三方 Responses 兼容端点普遍
  * 接受与否只有端点方/用户知道，选到不支持的档位会被上游拒绝，用户改选即可；
- * 默认档保持 high，存量行为不变（见 #2964）。
+ * 默认中档；用户显式配置仍优先。
  */
 const CUSTOM_EFFORTS: Partial<Record<AgentKind, Effort[]>> = {
   "claude-code": ["low", "medium", "high", "xhigh", "max"],
   codex: ["low", "medium", "high", "xhigh", "max"],
 };
-/** 自定义模型默认选中的 effort（与内置旗舰一致）。 */
-const DEFAULT_CUSTOM_EFFORT: Effort = "high";
 
 interface RegistryEffortMetadata {
   efforts: Effort[];
@@ -136,19 +154,28 @@ interface RegistryEffortMetadata {
 }
 
 function toRegistryEffortMetadata(
-  entry: { efforts?: readonly Effort[]; defaultEffort?: Effort | null; perAgent?: Partial<Record<string, { efforts?: readonly Effort[]; defaultEffort?: Effort | null }>> },
+  entry: {
+    efforts?: readonly Effort[];
+    defaultEffort?: Effort | null;
+    perAgent?: Partial<
+      Record<
+        string,
+        { efforts?: readonly Effort[]; defaultEffort?: Effort | null }
+      >
+    >;
+  },
   agent: AgentKind,
 ): RegistryEffortMetadata | undefined {
   const perAgent = entry.perAgent?.[agent];
   const efforts = perAgent?.efforts ?? entry.efforts;
   if (!efforts) return undefined;
-  const declaredDefault = perAgent?.defaultEffort ?? entry.defaultEffort;
+  const declaredDefault = modelDefaultEffort(entry);
   const defaultEffort =
-    declaredDefault && efforts.includes(declaredDefault)
-      ? declaredDefault
-      : efforts.includes(DEFAULT_CUSTOM_EFFORT)
-        ? DEFAULT_CUSTOM_EFFORT
-        : (efforts[efforts.length - 1] ?? null);
+    efforts.length === 0 || declaredDefault === null
+      ? null
+      : declaredDefault !== undefined
+        ? (clampEffortToSupported(declaredDefault, efforts) as Effort)
+        : defaultEffortForCapabilities(efforts);
   return { efforts: [...efforts], defaultEffort };
 }
 
@@ -191,7 +218,7 @@ function registryEffortMetadata(
   if (agent === "pi" || !registry) return undefined;
 
   // Stage 1 — exact lookup: only the original modelId.
-  const exactMatches = registry.models.filter((entry) =>
+  const exactMatches = expandedRegistryEntries(registry).filter((entry) =>
     entry.routes.some(
       (route) =>
         route.agents.includes(agent) &&
@@ -207,11 +234,11 @@ function registryEffortMetadata(
   // (e.g. "openai/gpt-5.6-sol") can match registry entries whose
   // route.modelId is just "gpt-5.6-sol".
   const stripped = new Set<string>();
-  for (const prefix of ['openai/', 'xd/', 'chatgpt/']) {
+  for (const prefix of ["openai/", "xd/", "chatgpt/"]) {
     if (modelId.startsWith(prefix)) stripped.add(modelId.slice(prefix.length));
   }
   if (stripped.size === 0) return undefined;
-  const fallbackMatches = registry.models.filter((entry) =>
+  const fallbackMatches = expandedRegistryEntries(registry).filter((entry) =>
     entry.routes.some(
       (route) =>
         route.agents.includes(agent) &&
@@ -233,10 +260,9 @@ function registrySupportsFastMode(
 ): boolean {
   if (agent !== "codex" || !registry) return false;
 
-  const matches = registry.models.filter((entry) =>
+  const matches = expandedRegistryEntries(registry).filter((entry) =>
     entry.routes.some(
-      (route) =>
-        route.agents.includes(agent) && route.modelId === modelId,
+      (route) => route.agents.includes(agent) && route.modelId === modelId,
     ),
   );
   return (
@@ -258,6 +284,7 @@ function toCatalogModel(
   providerId: string,
   agent: AgentKind,
   modelRegistry: ModelRegistry | null | undefined,
+  providerDefaults?: ModelMetadata,
 ): CatalogModel {
   // 显式 runtime 能力优先：reasoning:true 才导出 efforts；false = 明确无思考档。
   // 字段缺省才走历史 fallback（Pi 空档 / 其它自定义 Provider 的 CUSTOM_EFFORTS）。
@@ -270,26 +297,26 @@ function toCatalogModel(
           ? []
           : (CUSTOM_EFFORTS[agent] ?? []);
   const registryEfforts =
-    m.reasoning !== undefined
+    m.reasoning !== undefined || modelRegistry?.schemaVersion === 4
       ? undefined
       : registryEffortMetadata(modelRegistry, m.id, agent);
-  const supportsFastMode = registrySupportsFastMode(
-    modelRegistry,
-    m.id,
-    agent,
-  );
+  const supportsFastMode =
+    modelRegistry?.schemaVersion !== 4 &&
+    registrySupportsFastMode(modelRegistry, m.id, agent);
   const effectiveEfforts = registryEfforts?.efforts ?? efforts;
   const defaultEffort =
-    registryEfforts?.defaultEffort ??
-    (m.reasoning === true &&
-    m.reasoningDefaultEffort &&
-    effectiveEfforts.includes(m.reasoningDefaultEffort)
-      ? m.reasoningDefaultEffort
-      : effectiveEfforts.includes(DEFAULT_CUSTOM_EFFORT)
-        ? DEFAULT_CUSTOM_EFFORT
-        : (effectiveEfforts[0] ?? null));
-  return {
+    registryEfforts !== undefined
+      ? registryEfforts.defaultEffort
+      : m.reasoning === true &&
+          m.reasoningDefaultEffort &&
+          effectiveEfforts.includes(m.reasoningDefaultEffort)
+        ? m.reasoningDefaultEffort
+        : defaultEffortForCapabilities(effectiveEfforts);
+  const model: CatalogModel = {
+    userModelConfig: { ...m },
     id: m.id,
+    discoveredMetadata: m.discoveredMetadata,
+    nameExplicit: m.nameExplicit,
     name: m.name,
     ...(agent === "pi" && m.piApi ? { piApi: m.piApi } : {}),
     ...(m.route ? { route: { ...m.route } } : {}),
@@ -311,6 +338,22 @@ function toCatalogModel(
     ...(m.thinkingToggle === true ? { thinkingToggle: true } : {}),
     ...(supportsFastMode ? { supportsFastMode: true } : {}),
   };
+  const user = runtimeUserModelMetadata(m);
+  const resolved =
+    modelRegistry?.schemaVersion === 4 ||
+    m.discoveredMetadata ||
+    providerDefaults
+      ? resolveModelMetadata(
+          modelRegistry ?? undefined,
+          providerId,
+          m.id,
+          m.discoveredMetadata,
+          pickModelMetadata(user),
+          agent,
+          providerDefaults,
+        )
+      : pickModelMetadata(user);
+  return applyModelMetadata(model, resolved);
 }
 
 function defaultWireProtocol(agent: AgentKind): ProviderWireProtocol {
@@ -338,11 +381,11 @@ function toRouting(
   const r: RoutingDescriptor = {
     upstream: baseUrl,
     authStrategy: strategy,
-    ...(agent === 'codex'
-      && (wireProtocol ?? defaultWireProtocol(agent)) === 'openai-responses'
+    ...(agent === "codex" &&
+    (wireProtocol ?? defaultWireProtocol(agent)) === "openai-responses"
       ? { supportsResponsesCustomTools: false }
       : {}),
-    ...(agent === 'codex' && supportsImageGeneration === true
+    ...(agent === "codex" && supportsImageGeneration === true
       ? { supportsImageGeneration: true }
       : {}),
     ...(strategy === "none" &&
@@ -351,7 +394,8 @@ function toRouting(
       ? { disabled: true }
       : {}),
     ...(requestPath ? { requestPath } : {}),
-    ...(wireProtocol && (agent === 'pi' || wireProtocol !== defaultWireProtocol(agent))
+    ...(wireProtocol &&
+    (agent === "pi" || wireProtocol !== defaultWireProtocol(agent))
       ? { wireProtocol }
       : {}),
   };
@@ -374,6 +418,7 @@ function toRouting(
  */
 export interface BuildUserProviderOptions {
   modelRegistry?: ModelRegistry | null;
+  presets?: readonly import("./types.js").ProviderPreset[];
 }
 
 export function buildUserProvider(
@@ -405,11 +450,74 @@ export function buildUserProvider(
       rt.piCatalogProviderId,
       rt.supportsImageGeneration,
     );
-    models[agent] = rt.models.map((m) =>
-      toCatalogModel(m, config.id, agent, options.modelRegistry),
+    const preset = options.presets?.find(
+      (preset) => preset.id === rt.catalogPresetId,
     );
+    const presetRuntime = preset?.runtimes[agent];
+    const followsPreset =
+      presetRuntime &&
+      withoutTrailingSlashes(rt.baseUrl) ===
+        withoutTrailingSlashes(presetRuntime.baseUrl) &&
+      (rt.wireProtocol ?? defaultWireProtocol(agent)) ===
+        (presetRuntime.wireProtocol ?? defaultWireProtocol(agent)) &&
+      (rt.requestPath ?? "") === (presetRuntime.requestPath ?? "");
+    models[agent] = rt.models.map((m) => {
+      const presetModel = followsPreset
+        ? presetRuntime.models.find((model) => model.id === m.id)
+        : undefined;
+      const sameRoute =
+        m.route?.baseUrl === presetModel?.route?.baseUrl &&
+        m.route?.wireProtocol === presetModel?.route?.wireProtocol &&
+        m.route?.requestPath === presetModel?.route?.requestPath;
+      const defaults =
+        presetModel && sameRoute
+          ? pickModelMetadata({
+              ...presetModel,
+              efforts:
+                presetModel.reasoning === false
+                  ? []
+                  : presetModel.reasoningEfforts,
+              defaultEffort: presetModel.reasoningDefaultEffort,
+            })
+          : undefined;
+      return {
+        ...toCatalogModel(
+          m,
+          followsPreset && sameRoute ? preset!.id : config.id,
+          agent,
+          options.modelRegistry,
+          defaults,
+        ),
+        ...(rt.catalogPresetId ? { catalogPresetId: rt.catalogPresetId } : {}),
+      };
+    });
+  }
+  const mediaLists: Partial<
+    Pick<
+      Provider,
+      "imageModels" | "videoModels" | "audioModels" | "embeddingModels"
+    >
+  > = {};
+  for (const [agent, list] of Object.entries(models)) {
+    for (const model of list ?? []) {
+      const field = providerMediaField(model.mode);
+      if (!field) continue;
+      const items = (mediaLists[field] ??= []);
+      if (!items.some((item) => item.id === model.id))
+        items.push({
+          ...pickModelMetadata(model),
+          id: model.id,
+          name: model.name,
+          mode: model.mode,
+          discoveredMetadata: model.discoveredMetadata,
+          sourceAgent: agent as AgentKind,
+          ...(model.modalities ? { modalities: model.modalities } : {}),
+          ...(model.description ? { description: model.description } : {}),
+        });
+    }
   }
   return {
+    ...mediaLists,
     id: runtimeProviderId,
     name: config.name,
     source: "user",

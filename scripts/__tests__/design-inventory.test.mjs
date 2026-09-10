@@ -102,6 +102,13 @@ test('extractRouterFacts: 真实 router.tsx 的三类去向逐条钉死', () => 
   assert.deepEqual(production.map((row) => `${row.path} ${row.component}`), [
     '/add-account AddAccountLoginPage',
     '/apps/:ghostId GhostMainViewFeatureLayout',
+    '/bots BotsHomeView',
+    '/bots/:botId BotsHomeView',
+    '/bots/:botId/direct/:threadId BotDirectMessageView',
+    '/bots/:botId/history/:sessionId BotHistorySessionView',
+    '/bots/:botId/session/:sessionId BotSessionView',
+    '/bots/remote/:deviceId/:botId RemoteBotSessionView',
+    '/bots/roster BotRosterView',
     '/cc-agent/:sessionId CCAgentSessionView',
     '/cc-agent/boot SecondaryWindowBootGate',
     '/cc-agent/files/:sessionId WorkdirBrowseRoute',
@@ -118,6 +125,7 @@ test('extractRouterFacts: 真实 router.tsx 的三类去向逐条钉死', () => 
     '/skillhub/local SkillhubHomeView',
     '/skillhub/local/:kind/global/:name SkillhubDetailView',
     '/skillhub/local/:kind/project/:projectHash/:name SkillhubDetailView',
+    '/skillhub/local/by-path SkillhubDetailView',
     '/skillhub/market SkillhubMarketListView',
   ]);
 
@@ -137,6 +145,7 @@ test('extractRouterFacts: 真实 router.tsx 的三类去向逐条钉死', () => 
     '/ LocalDbGate',
     '/ MainLayout',
     '/ ProtectedRoute',
+    '/bots BotsFeatureLayout',
     '/cc-agent CCAgentFeatureLayout',
     '/login GuestRoute',
     '/skillhub SkillhubFeatureLayout',
@@ -1086,12 +1095,20 @@ test('defaultHumanSeed: 全量 legacy + unassigned,protected 与迁移状态正�
   assert.equal(seed.includes('unassigned'), true);
   assert.equal(seed.includes('| legacy |'), true);
   assert.equal(seed.includes('| pilot |'), false);
-  assert.equal(seed.includes('待 DS-9 增量'), true);
+  assert.equal(seed.includes('待 DS-7 增量发现'), true);
   assert.equal(seed.includes('cindy-updater/ui'), true);
   assert.equal(seed.includes('DESIGN.md §16 登录链路'), true);
   assert.equal(seed.includes('DESIGN.md §15 CINDY 皮肤族'), true);
   assert.equal(seed.includes('DESIGN.md §10 语义豁免色族消费者'), true);
-  assert.equal(seed.includes('2px status micro-cells'), true);
+  assert.equal(seed.includes('登记成员 workflow-status-cell'), true);
+  assert.equal(seed.includes('登记成员 usage-heatmap-day / usage-token-bar'), true);
+  assert.equal(seed.includes('system-category-square'), true);
+  assert.equal(seed.includes('复用 desktop.chat.session'), true);
+  assert.equal(
+    seed.includes('2px status micro-cells'),
+    false,
+    '已被 09-07 data mark 登记取代的旧分类不得回流种子',
+  );
 });
 
 test('真实台账文件含 GENERATED 标记,人工区覆盖全部 surface ID', () => {

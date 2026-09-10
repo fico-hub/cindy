@@ -10,10 +10,16 @@ import {
   type XaiSubscriptionUsageSnapshot,
 } from '../../../shared/xaiSubscriptionUsage';
 import { formatCompactTokens } from '@/lib/usageFormat';
+import {
+  formatClaudeSubscriptionPlanLabel,
+  formatCodexPlanLabel,
+} from '@/lib/subscriptionPlanLabel';
 
 export interface UsageCardWindow {
   key: string;
   title: string;
+  /** Weekly quotas show the available percentage; other windows retain used percentage. */
+  showRemaining?: boolean;
   window: {
     utilization: number;
     /** Epoch seconds, matching provider reset timestamps. */
@@ -35,31 +41,6 @@ export interface UsageCardAccount {
   notices?: Array<{ text: string; tone: 'warn' | 'crit' }>;
   emptyText?: string;
   updatedAt?: number | null;
-}
-
-const PLAN_LABELS: Record<string, string> = {
-  free: 'Free',
-  go: 'Go',
-  plus: 'Plus',
-  pro: 'Pro',
-  prolite: 'Pro Lite',
-  max: 'Max',
-  team: 'Team',
-  business: 'Business',
-  enterprise: 'Enterprise',
-  edu: 'Edu',
-  unknown: 'Unknown',
-  self_serve_business_usage_based: 'Self Serve Business Usage Based',
-  enterprise_cbp_usage_based: 'Enterprise CBP Usage Based',
-};
-
-function formatPlanType(value: unknown): string | null {
-  if (typeof value !== 'string' || !value.trim()) return null;
-  const trimmed = value.trim();
-  return (
-    PLAN_LABELS[trimmed.toLowerCase()] ??
-    trimmed.replace(/[_-]+/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase())
-  );
 }
 
 export function formatQuotaResetAt(
@@ -98,7 +79,7 @@ export function buildClaudeUsageCard(
     paceWindowMinutes?: number,
   ) => {
     if (window && Number.isFinite(window.utilization))
-      windows.push({ key, title, window, paceWindowMinutes });
+      windows.push({ key, title, window, paceWindowMinutes, showRemaining: key !== 'five-hour' });
   };
   add('five-hour', t('quotaCard.fiveHourLabel'), snapshot.fiveHour);
   add('seven-day', t('quotaCard.weeklyLabel'), snapshot.sevenDay, 10_080);
@@ -115,7 +96,7 @@ export function buildClaudeUsageCard(
     typeof rawRateLimitStatus === 'string' ? rawRateLimitStatus.trim().toLowerCase() : undefined;
   return {
     title: 'Claude',
-    planLabel: formatPlanType(snapshot.subscriptionType),
+    planLabel: formatClaudeSubscriptionPlanLabel(snapshot.subscriptionType),
     windows,
     updatedAt: snapshot.updatedAt,
     emptyText: windows.length ? undefined : t('quotaCard.noWindows'),
@@ -153,6 +134,7 @@ export function buildCodexUsageCard(
     windows.push({
       key,
       title: quotaWindowLabel(window.windowMinutes, t),
+      showRemaining: window.windowMinutes === 10_080,
       window: { utilization: window.usedPercent, resetsAt: window.resetsAt },
       paceWindowMinutes: window.windowMinutes === 10_080 ? 10_080 : undefined,
     });
@@ -185,7 +167,7 @@ export function buildCodexUsageCard(
   const exhausted = windows.some(({ window }) => window.utilization >= 99.95);
   return {
     title: 'ChatGPT',
-    planLabel: formatPlanType(snapshot?.planType),
+    planLabel: formatCodexPlanLabel(snapshot?.planType),
     windows,
     details,
     updatedAt: snapshot?.updatedAt,
@@ -220,6 +202,7 @@ export function buildXaiUsageCard(
     windows.push({
       key: 'weekly',
       title: t('quotaCard.weeklyLabel'),
+      showRemaining: true,
       window: { utilization: weekly.creditUsagePercent, resetsAt: weekly.resetsAt },
       paceWindowMinutes: 10_080,
       detail: t('todaySpend.xai.accountWeeklyHint'),
@@ -227,7 +210,9 @@ export function buildXaiUsageCard(
         .filter((product) => Number.isFinite(product.usagePercent))
         .map((product) => ({
           label: t('quotaCard.includedLabel', { name: formatXaiProductLabel(product.product) }),
-          value: `${Math.round(Math.min(100, Math.max(0, product.usagePercent)))}%`,
+          value: t('quotaCard.usedPercent', {
+            percent: Math.round(Math.min(100, Math.max(0, product.usagePercent))),
+          }),
         })),
     });
     if (

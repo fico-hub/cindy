@@ -22,7 +22,7 @@ describe('任务消息内存治理页面接线', () => {
     expect(screen).toContain('handledMessageReloadRevisionRef.current = messageReloadRevision;');
     expect(screen).toContain('const releasePendingRouteFocusLookup = () => {');
     expect(screen).toContain('releasePendingRouteFocusLookup();');
-    expect(screen).toContain('[deviceId, maker, messageReloadRevision, renderItems, routeFocusClientId, routeFocusKey, sessionId]');
+    expect(screen).toContain('[deviceId, maker, messageReloadRevision, renderItems, requestSync, routeFocusClientId, routeFocusKey, sessionId]');
   });
 
   it('首次进入详情在取得 authority 后触发同步，不依赖更早的 mount load', () => {
@@ -74,17 +74,17 @@ describe('任务消息内存治理页面接线', () => {
     expect(screen).toContain('remoteSessionStore.setMessages(sessionId, historyPage, { authority: messageAuthority });');
     expect(screen).toMatch(/authority: messageAuthority,\s+moreBeyondWindow,/);
     expect(screen).toContain('{ authority: messageAuthority },\n        );');
-    expect(screen).toContain('remoteSessionStore.mergeEarlierMessages(sessionId, pageList, { authority: messageAuthority });');
+    expect(screen).toMatch(/remoteSessionStore\.mergeEarlierMessages\(sessionId, pageList, \{\s*authority: messageAuthority,\s*before,\s*\}\)/);
     expect(screen).toContain('remoteSessionStore.mergeMessages(sessionIdAtStart, rows, { authority: messageAuthority });');
     // First open and reopen now share the same authority-fenced history read.
-    expect(screen).toContain('readProgressiveMessageWindow({');
+    expect(screen).toContain('syncSessionMessageWindow({');
     expect(screen.match(/maker\.listMessages\(/g)).toHaveLength(3);
   });
 
   it('schedule 关闭翻历史入口，页面工作租约覆盖发送与附件状态', () => {
     expect(screen).toContain('if (isScheduleDetail) return;');
     expect(screen).toContain('hasOlderMessages && !isScheduleDetail');
-    expect(screen).toContain('canLoadEarlier={hasOlderMessages && messages.length > 0 && !isScheduleDetail}');
+    expect(screen).toContain('canLoadEarlier={(historyView.snapshot.ready ? historyView.snapshot.hasMore : hasOlderMessages && messages.length > 0) && !isScheduleDetail}');
     expect(screen).toContain('remoteSessionStore.acquireSessionMessageWork(sessionId, pageHasMessageWork)');
     expect(screen).toContain('remoteSessionStore.acquireSessionMessageWork(item.sessionId, true)');
     expect(screen).toContain('remoteSessionStore.acquireSessionMessageWork(sessionId, true)');

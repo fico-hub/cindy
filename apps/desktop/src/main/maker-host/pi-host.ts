@@ -1,3 +1,4 @@
+import { readDisabledSkillPaths } from '../skillhub/activationPreferences';
 /**
  * pi agent 的 desktop host 装配 —— auth / runtimeConfig / 二进制解析 / 构造,
  * 集中在本模块,maker-host/index.ts 只做一次 buildPiAgent() 调用。
@@ -22,6 +23,9 @@ import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { app } from 'electron';
+
+import { readModelContextLimit } from './model-context-limit-store.js';
+import { toolchainThreadCapEnv } from './toolchain-thread-cap.js';
 
 import {
   PiAgent,
@@ -104,7 +108,7 @@ import {
   resolveBundledPiGatewayModelProfile,
 } from './pi-gateway-model-catalog.js';
 import { isExclusiveXaiModelId } from '../../shared/subscriptionModels.js';
-import { resolvePiRuntimeModelDescriptor } from './catalog-to-descriptors.js';
+import { resolvePiRuntimeModelDescriptor, resolveModelDefaultContextWindow, resolveModelContextProviderId } from './catalog-to-descriptors.js';
 import {
   resolveManagedPiNativePackagePaths,
   resolveManagedPiPackageResources,
@@ -119,6 +123,22 @@ const PI_SESSION_ID_ENV = 'CINDY_PI_SESSION_ID';
 const PI_SESSION_TOKEN_ENV = 'CINDY_PI_SESSION_TOKEN';
 const PI_PROVIDER_AUTH_PLACEHOLDER_KEY = 'cindy-pi-provider-auth-placeholder';
 const PI_OPENAI_PROXY_KEY_ENV = 'CINDY_PI_OPENAI_PROXY_KEY';
+const PI_ANTHROPIC_PROXY_KEY_ENV = 'CINDY_PI_ANTHROPIC_PROXY_KEY';
+/**
+ * Claude 订阅占位 token。Pi 的 anthropic 适配器按 `apiKey.includes('sk-ant-oat')` 判定
+ * OAuth 形态,命中后才走原生订阅请求构造:Bearer 鉴权、`claude-code-20250219,oauth-2025-04-20`
+ * 加各 beta(fine-grained tool streaming / server-side fallback 等)、Claude Code 身份 system
+ * 段与 `claude-cli` UA。占位值本身不含授权能力;真 token 由 loopback proxy 在解析出
+ * anthropic provider 路由时覆盖 `authorization`,故该路由是占位值被换掉的唯一保证 ——
+ * 请求带 provider 头就必须钉在该路由上,不能落回默认上游(见
+ * anthropic-compat-proxy-host 的 piProviderId 钉住分支)。
+ * 用普通字串会让 Pi 按 x-api-key 形态发请求,proxy 再补 beta 头就会
+ * 与 body 里 Pi 已注入的 `fallbacks` 等字段脱节(400 `fallbacks: Extra inputs are not permitted`)。
+ *
+ * 取值即探针要求的最短形态(二进制里只有 `sk-ant-oat` 这一个字面量,版本段不参与判定),
+ * 与仓内既有 OAuth 形态夹具同值 —— 不额外造一个更长、更像真 token 的字串去撞密钥扫描。
+ */
+const PI_ANTHROPIC_PROXY_PLACEHOLDER_TOKEN = 'sk-ant-oat01';
 const PI_PROVIDER_HEADER = 'x-cindy-pi-provider-id';
 
 export interface PiBundledModelInfo {
@@ -542,6 +562,7 @@ export function buildPiSubscriptionNativeProviders(
   const env: Record<string, string> = {
     [PI_OPENAI_PROXY_KEY_ENV]: piOpenaiProxyPlaceholderJwt(),
     [PI_XAI_PROXY_API_KEY_ENV]: PI_PROVIDER_AUTH_PLACEHOLDER_KEY,
+    [PI_ANTHROPIC_PROXY_KEY_ENV]: PI_ANTHROPIC_PROXY_PLACEHOLDER_TOKEN,
   };
   const add = (
     sourceProviderId: 'anthropic' | 'openai' | 'xai',
@@ -604,6 +625,7 @@ export function buildPiSubscriptionNativeProviders(
       name,
       baseUrl,
       inheritModels: true,
+      ...(sourceProviderId === 'anthropic' ? { apiKeyEnvVar: PI_ANTHROPIC_PROXY_KEY_ENV } : {}),
       ...(sourceProviderId === 'openai' ? { apiKeyEnvVar: PI_OPENAI_PROXY_KEY_ENV } : {}),
       ...(sourceProviderId === 'xai' ? { apiKeyEnvVar: PI_XAI_PROXY_API_KEY_ENV } : {}),
       modelIdAliases,
@@ -629,6 +651,13 @@ export function buildPiSubscriptionNativeProviders(
           listedModelIdsByProvider?.get(piProviderId)
           ?? listedPiModelIds(bundledModelsByProvider)?.get(piProviderId);
         const officialOpenAi = officialOpenAiById.get(wireId);
+        // Catalog overrides (including false) keep the same authority when the
+        // runtime probe is unavailable and we fall back to the shipped Pi catalog.
+        const openAiInputOverride = model.supportsImageInput === undefined
+          ? undefined
+          : model.supportsImageInput
+            ? ['text', 'image'] as Array<'text' | 'image'>
+            : ['text'] as Array<'text' | 'image'>;
         if (sourceProviderId === 'openai' && !bundledModel && !listedIds?.has(wireId)
           && officialOpenAi?.api === 'openai-codex-responses') {
           return {
@@ -636,6 +665,7 @@ export function buildPiSubscriptionNativeProviders(
             id: model.id,
             wireId,
             catalogAddition: true,
+            ...(openAiInputOverride ? { input: openAiInputOverride } : {}),
           };
         }
         const isKnownMissingXaiModel =
@@ -668,11 +698,6 @@ export function buildPiSubscriptionNativeProviders(
         const isRegistryBaselineOverlay = sourceProviderId === 'openai' && !!bundledModel;
         const catalogCost = catalogCostForPiNative(model.cost);
         if (isRegistryBaselineOverlay) {
-          const input = model.supportsImageInput === undefined
-            ? [...bundledModel.input]
-            : model.supportsImageInput
-              ? ['text', 'image'] as Array<'text' | 'image'>
-              : ['text'] as Array<'text' | 'image'>;
           const cost = catalogCost ?? bundledModel.cost;
           return {
             id: model.id,
@@ -685,7 +710,7 @@ export function buildPiSubscriptionNativeProviders(
             contextWindow: model.contextWindow,
             maxTokens: model.maxOutput ?? bundledModel.maxTokens,
             reasoning: model.efforts.length > 0,
-            input,
+            input: [...(openAiInputOverride ?? bundledModel.input)],
             thinkingLevelMap: catalogThinkingLevelMap(
               model.efforts,
               bundledModel.thinkingLevelMap,
@@ -735,9 +760,7 @@ export function buildPiSubscriptionNativeProviders(
                 ? { api: capabilityCorrection.api }
                 : {}),
           name: isContextProfileAddition ? model.name : (preserved?.name ?? model.name),
-          contextWindow: isContextProfileAddition
-            ? model.contextWindow
-            : (preserved?.contextWindow ?? model.contextWindow),
+          contextWindow: model.contextWindow,
           ...(preserved?.maxTokens
             ? { maxTokens: preserved.maxTokens }
             : model.maxOutput
@@ -887,6 +910,7 @@ export function composePiSystemPrompt(hostPrompt: string, agentPrompt: string): 
 function buildDesktopPiRuntimeConfig(): AgentRuntimeConfig {
   const ripgrepPath = getRipgrepBinaryPath();
   const config: AgentRuntimeConfig = {
+    behaviorFlags: (ctx) => ctx.spawnMode === 'remote' ? {} : toolchainThreadCapEnv(),
     // 保留 host 共用身份段,再追加 Pi 专属行为段；maker-core 会整体追加到 Pi 原生 prompt。
     systemPrompt: composePiSystemPrompt(hostSystemPrompt, piSystemPrompt),
     // Pi 的 grep 以及 Cindy 覆盖的 find 都固定复用随 Desktop 校验、打包的 rg。
@@ -952,6 +976,7 @@ export interface BuildPiAgentOpts {
   getRemotePiTransport?: AgentDeps['getRemotePiTransport'];
   /** SSH remote pi 会话的 agentHome 文件操作原语(host 装配;缺省 = 远端 fs 走本地,错误语义)。 */
   getRemotePiFileOps?: AgentDeps['getRemotePiFileOps'];
+  getRemoteAgentFileOps?: AgentDeps['getRemoteAgentFileOps'];
   /** 远端 pi 二进制解析(host probe;缺省 = 回落本地路径)。 */
   resolveRemotePiBinaryPath?: AgentDeps['resolveRemotePiBinaryPath'];
   /** 远端会话是否跳过 in-process MCP bridge(Phase 1 不桥 orca/memory/ghost)。 */
@@ -1803,9 +1828,16 @@ export function buildPiAgent(opts: BuildPiAgentOpts): PiAgent | null {
   }
   log.info('pi agent enabled', { binaryPath });
   return new PiAgent({
+    getDisabledSkillPaths: readDisabledSkillPaths,
+    resolveModelContextLimit: (providerId, modelId) => {
+      const catalog = getActiveCatalog();
+      const source = resolveModelContextProviderId(catalog, 'pi', providerId, modelId);
+      return source ? readModelContextLimit('pi', source, modelId)
+        ?? resolveModelDefaultContextWindow(catalog, 'pi', source, modelId) : null;
+    },
     auth: desktopPiAuthAdapter,
     runtimeConfig: buildDesktopPiRuntimeConfig(),
-    binaryPath,
+    get binaryPath() { return resolvePiBinaryPath() ?? binaryPath; },
     logger: opts.logger,
     turnChangeCapture: opts.turnChangeCapture,
     registerLocalAgentProcess: opts.registerLocalAgentProcess,
@@ -1827,6 +1859,13 @@ export function buildPiAgent(opts: BuildPiAgentOpts): PiAgent | null {
       // 一致。run-tmp 等短生命周期内容仍走 agentHome/run-tmp。
       if (remoteHostId) return '$HOME/.xdt-server/v1/pi-agent-home';
       return path.join(app.getPath('userData'), 'pi-agent-home');
+    },
+    resolvePiGlobalContextHome: (remoteHostId) => {
+      if (remoteHostId) return '$HOME/.pi/agent';
+      const override = process.env.PI_CODING_AGENT_DIR;
+      return override
+        ? path.resolve(override.replace(/^~(?=$|[\\/])/, () => os.homedir()))
+        : path.join(os.homedir(), '.pi', 'agent');
     },
     resolvePiManagedPackageResources: resolveManagedPiPackageResources,
     resolvePiNativePackagePaths: resolveManagedPiNativePackagePaths,
@@ -1850,7 +1889,8 @@ export function buildPiAgent(opts: BuildPiAgentOpts): PiAgent | null {
         'native-command-failed': t('settings.piPackages.failure.nativeCommandFailed'),
       },
       mutationSuccess: {
-        install: t('settings.piPackages.success.installEnabled'),
+        install: t('settings.piPackages.success.install'),
+        installEnabled: t('settings.piPackages.success.installEnabled'),
         update: t('settings.piPackages.success.update'),
         remove: t('settings.piPackages.success.remove'),
       },
@@ -1940,6 +1980,7 @@ export function buildPiAgent(opts: BuildPiAgentOpts): PiAgent | null {
     resolvePiVisionBridgeEnv: opts.resolvePiVisionBridgeEnv,
     getRemotePiTransport: opts.getRemotePiTransport,
     getRemotePiFileOps: opts.getRemotePiFileOps,
+    getRemoteAgentFileOps: opts.getRemoteAgentFileOps,
     resolveRemotePiBinaryPath: opts.resolveRemotePiBinaryPath,
     remotePiSkipMcpBridge: opts.remotePiSkipMcpBridge,
     getRemotePiAgentProxyEnv: opts.getRemotePiAgentProxyEnv,

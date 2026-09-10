@@ -17,7 +17,7 @@ import type { PanGesture } from 'react-native-gesture-handler';
 import Constants, { ExecutionEnvironment } from 'expo-constants';
 import { TextInputWrapper, type PasteEventPayload } from 'expo-paste-input';
 import { Mic } from 'lucide-react-native';
-import { useCallback, useEffect, useRef, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, type ReactNode, type Ref } from 'react';
 import { useTranslation } from 'react-i18next';
 import { iconSize, iconStroke, useThemedStyles, type ThemeColors } from '@/theme';
 import { radius, spacing } from '@/theme/tokens';
@@ -131,6 +131,8 @@ export interface MobileComposerInputRowProps {
   multilineShape?: boolean;
   onBlur?: TextInputProps['onBlur'];
   onChangeText: (value: string) => void;
+  onKeyPress?: TextInputProps['onKeyPress'];
+  onSelectionChange?: TextInputProps['onSelectionChange'];
   onContentSizeChange?: TextInputProps['onContentSizeChange'];
   onFocus?: TextInputProps['onFocus'];
   /**
@@ -153,6 +155,7 @@ export interface MobileComposerInputRowProps {
   onPressIn?: TextInputProps['onPressIn'];
   placeholder: string;
   placeholderTextColor: string;
+  selection?: TextInputProps['selection'];
   /** 顶部居中的拖拽调高 grabber（ComposerResizeGrabber），absolute 定位不占布局空间。 */
   resizeHandle?: ReactNode;
   rowStyle?: StyleProp<ViewStyle>;
@@ -205,6 +208,8 @@ export function MobileComposerInputRow({
   multilineShape,
   onBlur,
   onChangeText,
+  onKeyPress,
+  onSelectionChange,
   onContentSizeChange,
   onFocus,
   onPasteImages,
@@ -213,6 +218,7 @@ export function MobileComposerInputRow({
   onPressIn,
   placeholder,
   placeholderTextColor,
+  selection,
   resizeHandle,
   rowStyle,
   scrollEnabled,
@@ -262,12 +268,15 @@ export function MobileComposerInputRow({
       multiline={multiline}
       onBlur={onBlur}
       onChangeText={onChangeText}
+      onSelectionChange={onSelectionChange}
+      onKeyPress={onKeyPress}
       onContentSizeChange={onContentSizeChange}
       onFocus={onFocus}
       onPressIn={onPressIn}
       placeholder={placeholder}
       placeholderTextColor={placeholderTextColor}
       scrollEnabled={scrollEnabled}
+      selection={selection}
       selectionColor={selectionColor}
       style={[
         styles.input,
@@ -448,7 +457,7 @@ export function ComposerResizeGrabber({ onAdjust, panHandlers, gesture, visible,
   );
 }
 
-export function VoiceMicWaveCaret({ color, testID }: { color: string; testID?: string }) {
+export function VoiceMicWaveCaret({ color, testID, viewRef }: { color: string; testID?: string; viewRef?: Ref<View> }) {
   const styles = useThemedStyles(makeMobileComposerInputRowStyles);
   const bar1 = useRef(new Animated.Value(0)).current;
   const bar2 = useRef(new Animated.Value(0)).current;
@@ -496,6 +505,8 @@ export function VoiceMicWaveCaret({ color, testID }: { color: string; testID?: s
     <View
       pointerEvents="none"
       style={styles.voiceMicCaret}
+      ref={viewRef}
+      collapsable={false}
       testID={testID}
     >
       <Mic color={color} size={iconSize.lg} strokeWidth={iconStroke.regular} />

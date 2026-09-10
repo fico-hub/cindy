@@ -95,6 +95,8 @@ export type ModelDiscoveryFailureState = Partial<
 /** 供应商 + 连接状态。 */
 export interface ProviderView extends Provider {
   connected: boolean;
+  /** Ready media execution channels, independent of chat authorization. Absent on older hosts. */
+  availableMediaModelIds?: string[];
   /** Non-secret presentation metadata resolved before routing details cross device-link. */
   logoKind?: ProviderLogoKind;
   /** 动态清单发现的最近一次失败（已剥掉 detail）；成功或从未失败时缺席。 */
@@ -154,7 +156,7 @@ export function buildRegistry(
     // 原引用透传零分配 —— PR #744 review)。前缀误命中(如 'a:' 命中 'a:b:model')只
     // 多做一次无害映射,不影响正确性。
     let models = p.models;
-    let mediaOverrides: Pick<Provider, 'imageModels' | 'videoModels' | 'embeddingModels'> = {};
+    let mediaOverrides: Pick<Provider, 'imageModels' | 'videoModels' | 'audioModels' | 'embeddingModels'> = {};
     if (disabledKeys.length > 0 && disabledKeys.some((k) => k.startsWith(`${p.id}:`))) {
       const mapped: Provider['models'] = {};
       for (const agent of Object.keys(p.models) as AgentKind[]) {
@@ -173,6 +175,7 @@ export function buildRegistry(
       mediaOverrides = {
         ...(p.imageModels ? { imageModels: mapMedia(p.imageModels) } : {}),
         ...(p.videoModels ? { videoModels: mapMedia(p.videoModels) } : {}),
+        ...(p.audioModels ? { audioModels: mapMedia(p.audioModels) } : {}),
         ...(p.embeddingModels ? { embeddingModels: mapMedia(p.embeddingModels) } : {}),
       };
     }

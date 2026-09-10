@@ -1,4 +1,8 @@
 {
+  "failedScheduleNotice": {
+    "text": "先前有定時任務未完成，可查看執行記錄。",
+    "dismissTitle": "關閉歷史失敗提示"
+  },
   "common": {
     "cancel": "取消",
     "delete": "刪除",
@@ -174,6 +178,7 @@
     "composerSessionNotSynced": "當前任務還沒有同步完成。",
     "composerCreating": "任務建立中，首條訊息發出後即可繼續傳送。",
     "nextAgentSwitch": "下條切到 {{agent}} · {{model}}",
+    "nextModelSelection": "下條 · {{model}}",
     "createFailedTitle": "任務建立失敗",
     "createFailedDefault": "任務建立失敗。",
     "createFailedNotice": "任務建立失敗：{{message}}",

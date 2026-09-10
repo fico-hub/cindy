@@ -45,6 +45,7 @@ import { OAuthDeviceCodeCard } from './OAuthDeviceCodeCard';
 import { SettingsTextInput } from './SettingsTextInput';
 
 import {
+  PROVIDER_MEDIA_FIELDS,
   isLoopbackProviderUrl,
   isProviderRequestPath,
   presetDisplayName,
@@ -401,8 +402,11 @@ export function AddProviderWizard({
         recommended: boolean;
         agents: AgentKind[];
         /** 列模型端点上报的上下文窗口,**按 agent 分槽**(同一 id 双端可不同,如
-         *  cc=1M / codex=272K);完成创建时按所属 runtime 取值,预设值优先、本值兜底。 */
+         *  cc=1M / codex=272K);完成创建时按所属 runtime 取值,作为供应商事实单独保存。 */
         contextWindows?: Partial<Record<AgentKind, number>>;
+        discoveredMetadata?: Partial<
+          Record<AgentKind, import('@cindy/model-providers').ModelMetadata>
+        >;
         /** 附加目录发现出的模型级路由；主 runtime 目录发现的模型保持缺省路由。 */
         routes?: Partial<Record<AgentKind, ProviderModelRouteConfig>>;
       }
@@ -470,7 +474,7 @@ export function AddProviderWizard({
       ),
     [providers],
   );
-  // 内置 API-key 渠道(auth.method 'apiKey' 的 builtin 条目,今天只有 gemini 图像来源):
+  // 内置 API-key 渠道(auth.method 'apiKey' 的 builtin 条目):
   // 已连接的不再进向导;声明了媒体清单才展示(纯占位条目没有可配置的能力面)。
   const builtinApiKeyChoices = useMemo(
     () =>
@@ -479,7 +483,7 @@ export function AddProviderWizard({
           p.source === 'builtin' &&
           p.auth.method === 'apiKey' &&
           !p.connected &&
-          ((p.imageModels?.length ?? 0) > 0 || (p.videoModels?.length ?? 0) > 0),
+          PROVIDER_MEDIA_FIELDS.some((field) => (p[field]?.length ?? 0) > 0),
       ),
     [providers],
   );
@@ -546,9 +550,7 @@ export function AddProviderWizard({
   );
   const recommendsOllama = recommendations.some((item) => item.kind === 'ollama');
   const ollamaMatchesQuery =
-    !q ||
-    t('settings.providers.local.title').toLowerCase().includes(q) ||
-    'ollama'.includes(q);
+    !q || t('settings.providers.local.title').toLowerCase().includes(q) || 'ollama'.includes(q);
   const showOllamaInList =
     !ollamaAlreadyAdded &&
     ollamaMatchesQuery &&
@@ -806,6 +808,9 @@ export function AddProviderWizard({
         recommended: boolean;
         agents: AgentKind[];
         contextWindows?: Partial<Record<AgentKind, number>>;
+        discoveredMetadata?: Partial<
+          Record<AgentKind, import('@cindy/model-providers').ModelMetadata>
+        >;
         routes?: Partial<Record<AgentKind, ProviderModelRouteConfig>>;
       }
     >();
@@ -914,7 +919,7 @@ export function AddProviderWizard({
               modelsUrl: source.modelsUrl,
               route: source.route,
               ok: false,
-              models: [] as { id: string; name: string; contextWindow?: number }[],
+              models: [] as import('@cindy/model-providers').DiscoveredModel[],
             };
           }
         });
@@ -952,10 +957,22 @@ export function AddProviderWizard({
               !existing.routes?.[agent]
                 ? route
                 : undefined;
-            if (mergedAgents !== existing.agents || backfillWindow || discoveredRoute) {
+            if (
+              mergedAgents !== existing.agents ||
+              backfillWindow ||
+              discoveredRoute ||
+              m.discoveredMetadata
+            ) {
               next.set(m.id, {
                 ...existing,
                 agents: mergedAgents,
+                discoveredMetadata: {
+                  ...existing.discoveredMetadata,
+                  [agent]: m.discoveredMetadata ?? {
+                    name: m.name,
+                    ...(m.contextWindow !== undefined ? { contextWindow: m.contextWindow } : {}),
+                  },
+                },
                 ...(backfillWindow
                   ? { contextWindows: { ...existing.contextWindows, [agent]: m.contextWindow } }
                   : {}),
@@ -970,6 +987,12 @@ export function AddProviderWizard({
               checked: false,
               recommended: false,
               agents: [agent],
+              discoveredMetadata: {
+                [agent]: m.discoveredMetadata ?? {
+                  name: m.name,
+                  ...(m.contextWindow !== undefined ? { contextWindow: m.contextWindow } : {}),
+                },
+              },
               ...(m.contextWindow !== undefined
                 ? { contextWindows: { [agent]: m.contextWindow } }
                 : {}),
@@ -1065,6 +1088,7 @@ export function AddProviderWizard({
         name: v.name,
         agents: v.agents,
         contextWindows: v.contextWindows,
+        discoveredMetadata: v.discoveredMetadata,
         routes: v.routes,
       }));
     if (selected.length === 0) {
@@ -1096,31 +1120,24 @@ export function AddProviderWizard({
           .filter((m) => m.agents.includes(agent))
           .map((m) => {
             const presetModel = rt.models.find((candidate) => candidate.id === m.id);
-            // 预设策展值优先;拉取新增模型没有预设条目,落**该 runtime 端点**上报的
-            // 发现值(按 agent 分槽,双端窗口可不同),不再无窗口入库退回 200K 默认。
-            const contextWindow = presetModel?.contextWindow ?? m.contextWindows?.[agent];
+            // Only interface facts belong to discovery. Preset defaults follow a live reference.
+            const discoveredMetadata = m.discoveredMetadata?.[agent] ?? {};
             return {
               id: m.id,
               name: m.name,
+              discoveredMetadata,
+              ...(presetModel?.mode ? { mode: presetModel.mode } : {}),
+              ...(presetModel?.modalities ? { modalities: { input: [...presetModel.modalities.input], output: [...presetModel.modalities.output] } } : {}),
+              ...(presetModel?.officialDocs ? { officialDocs: presetModel.officialDocs } : {}),
               ...(agent === 'pi' && presetModel?.piApi ? { piApi: presetModel.piApi } : {}),
               ...((presetModel?.route ?? m.routes?.[agent])
                 ? { route: presetModel?.route ?? m.routes?.[agent] }
-                : {}),
-              ...(contextWindow !== undefined ? { contextWindow } : {}),
-              ...(presetModel?.supportsImageInput === true ? { supportsImageInput: true } : {}),
-              ...(presetModel?.reasoning === true && presetModel.reasoningEfforts?.length
-                ? {
-                    reasoning: true,
-                    reasoningEfforts: [...presetModel.reasoningEfforts],
-                    ...(presetModel.reasoningDefaultEffort
-                      ? { reasoningDefaultEffort: presetModel.reasoningDefaultEffort }
-                      : {}),
-                  }
                 : {}),
             };
           });
         if (agentModels.length === 0) continue;
         runtimes[agent] = {
+          catalogPresetId: preset.id,
           baseUrl: presetRuntimeBaseUrl(preset, agent, presetBaseUrls),
           ...(rt.wireProtocol ? { wireProtocol: rt.wireProtocol } : {}),
           ...(rt.requestPath ? { requestPath: rt.requestPath } : {}),
@@ -1537,10 +1554,7 @@ export function AddProviderWizard({
               >
                 {t('settings.providers.local.onboardingTitle')}
               </span>
-              <LocalOllamaInstall
-                canInstall={ollamaCanInstall}
-                onReady={() => connectOllama()}
-              />
+              <LocalOllamaInstall canInstall={ollamaCanInstall} onReady={() => connectOllama()} />
             </div>
           )}
           {step === 2 && sel?.kind === 'oauth' && (
@@ -1688,7 +1702,14 @@ export function AddProviderWizard({
                 <label className="text-12 font-medium" style={{ color: 'var(--text-secondary)' }}>
                   {t('settings.providers.custom.fields.apiKey')}
                 </label>
-                <SettingsTextInput value={apiKey} onChange={setApiKey} size="md" mono secret />
+                <SettingsTextInput
+                  value={apiKey}
+                  onChange={setApiKey}
+                  size="md"
+                  mono
+                  secret
+                  secretTipContentClassName="z-[10001]"
+                />
               </div>
             </div>
           )}
@@ -1723,6 +1744,7 @@ export function AddProviderWizard({
                     size="md"
                     mono
                     secret
+                    secretTipContentClassName="z-[10001]"
                   />
                 </div>
               ) : (

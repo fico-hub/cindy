@@ -35,6 +35,9 @@ describe('mobile maker transport', () => {
       'local-db:sessions:ack-interrupted',
       'maker:regenerate-title',
       'local-db:messages:list',
+      'local-db:messages:view',
+      'local-db:messages:work-details',
+      'local-db:messages:view-intent',
       'local-db:messages:around',
       'local-db:messages:around-client-id',
       'maker:send',
@@ -183,7 +186,7 @@ describe('mobile maker transport', () => {
       {
         deviceId: 'dev-1',
         channel: 'maker:list-active',
-        args: [],
+        args: [{ summary: true }],
       },
     ]);
   });
