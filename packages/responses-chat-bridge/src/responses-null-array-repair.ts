@@ -91,6 +91,9 @@ export function repairResponsesEventNullArrays(
  */
 const MAX_PENDING_FRAME_BYTES = 16 * 1024 * 1024;
 
+/** One SSE event boundary: a line break (LF or CRLF) followed by an empty line. */
+const FRAME_BOUNDARY = /\r?\n\r?\n/;
+
 /** SSE frame rewriter; frames that need no repair are re-emitted byte for byte. */
 export class ResponsesNullArrayRepairTransform extends Transform {
   private readonly decoder = new TextDecoder();
@@ -116,14 +119,18 @@ export class ResponsesNullArrayRepairTransform extends Transform {
   }
 
   private drainFrames(): void {
+    // SSE ends a line with LF or CRLF and an event with a blank line, so the four
+    // boundaries `\n\n`, `\r\n\r\n`, `\n\r\n` and `\r\n\n` are all legal and may be
+    // mixed by one upstream (same convention as the proxy's own frame reader).
+    // The matched delimiter is re-emitted verbatim.
     for (;;) {
-      const lf = this.pending.indexOf("\n\n");
-      const crlf = this.pending.indexOf("\r\n\r\n");
-      const index = lf < 0 ? crlf : crlf < 0 ? lf : Math.min(lf, crlf);
-      if (index < 0) return;
-      const delimiter = index === crlf ? "\r\n\r\n" : "\n\n";
-      this.push(this.rewriteFrame(this.pending.slice(0, index), delimiter));
-      this.pending = this.pending.slice(index + delimiter.length);
+      const match = FRAME_BOUNDARY.exec(this.pending);
+      if (!match) return;
+      const delimiter = match[0];
+      this.push(
+        this.rewriteFrame(this.pending.slice(0, match.index), delimiter),
+      );
+      this.pending = this.pending.slice(match.index + delimiter.length);
     }
   }
 
@@ -200,9 +207,16 @@ class ChainedTransform extends Transform {
       const next = stages[index + 1];
       if (next) stage.pipe(next);
     }
+    // Readable-side backpressure: when the consumer stops reading, stop pulling
+    // from the tail (pipe then throttles every earlier stage) until `_read` runs.
     this.tail.on("data", (chunk: Buffer) => {
-      this.push(chunk);
+      if (!this.push(chunk)) this.tail.pause();
     });
+  }
+
+  override _read(size: number): void {
+    if (this.tail.isPaused()) this.tail.resume();
+    super._read(size);
   }
 
   override _transform(

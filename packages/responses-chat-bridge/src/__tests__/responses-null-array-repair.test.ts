@@ -288,6 +288,52 @@ describe("ResponsesNullArrayRepairTransform", () => {
     expect(frames[1]).toBe(`data: ${TEXT_DELTA}`);
   });
 
+  it("splits frames on every legal SSE boundary, including mixed LF/CRLF, and keeps each delimiter", async () => {
+    const input = `data: ${REASONING_ADDED_NULL}\n\r\ndata: ${MESSAGE_ADDED_NULL}\r\n\ndata: ${TEXT_DELTA}\r\n\r\ndata: [DONE]\n\n`;
+    const output = await pump(new ResponsesNullArrayRepairTransform(), [input]);
+    const frames = output.split(/\r?\n\r?\n/).filter(Boolean);
+    expect(frames).toHaveLength(4);
+    expect(
+      (JSON.parse(frames[0]!.slice(6)) as { item: { summary: unknown } }).item
+        .summary,
+    ).toEqual([]);
+    expect(
+      (JSON.parse(frames[1]!.slice(6)) as { item: { content: unknown } }).item
+        .content,
+    ).toEqual([]);
+    expect(frames[2]).toBe(`data: ${TEXT_DELTA}`);
+    expect(frames[3]).toBe("data: [DONE]");
+    expect(output.match(/\r?\n\r?\n/g)).toEqual([
+      "\n\r\n",
+      "\r\n\n",
+      "\r\n\r\n",
+      "\n\n",
+    ]);
+  });
+
+  it("re-emits a mixed-newline stream byte for byte when nothing needs repair", async () => {
+    const input = `data: ${TEXT_DELTA}\n\r\n: ping\r\n\ndata: ${TEXT_DELTA}\r\n\r\ndata: [DONE]\n\n`;
+    expect(await pump(new ResponsesNullArrayRepairTransform(), [input])).toBe(
+      input,
+    );
+  });
+
+  it("does not treat a CR split across chunks as a boundary too early", async () => {
+    const whole = `data: ${MESSAGE_ADDED_NULL}\r\n\r\ndata: ${TEXT_DELTA}\n\n`;
+    const cut = whole.indexOf("\r\n\r\n") + 3; // pending ends with "\r\n\r"
+    const output = await pump(new ResponsesNullArrayRepairTransform(), [
+      whole.slice(0, cut),
+      whole.slice(cut),
+    ]);
+    const frames = output.split(/\r?\n\r?\n/).filter(Boolean);
+    expect(frames).toHaveLength(2);
+    expect(
+      (JSON.parse(frames[0]!.slice(6)) as { item: { content: unknown } }).item
+        .content,
+    ).toEqual([]);
+    expect(frames[1]).toBe(`data: ${TEXT_DELTA}`);
+  });
+
   it("repairs a trailing frame without a delimiter at end of stream", async () => {
     const output = await pump(new ResponsesNullArrayRepairTransform(), [
       `data: ${REASONING_ADDED_NULL}`,
@@ -382,6 +428,29 @@ describe("chainResponseTransforms", () => {
     )!;
     await pump(chained, [`data: ${MESSAGE_ADDED_NULL}\n\n`]);
     expect(seen.join("")).toContain('"content":[]');
+  });
+
+  it("pauses the inner stages while the consumer is not reading and resumes on demand", async () => {
+    const tail = new PassThrough();
+    const chained = chainResponseTransforms(new PassThrough(), tail)!;
+    const chunk = Buffer.alloc(8 * 1024, 0x61);
+    // Write far more than the readable high-water mark with nobody consuming.
+    for (let index = 0; index < 32; index += 1) chained.write(chunk);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(tail.isPaused()).toBe(true);
+    expect(chained.readableLength).toBeLessThanOrEqual(
+      chained.readableHighWaterMark + chunk.length,
+    );
+    // Consuming drains the outer buffer, resumes the tail and lets the rest through.
+    let received = 0;
+    const ended = new Promise<void>((resolve) => chained.on("end", resolve));
+    chained.on("data", (data: Buffer) => {
+      received += data.length;
+    });
+    chained.end();
+    await ended;
+    expect(received).toBe(32 * chunk.length);
+    expect(tail.isPaused()).toBe(false);
   });
 
   it("fails the chain when any stage errors", async () => {
