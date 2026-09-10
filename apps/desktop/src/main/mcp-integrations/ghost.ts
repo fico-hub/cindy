@@ -417,9 +417,11 @@ async function resolveLargeResultSpillTarget(
 }
 
 /**
- * 远端写:remote-file-service 的 writeFile 只改已存在文件、不建父目录,所以按
- * createFolder(已存在则复用)→ createFile → writeFile 三步;任一步失败把本次
- * 新建的空文件删掉,不留半成品。路径一律 POSIX(远端 daemon 只支持 POSIX)。
+ * 远端写:createFolder(已存在则复用)后用 daemon 的 writeNewFile 一步排他新建并
+ * 写入(O_EXCL,目标已存在 / 为 symlink 即失败、不跟随最终链接),不留 createFile →
+ * writeFile 之间可被换成 symlink 的窗口。路径一律 POSIX(远端 daemon 只支持 POSIX)。
+ * 变更类 RPC 断链时结果未知:daemon 可能已写完、只是响应没回来,不能盲删唯一副本,
+ * 用幂等 stat 核验字节数:一致 = 成功;缺失 = 失败不删;不一致才删。
  */
 async function writeLargeResultToRemote(
   remoteHostId: string,
@@ -435,18 +437,16 @@ async function writeLargeResultToRemote(
     const existing = await remote.request(remoteHostId, 'stat', { workdir, relPath: dir }).catch(() => null);
     if (existing?.type !== 'directory') throw err;
   }
-  await remote.request(remoteHostId, 'createFile', { workdir, relPath });
   try {
-    await remote.request(remoteHostId, 'writeFile', { workdir, relPath, content: text });
+    await remote.request(remoteHostId, 'writeNewFile', { workdir, relPath, content: text });
   } catch (err) {
-    // 变更类 RPC 断链时结果未知:daemon 可能已写完、只是响应没回来。此时不能
-    // 盲删唯一副本,用幂等 stat 核验字节数:一致 = 成功;缺失或不一致才算失败。
     if (isRemoteTransportLoss(err)) {
       const stat = await remote.request(remoteHostId, 'stat', { workdir, relPath }).catch(() => null);
       if (stat?.type === 'file' && stat.size === Buffer.byteLength(text, 'utf8')) return;
       if (!stat) throw err;
+      await remote.request(remoteHostId, 'deleteEntry', { workdir, relPath }).catch(() => undefined);
     }
-    await remote.request(remoteHostId, 'deleteEntry', { workdir, relPath }).catch(() => undefined);
+    // A definite failure (EEXIST, size limit, path rejection) wrote nothing.
     throw err;
   }
 }
@@ -469,25 +469,38 @@ async function discardLargeResultFile(target: LargeResultSpillTarget, relPath: s
 }
 
 /**
- * 只在字节落盘成功后才给完整结果里的媒体挂 session-attachment 引用;挂账
- * 失败则撤销本次新增的引用(此前已有的引用不动)并删掉刚写的文件,不留
- * 没有结果文件却长期占着 blob 的孤立引用。
+ * 只在字节落盘成功后才给完整结果里的媒体挂 session-attachment 引用。逐 URL 隔离
+ * (与 commitChatImageUrls 同口径:pin → 已有引用则跳过 → addRef),并记住**本次调用
+ * 实际插入的引用 id**;任一 URL 挂账失败时只按这些 id 回滚(并发的另一次外置即使
+ * 引用同一 blob 也不受影响),再删掉刚写的文件,不留没有结果文件的孤立引用。
  */
 async function commitLargeResultMediaRefs(target: LargeResultSpillTarget, relPath: string, text: string): Promise<void> {
-  const hashes = new Set<string>();
+  const inserted: string[] = [];
+  let failed = 0;
   for (const url of collectChatMediaUrls(text)) {
     const parsed = blobStore.parseBlobUrl(url);
-    if (parsed) hashes.add(parsed.hash);
+    if (!parsed) continue;
+    try {
+      await ledger.pinBlob(parsed.hash);
+      if (await ledger.hasRef({ hash: parsed.hash, refKind: 'session-attachment', refId: target.sessionId })) continue;
+      inserted.push(await ledger.addRef({
+        hash: parsed.hash,
+        refKind: 'session-attachment',
+        refId: target.sessionId,
+        originSessionId: target.sessionId,
+        originKind: 'tool',
+      }));
+    } catch (err) {
+      failed += 1;
+      log.warn('ghost large result: media ref commit failed for url', {
+        sessionId: target.sessionId,
+        hash: parsed.hash,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
-  const fresh: string[] = [];
-  for (const hash of hashes) {
-    if (!(await ledger.hasRef({ hash, refKind: 'session-attachment', refId: target.sessionId }))) fresh.push(hash);
-  }
-  const committed = await commitMessageMediaRefs({ sessionId: target.sessionId, role: 'tool', content: text });
-  if (!committed || committed.failed === 0) return;
-  for (const hash of fresh) {
-    await ledger.removeSessionAttachmentRefIfUnreferencedByLiveMessage({ sessionId: target.sessionId, hash }).catch(() => 0);
-  }
+  if (failed === 0) return;
+  for (const id of inserted) await ledger.removeRefById(id).catch(() => 0);
   await discardLargeResultFile(target, relPath);
   throw new Error('Tool result media references unavailable');
 }

@@ -542,6 +542,38 @@ export async function createFile(
 }
 
 /**
+ * Create a new file inside workdir and write its full content in one exclusive
+ * step. `wx` (O_CREAT|O_EXCL) fails when anything already exists at the target,
+ * including a symlink, and never follows a final-component link, so a watcher
+ * cannot swap the path between "create" and "write" (the TOCTOU that a
+ * createFile → writeFile pair leaves open). Parent dir must already exist and
+ * must resolve inside workdir. Refuses content >MAX_FILE_BYTES like writeFile.
+ */
+export async function writeNewFile(
+  workdir: string,
+  relPath: string,
+  content: string,
+): Promise<{ size: number; mtimeMs: number }> {
+  const sub = assertInsideWorkdir(workdir, relPath);
+  if (sub === '') throw new Error('cannot write workdir root');
+  const abs = path.join(workdir, sub);
+  await assertRealParentInsideWorkdir(workdir, abs);
+  const buf = Buffer.from(content, 'utf8');
+  if (buf.length > MAX_FILE_BYTES) {
+    throw new Error(`content too large (>${MAX_FILE_BYTES} bytes)`);
+  }
+  const handle = await fs.open(abs, 'wx');
+  try {
+    await handle.writeFile(buf);
+  } finally {
+    await handle.close();
+  }
+  // lstat: the file was created exclusively as a regular file; never follow.
+  const st = await fs.lstat(abs);
+  return { size: st.size, mtimeMs: st.mtimeMs };
+}
+
+/**
  * Create a folder inside workdir. Errors if anything already exists at the
  * target path. Parent dir must already exist (same rationale as createFile).
  */

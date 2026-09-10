@@ -31,6 +31,7 @@ import {
   setFileBrowserCoreLoggerFactory,
   statEntry,
   writeFile,
+  writeNewFile,
   type CoreLogger,
   type SearchEvent,
 } from '@cindy/file-browser-core';
@@ -170,6 +171,12 @@ export function runFileService(
       ),
     createFile: (p) =>
       createFile(requireString(p?.workdir, 'workdir'), requireString(p?.relPath, 'relPath')),
+    writeNewFile: (p) =>
+      writeNewFile(
+        requireString(p?.workdir, 'workdir'),
+        requireString(p?.relPath, 'relPath'),
+        typeof p?.content === 'string' ? p.content : bad('content must be a string'),
+      ),
     createFolder: (p) =>
       createFolder(requireString(p?.workdir, 'workdir'), requireString(p?.relPath, 'relPath')),
     renameEntry: (p) =>

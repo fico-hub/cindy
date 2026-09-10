@@ -82,6 +82,7 @@ type TestLedgerRef = {
   refKind: string;
   refId: string;
   originKind?: 'user' | 'tool';
+  id?: string;
 };
 const ledgerRefs: TestLedgerRef[] = [];
 const ledgerHasRefMock = vi.fn(async (params: TestLedgerRef) =>
@@ -103,9 +104,11 @@ const ledgerHasGhostToolGrantMock = vi.fn(
         (ref.refKind === 'ghost-tool-grant' || ref.refKind === 'ghost-grant'),
     ),
 );
+let ledgerRefSeq = 0;
 const ledgerAddRefMock = vi.fn(async (params: TestLedgerRef) => {
-  ledgerRefs.push({ ...params });
-  return `ref-${ledgerRefs.length}`;
+  const id = `ref-${++ledgerRefSeq}`;
+  ledgerRefs.push({ ...params, id });
+  return id;
 });
 const ledgerRemoveSessionAttachmentRefMock = vi.fn(async (params: { sessionId: string; hash: string }) => {
   const before = ledgerRefs.length;
@@ -114,6 +117,12 @@ const ledgerRemoveSessionAttachmentRefMock = vi.fn(async (params: { sessionId: s
     if (ref.refKind === 'session-attachment' && ref.refId === params.sessionId && ref.hash === params.hash) ledgerRefs.splice(i, 1);
   }
   return before - ledgerRefs.length;
+});
+const ledgerRemoveRefByIdMock = vi.fn(async (id: string) => {
+  const index = ledgerRefs.findIndex(ref => ref.id === id);
+  if (index < 0) return 0;
+  ledgerRefs.splice(index, 1);
+  return 1;
 });
 const remoteFsRequestMock = vi.fn<(hostId: string, method: string, params: Record<string, unknown>) => Promise<unknown>>(async () => ({}));
 const callCindyMediaMock = vi.fn();
@@ -260,6 +269,7 @@ vi.mock('../../cindy-media/ledger.js', () => ({
   hasRef: ledgerHasRefMock,
   hasGhostToolGrant: ledgerHasGhostToolGrantMock,
   addRef: ledgerAddRefMock,
+  removeRefById: ledgerRemoveRefByIdMock,
   removeSessionAttachmentRefIfUnreferencedByLiveMessage: ledgerRemoveSessionAttachmentRefMock,
 }));
 vi.mock('../../file-browser/remote-deps.js', () => ({
@@ -435,6 +445,7 @@ beforeEach(() => {
   remoteFsRequestMock.mockReset();
   remoteFsRequestMock.mockResolvedValue({});
   ledgerRemoveSessionAttachmentRefMock.mockClear();
+  ledgerRemoveRefByIdMock.mockClear();
   callCindyMediaMock.mockReset();
   alsSessionContextMock.mockReset();
   logWarnMock.mockClear();
@@ -2362,13 +2373,14 @@ describe('oversized ghost result Host storage', () => {
       ledgerRefs.push({ hash: existing, refKind: 'session-attachment', refId: 's1', originKind: 'tool' });
       ledgerAddRefMock.mockImplementation(async (params: TestLedgerRef) => {
         if (params.hash === broken) throw new Error('FOREIGN KEY constraint failed');
-        ledgerRefs.push({ ...params });
-        return `ref-${ledgerRefs.length}`;
+        const id = `ref-${++ledgerRefSeq}`;
+        ledgerRefs.push({ ...params, id });
+        return id;
       });
       const text = JSON.stringify({ a: `cindy-media://blobs/${existing}.png`, b: `cindy-media://blobs/${fresh}.png`, c: `cindy-media://blobs/${broken}.png` });
       await expect(deps.saveLargeGhostResult!(text)).rejects.toThrow('media references unavailable');
-      expect(ledgerRemoveSessionAttachmentRefMock).toHaveBeenCalledWith({ sessionId: 's1', hash: fresh });
-      expect(ledgerRemoveSessionAttachmentRefMock).not.toHaveBeenCalledWith({ sessionId: 's1', hash: existing });
+      expect(ledgerRemoveRefByIdMock).toHaveBeenCalledOnce();
+      expect(ledgerRemoveSessionAttachmentRefMock).not.toHaveBeenCalled();
       expect(ledgerRefs).toContainEqual(expect.objectContaining({ hash: existing }));
       expect(ledgerRefs).not.toContainEqual(expect.objectContaining({ hash: fresh }));
       const written = writeDocsOutputMock.mock.calls[0]![0].path;
@@ -2376,10 +2388,48 @@ describe('oversized ghost result Host storage', () => {
       expect(releaseMutationMock).toHaveBeenCalledOnce();
     } finally {
       ledgerAddRefMock.mockImplementation(async (params: TestLedgerRef) => {
-        ledgerRefs.push({ ...params });
-        return `ref-${ledgerRefs.length}`;
+        const id = `ref-${++ledgerRefSeq}`;
+        ledgerRefs.push({ ...params, id });
+        return id;
       });
       await fs.promises.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  // Codex P1 (round 4): rollback is keyed by the refs this call inserted, so a
+  // concurrent spill that booked the same blob keeps its reference.
+  it('keeps a concurrent spill\'s reference to the same blob when this call rolls back', async () => {
+    const deps = makeDeps();
+    const shared = 'a'.repeat(64);
+    const broken = 'f'.repeat(64);
+    let hasRefCalls = 0;
+    // Both calls observe "no ref yet" for the shared blob (the race window).
+    ledgerHasRefMock.mockImplementation(async () => (++hasRefCalls, false));
+    ledgerAddRefMock.mockImplementation(async (params: TestLedgerRef) => {
+      if (params.hash === broken) throw new Error('FOREIGN KEY constraint failed');
+      const id = `ref-${++ledgerRefSeq}`;
+      ledgerRefs.push({ ...params, id });
+      return id;
+    });
+    try {
+      const okText = JSON.stringify({ image: `cindy-media://blobs/${shared}.png` });
+      const badText = JSON.stringify({ image: `cindy-media://blobs/${shared}.png`, other: `cindy-media://blobs/${broken}.png` });
+      const [ok, bad] = await Promise.allSettled([deps.saveLargeGhostResult!(okText), deps.saveLargeGhostResult!(badText)]);
+      expect(ok.status).toBe('fulfilled');
+      expect(bad.status).toBe('rejected');
+      const remaining = ledgerRefs.filter(ref => ref.hash === shared && ref.refId === 's1');
+      expect(remaining).toHaveLength(1); // the successful call's row survives
+      expect(ledgerRemoveRefByIdMock).toHaveBeenCalledOnce();
+      expect(ledgerRemoveRefByIdMock).not.toHaveBeenCalledWith(remaining[0]!.id);
+    } finally {
+      ledgerHasRefMock.mockImplementation(async (params: TestLedgerRef) =>
+        ledgerRefs.some(ref => ref.hash === params.hash && ref.refKind === params.refKind && ref.refId === params.refId
+          && (params.originKind === undefined || ref.originKind === params.originKind)));
+      ledgerAddRefMock.mockImplementation(async (params: TestLedgerRef) => {
+        const id = `ref-${++ledgerRefSeq}`;
+        ledgerRefs.push({ ...params, id });
+        return id;
+      });
     }
   });
 
@@ -2395,11 +2445,12 @@ describe('oversized ghost result Host storage', () => {
     expect(saved).toMatch(/^tool-results\/ghost-[0-9a-f-]+\.json$/);
     expect(writeDocsOutputMock).not.toHaveBeenCalled();
     expect(remoteFsRequestMock.mock.calls.map(call => call.slice(0, 2))).toEqual([
-      ['host-1', 'createFolder'], ['host-1', 'createFile'], ['host-1', 'writeFile'],
+      ['host-1', 'createFolder'], ['host-1', 'writeNewFile'],
     ]);
     expect(remoteFsRequestMock).toHaveBeenCalledWith('host-1', 'createFolder', { workdir: '/srv/work', relPath: 'tool-results' });
-    expect(remoteFsRequestMock).toHaveBeenCalledWith('host-1', 'createFile', { workdir: '/srv/work', relPath: saved });
-    expect(remoteFsRequestMock).toHaveBeenCalledWith('host-1', 'writeFile', { workdir: '/srv/work', relPath: saved, content: text });
+    // Exclusive create+write in one RPC: no createFile → writeFile window for a symlink swap.
+    expect(remoteFsRequestMock).toHaveBeenCalledWith('host-1', 'writeNewFile', { workdir: '/srv/work', relPath: saved, content: text });
+    expect(remoteFsRequestMock.mock.calls.map(call => call[1])).not.toContain('writeFile');
     expect(remoteFsRequestMock.mock.invocationCallOrder.at(-1)).toBeLessThan(ledgerAddRefMock.mock.invocationCallOrder[0]!);
     expect(ledgerRefs).toContainEqual(expect.objectContaining({ hash, refKind: 'session-attachment', refId: 's1' }));
     expect(releaseMutationMock).toHaveBeenCalledOnce();
@@ -2415,20 +2466,20 @@ describe('oversized ghost result Host storage', () => {
       return {};
     });
     await expect(deps.saveLargeGhostResult!('result')).resolves.toMatch(/^tool-results\//);
-    expect(remoteFsRequestMock.mock.calls.map(call => call[1])).toEqual(['createFolder', 'stat', 'createFile', 'writeFile']);
+    expect(remoteFsRequestMock.mock.calls.map(call => call[1])).toEqual(['createFolder', 'stat', 'writeNewFile']);
   });
 
-  it('deletes the half-written remote file and commits no refs when the remote write fails', async () => {
+  it('commits no refs and issues no delete when the remote exclusive write fails outright', async () => {
     const deps = makeDeps('codex');
     sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
     liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1' });
     remoteFsRequestMock.mockImplementation(async (_host, method) => {
-      if (method === 'writeFile') throw new Error('content too large (>2097152 bytes)');
+      if (method === 'writeNewFile') throw new Error('content too large (>2097152 bytes)');
       return {};
     });
     const hash = 'a'.repeat(64);
     await expect(deps.saveLargeGhostResult!(JSON.stringify({ image: `cindy-media://blobs/${hash}.png` }))).rejects.toThrow('content too large');
-    expect(remoteFsRequestMock.mock.calls.map(call => call[1])).toEqual(['createFolder', 'createFile', 'writeFile', 'deleteEntry']);
+    expect(remoteFsRequestMock.mock.calls.map(call => call[1])).toEqual(['createFolder', 'writeNewFile']); // definite failure wrote nothing: no delete
     expect(ledgerAddRefMock).not.toHaveBeenCalled();
     expect(releaseMutationMock).toHaveBeenCalledOnce();
   });
@@ -2477,7 +2528,7 @@ describe('oversized ghost result Host storage', () => {
     liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1' });
     const text = JSON.stringify({ ok: true, result: 'x'.repeat(100) });
     remoteFsRequestMock.mockImplementation(async (_host, method) => {
-      if (method === 'writeFile') throw Object.assign(new Error('channel closed'), { code: 'CHANNEL_CLOSED' });
+      if (method === 'writeNewFile') throw Object.assign(new Error('channel closed'), { code: 'CHANNEL_CLOSED' });
       if (method === 'stat') {
         if (!statResult) throw new Error('OPERATION_FAILED: ENOENT');
         return { relPath: 'x', mtimeMs: 0, type: statResult.type, size: statResult.size ?? Buffer.byteLength(text, 'utf8') };
@@ -2489,7 +2540,7 @@ describe('oversized ghost result Host storage', () => {
     else await expect(outcome).rejects.toThrow('channel closed');
     const methods = remoteFsRequestMock.mock.calls.map(call => call[1]);
     expect(methods.includes('deleteEntry')).toBe(expectDelete);
-    expect(methods.slice(0, 4)).toEqual(['createFolder', 'createFile', 'writeFile', 'stat']);
+    expect(methods.slice(0, 3)).toEqual(['createFolder', 'writeNewFile', 'stat']);
   });
 
   it('does not spill a remote session result when the live instance disagrees about the host', async () => {

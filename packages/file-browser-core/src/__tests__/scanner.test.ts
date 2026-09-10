@@ -12,6 +12,7 @@ import {
   renameEntry,
   statEntry,
   writeFile,
+  writeNewFile,
 } from '../scanner';
 
 async function makeSymlinkFixture(): Promise<
@@ -299,6 +300,62 @@ describe('readFile binary detection', () => {
       await fsWriteFile(path.join(root, 'doc.pdf'), MINIMAL_NUL_FREE_PDF, 'latin1');
       await expect(writeFile(root, 'doc.pdf', 'not a pdf anymore')).rejects.toThrow(/binary file/);
       expect(await fsReadFile(path.join(root, 'doc.pdf'), 'latin1')).toBe(MINIMAL_NUL_FREE_PDF);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('writeNewFile', () => {
+  it('creates and writes a new file exclusively in one step', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-file-browser-new-'));
+    try {
+      await mkdir(path.join(root, 'tool-results'));
+      const result = await writeNewFile(root, 'tool-results/a.json', '{"ok":true,"文":"字"}');
+      expect(result.size).toBe(Buffer.byteLength('{"ok":true,"文":"字"}', 'utf8'));
+      expect(await fsReadFile(path.join(root, 'tool-results/a.json'), 'utf8')).toBe('{"ok":true,"文":"字"}');
+      // Second attempt at the same path must fail instead of overwriting.
+      await expect(writeNewFile(root, 'tool-results/a.json', 'again')).rejects.toThrow(/EEXIST/);
+      expect(await fsReadFile(path.join(root, 'tool-results/a.json'), 'utf8')).toBe('{"ok":true,"文":"字"}');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a symlink planted at the target and never follows it', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-file-browser-new-'));
+    try {
+      const victim = path.join(root, 'victim.txt');
+      await fsWriteFile(victim, 'keep me', 'utf8');
+      try {
+        await symlink(victim, path.join(root, 'planted.json'), 'file');
+      } catch {
+        return;
+      }
+      await expect(writeNewFile(root, 'planted.json', 'overwrite')).rejects.toThrow(/EEXIST/);
+      expect(await fsReadFile(victim, 'utf8')).toBe('keep me');
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a parent that escapes the workdir, a missing parent and oversized content', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-file-browser-new-'));
+    try {
+      const workdir = path.join(root, 'workdir');
+      const outside = path.join(root, 'outside');
+      await mkdir(workdir);
+      await mkdir(outside);
+      try {
+        await symlink(outside, path.join(workdir, 'linked-outside'), 'dir');
+      } catch {
+        return;
+      }
+      await expect(writeNewFile(workdir, 'linked-outside/new.json', 'x')).rejects.toThrow(/escapes workdir via symlink/);
+      await expect(writeNewFile(workdir, 'missing/new.json', 'x')).rejects.toThrow();
+      await expect(writeNewFile(workdir, '../new.json', 'x')).rejects.toThrow();
+      await expect(writeNewFile(workdir, 'big.json', 'x'.repeat(2 * 1024 * 1024 + 1))).rejects.toThrow(/content too large/);
+      await expect(writeNewFile(workdir, '', 'x')).rejects.toThrow();
     } finally {
       await rm(root, { recursive: true, force: true });
     }

@@ -33,10 +33,10 @@ import type {
 } from '@cindy/file-browser-core';
 
 /** 协议兼容版本:client 与 daemon 严格相等才可用。改动任何请求/响应形状时 +1。 */
-export const FILE_SERVICE_SCHEMA_VERSION = 2;
+export const FILE_SERVICE_SCHEMA_VERSION = 3;
 
 /** 人读 bundle 版本(probe / 日志用),行为变化时手动 bump。 */
-export const FILE_SERVICE_BUNDLE_VERSION = '0.2.4';
+export const FILE_SERVICE_BUNDLE_VERSION = '0.2.5';
 
 /* ============================== 帧 ============================== */
 
@@ -168,6 +168,14 @@ export interface FsRpcMethods {
   createFile: {
     params: { workdir: string; relPath: string };
     result: FileStat;
+  };
+  /**
+   * 排他新建 + 写入一步完成(O_CREAT|O_EXCL,目标已存在或为 symlink 即失败,不跟随
+   * 最终链接),供主机把结果文件落到远端任务目录;父目录须已存在。
+   */
+  writeNewFile: {
+    params: { workdir: string; relPath: string; content: string };
+    result: { size: number; mtimeMs: number };
   };
   createFolder: {
     params: { workdir: string; relPath: string };

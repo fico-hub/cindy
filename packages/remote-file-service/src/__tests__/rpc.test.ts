@@ -130,6 +130,19 @@ describe('remote-file-service RPC end-to-end', () => {
     expect(entries.map((e) => e.name)).not.toContain('renamed.ts');
   });
 
+  it('writeNewFile creates exclusively and refuses an existing target', async () => {
+    await mkdir(path.join(workdir, 'tool-results'));
+    const r = await client.request('writeNewFile', { workdir, relPath: 'tool-results/x.json', content: '{"a":1}' });
+    expect(r.size).toBe(7);
+    expect(await fsReadFile(path.join(workdir, 'tool-results/x.json'), 'utf8')).toBe('{"a":1}');
+    await expect(
+      client.request('writeNewFile', { workdir, relPath: 'tool-results/x.json', content: 'again' }),
+    ).rejects.toMatchObject({ code: 'OPERATION_FAILED' });
+    await expect(
+      client.request('writeNewFile', { workdir, relPath: 'tool-results/y.json', content: 42 as unknown as string }),
+    ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+  });
+
   it('unknown method → UNKNOWN_METHOD; bad params → BAD_REQUEST', async () => {
     await client.connect();
     await expect(
