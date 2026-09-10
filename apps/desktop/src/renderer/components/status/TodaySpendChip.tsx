@@ -1,3 +1,5 @@
+import { isOpenAiSubscriptionProvider } from '@cindy/model-providers';
+import { useProviders } from '@/hooks/useProviders';
 /**
  * TodaySpendChip — 右下角用量指示器与所有渠道共用的悬浮卡片入口。
  *
@@ -776,12 +778,17 @@ export function TodaySpendChip({
     isDefaultRouteClaudeSession &&
     observedClaudeRoute == null &&
     (gatewayKeyReconciling || (!hasGatewayKey && claudeOAuthConnected == null));
+  const { providers: quotaProviders } = useProviders();
+  const selectedQuotaProvider = quotaProviders.find(provider => provider.id === providerId);
+  const isClaudeAccount = providerId === 'anthropic' || selectedQuotaProvider?.auth.native === 'claude';
+  const isXaiAccount = providerId === 'xai' || selectedQuotaProvider?.auth.native === 'xai';
   // device-link 远程会话的形态判定不用任何本机账号状态(张冠李戴):显式供应商选择
   // (随 sessions 镜像,是被控端真相)直接定形态;cc 默认路由用被控端 proxy 的按请求
   // 路由观察镜像(useRemoteClaudeSessionRoute,路由真值在被控端 registry)。无观察值
   // (会话没跑过请求 / 老被控端)维持「仅会话金额」占位,不做本机启发式猜测 —— 与
   // 本机 ccBillingFormPending 的「形态未定不乱渲染」同一取向。快照数据经各远程镜像
-  // hook 从被控端读取,渲染形态与本机完全一致。
+  // hook 从被控端读取,渲染形态与本机完全一致。远程分支刻意只认 providerId === 'anthropic',
+  // 不查本机 quotaProviders(被控端的自定义供应商 id 与本机无关)。
   const isDeviceLinkRemoteBridgeModel =
     typeof modelId === 'string' &&
     (modelId.startsWith(CHATGPT_MODEL_PREFIX) || modelId.startsWith(XAI_MODEL_PREFIX));
@@ -804,21 +811,22 @@ export function TodaySpendChip({
     (!isDeviceLinkRemote &&
       ((vendorKey === 'cc' &&
         !isRemoteClaudeSession &&
-        (providerId === 'anthropic' ||
+        (isClaudeAccount ||
           (providerId == null &&
             (observedClaudeRoute != null
               ? observedClaudeRoute === 'subscription'
               : !gatewayKeyReconciling && !hasGatewayKey && claudeOAuthConnected === true)))) ||
         // Pi 的 provider 在创建会话时已经显式固化，不需要再从 CC proxy route 猜。
-        (vendorKey === 'pi' && !remoteHostId && providerId === 'anthropic')));
+        ((vendorKey === 'pi' || vendorKey === 'codex') && !remoteHostId && isClaudeAccount)));
   // cc 走「订阅直连 bridge」= model 带 chatgpt/ / xai/ 前缀(经本地 responses-bridge 打用户个人
   // 订阅额度,真实计费恒 0,gateway quota 与之无关):
   //   - chatgpt/ → 与 codex 同一 ChatGPT 账户,复用 codex 订阅 chip 形态(限额窗口 + 价值估算);
   //   - xai/    → SuperGrok 账号周用量(cli-chat-proxy billing) + 尽力显示限流头。
   // 优先级高于 Claude 订阅形态(model 前缀决定实际消耗的额度)。
+  const isOpenAiAccount = providerId === 'openai' || isOpenAiSubscriptionProvider(quotaProviders.find((provider) => provider.id === providerId));
   const isChatgptBridge =
     (vendorKey === 'cc' || vendorKey === 'pi') &&
-    (providerId == null || providerId === 'openai') &&
+    (providerId == null || isOpenAiAccount) &&
     typeof modelId === 'string' &&
     modelId.startsWith(CHATGPT_MODEL_PREFIX);
   // SuperGrok 周用量是账号级。Pi catalog 的模型 id 是 grok-4.6,没有 xai/ 前缀,
@@ -826,14 +834,14 @@ export function TodaySpendChip({
   const isXaiPrefixedModel = typeof modelId === 'string' && modelId.startsWith(XAI_MODEL_PREFIX);
   const isXaiBridge =
     (vendorKey === 'cc' || vendorKey === 'pi') &&
-    (providerId === 'xai' || (providerId == null && isXaiPrefixedModel));
+    (isXaiAccount || (providerId == null && isXaiPrefixedModel));
   const isSubscriptionBridge = isChatgptBridge || isXaiBridge;
   const isRemoteCodexSession = vendorKey === 'codex' && Boolean(remoteHostId);
   const isCodexBudgetModel = typeof modelId === 'string' && modelId.startsWith('codex/');
   const isCodexGatewayBudgetModel =
     isCodexBudgetModel && (providerId == null || providerId === 'xd');
   const isCodexXaiProvider =
-    vendorKey === 'codex' && (providerId === 'xai' || (providerId == null && isXaiPrefixedModel));
+    vendorKey === 'codex' && (isXaiAccount || (providerId == null && isXaiPrefixedModel));
   // codex 走订阅价值估算:ChatGPT 订阅需要 oauth-bearer + OpenAI 来源;xAI 由 proxy 注入
   // SuperGrok OAuth。显式自定义供应商优先于共享 host 的 authInjection 和模型名前缀。
   // 远端 Codex 的事实在远端 daemon 上,本机只记录 token 价值估算,不写本地 gateway cost。
@@ -853,7 +861,7 @@ export function TodaySpendChip({
       isDeviceLinkRemoteCodexOauth ||
       (codexAuthInjection === 'oauth-bearer' &&
         !isCodexGatewayBudgetModel &&
-        (providerId == null || providerId === 'openai')));
+        (providerId == null || isOpenAiAccount)));
   const isCodexSubscription = isCodexOauth || isCodexXaiProvider;
   const isCodexApi = vendorKey === 'codex' && !isCodexSubscription;
   const isPiGateway =
@@ -936,6 +944,7 @@ export function TodaySpendChip({
     // app-server 形态下据当前模型匹配限额桶(账号可能同时有主配额桶与模型专属
     // 促销桶, 见 useAccountUsage.matchCodexBucketForModel)。
     modelId,
+    providerId ?? 'openai',
   );
   // device-link 远程 codex / chatgpt-bridge:被控端权威组合 payload 镜像,选槽 / 选桶
   // 与本机同口径在消费点执行(selectRemoteCodexAccountUsage)。
@@ -950,17 +959,22 @@ export function TodaySpendChip({
       )
     : localAccountUsage;
   const { snapshot: codexRateLimits, refresh: refreshCodexRateLimits } = useCodexRateLimits(
-    isCodexOauth && !isAnyRemoteSession,
+    usesCodexQuotaForm && !isAnyRemoteSession,
+    providerId ?? 'openai',
   );
   // xAI 限流快照同为本机 main 抓的 —— SSH 远程仍抑制回落价值估算;device-link 远程
   // 走被控端镜像(订阅周用量 invoke + push,限流头 push-only,与本机同语义降级)。
+  // 本机侧按所选供应商账号取(多账号供应商,#4197)。
   const remoteXaiDeviceId =
     isDeviceLinkRemote && usesXaiQuotaForm ? (deviceLinkDeviceId ?? null) : null;
-  const localXaiRateLimit = useXaiRateLimit(usesXaiQuotaForm && !isAnyRemoteSession);
+  const localXaiRateLimit = useXaiRateLimit(
+    usesXaiQuotaForm && !isAnyRemoteSession && (!providerId || providerId === 'xai'),
+  );
   const remoteXaiRateLimit = useRemoteXaiRateLimit(remoteXaiDeviceId);
   const xaiRateLimit = isDeviceLinkRemote ? remoteXaiRateLimit : localXaiRateLimit;
   const localXaiSubscriptionUsage = useXaiSubscriptionUsage(
     usesXaiQuotaForm && !isAnyRemoteSession,
+    providerId ?? 'xai',
   );
   const remoteXaiSubscriptionUsage = useRemoteXaiSubscriptionUsage(remoteXaiDeviceId);
   const xaiSubscriptionUsage = isDeviceLinkRemote
@@ -982,6 +996,7 @@ export function TodaySpendChip({
   // 本机快照与其无关(额度事实在被控端),两个 hook 的 enabled 互斥。
   const localClaudeSubscriptionUsage = useClaudeSubscriptionUsage(
     isClaudeSubscription && !isSubscriptionBridge && !isDeviceLinkRemote,
+    providerId ?? 'anthropic',
   );
   const remoteClaudeSubscriptionUsage = useRemoteClaudeSubscriptionUsage(
     isDeviceLinkRemoteClaudeSubscription ? (deviceLinkDeviceId ?? null) : null,
@@ -1302,24 +1317,24 @@ export function TodaySpendChip({
   React.useEffect(() => {
     if (!hasPendingResetWindow && !xaiNeedsWeeklyRefresh) return;
     // 悬念期催刷按会话来源分路:device-link 远程催被控端(经隧道,被控端节流兜底),
-    // 本机催本机;不得拿本机通道替远程会话催刷(账号不同)。
+    // 本机催本机(按所选供应商账号,#4197);不得拿本机通道替远程会话催刷(账号不同)。
     if (isChatgptBridge || (isDeviceLinkRemote && usesCodexQuotaForm)) {
       if (isDeviceLinkRemote) {
         if (deviceLinkDeviceId) requestRemoteCodexAccountRefresh(deviceLinkDeviceId);
       } else {
-        requestCodexAccountRefresh();
+        requestCodexAccountRefresh(providerId ?? undefined);
       }
     } else if (usesXaiQuotaForm) {
       if (isDeviceLinkRemote) {
         if (deviceLinkDeviceId) requestRemoteXaiSubscriptionRefresh(deviceLinkDeviceId);
       } else {
-        requestXaiSubscriptionRefresh();
+        requestXaiSubscriptionRefresh(providerId ?? 'xai');
       }
     } else if (isClaudeSubscription && !usesCodexQuotaForm) {
       if (isDeviceLinkRemoteClaudeSubscription && deviceLinkDeviceId) {
         requestRemoteClaudeSubscriptionRefresh(deviceLinkDeviceId);
       } else if (!isDeviceLinkRemote) {
-        requestClaudeSubscriptionRefresh();
+        requestClaudeSubscriptionRefresh(providerId ?? 'anthropic');
       }
     }
   }, [
@@ -1332,6 +1347,7 @@ export function TodaySpendChip({
     deviceLinkDeviceId,
     usesCodexQuotaForm,
     usesXaiQuotaForm,
+    providerId,
     windowLabelNowMs,
   ]);
 

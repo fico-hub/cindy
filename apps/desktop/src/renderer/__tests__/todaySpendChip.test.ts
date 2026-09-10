@@ -47,7 +47,7 @@ describe('TodaySpendChip dashboard routing', () => {
     expect(compact(source)).toContain(compact("codexAuthInjection === 'oauth-bearer'"));
     expect(compact(source)).toContain(compact("vendorKey === 'codex' && !isCodexXaiProvider"));
     expect(compact(source)).toContain(compact('isRemoteCodexSession ||'));
-    expect(compact(source)).toContain(compact("(providerId == null || providerId === 'openai')"));
+    expect(compact(source)).toContain(compact("(providerId == null || isOpenAiAccount)"));
     expect(compact(source)).toContain(compact('modelId.startsWith(XAI_MODEL_PREFIX)'));
     expect(compact(source)).toContain(compact("providerId === 'xai'"));
     expect(compact(source)).toContain(
@@ -77,7 +77,7 @@ describe('TodaySpendChip dashboard routing', () => {
     // 订阅形态分类的本机启发式整体排除 device-link;显式 anthropic / 被控端路由观察为
     // 订阅的远程会话走被控端镜像快照(useRemoteClaudeSubscriptionUsage),不读本机账号状态。
     expect(compact(source)).toContain(
-      compact("(vendorKey === 'pi' && !remoteHostId && providerId === 'anthropic')"),
+      compact("const isClaudeSubscription = isDeviceLinkRemoteClaudeSubscription || (!isDeviceLinkRemote &&"),
     );
     expect(compact(source)).toContain(compact('const isDeviceLinkRemoteClaudeSubscription ='));
     expect(compact(source)).toContain(
@@ -102,6 +102,8 @@ describe('TodaySpendChip dashboard routing', () => {
     expect(compact(source)).toContain(
       compact('const remoteClaudeRoute = useRemoteClaudeSessionRoute('),
     );
+    // #4197 多账号:本机 Claude 账号判定经 isClaudeAccount(providerId / auth.native),pi 与 codex 同口径
+    expect(compact(source)).toContain(compact("((vendorKey === 'pi' || vendorKey === 'codex') && !remoteHostId && isClaudeAccount)"));
     // 看板链接对 device-link 落 null(额度属于被控端账号,本机浏览器打开的是控制端账号)
     expect(source).toMatch(/usageDashboardUrl: string \| null = isDeviceLinkRemote\s*\?\s*null/);
   });
@@ -217,8 +219,8 @@ describe('TodaySpendChip dashboard routing', () => {
     expect(compact(source)).toContain(
       compact('if (isChatgptBridge || (isDeviceLinkRemote && usesCodexQuotaForm)) {'),
     );
-    expect(compact(source)).toContain(compact('requestCodexAccountRefresh();'));
-    expect(compact(source)).toContain(compact('requestXaiSubscriptionRefresh();'));
+    expect(compact(source)).toContain(compact('requestCodexAccountRefresh(providerId ?? undefined);'));
+    expect(compact(source)).toContain(compact("requestXaiSubscriptionRefresh(providerId ?? 'xai');"));
     // 悬念期催刷按会话来源分路:远程订阅会话催被控端(隧道,被控端节流兜底),
     // 本机订阅会话催本机;不得拿本机通道替远程会话催刷(账号不同)。
     expect(compact(source)).toContain(
@@ -226,7 +228,7 @@ describe('TodaySpendChip dashboard routing', () => {
         'if (isDeviceLinkRemoteClaudeSubscription && deviceLinkDeviceId) {\n' +
           '        requestRemoteClaudeSubscriptionRefresh(deviceLinkDeviceId);\n' +
           '      } else if (!isDeviceLinkRemote) {\n' +
-          '        requestClaudeSubscriptionRefresh();\n' +
+          "        requestClaudeSubscriptionRefresh(providerId ?? 'anthropic');\n" +
           '      }',
       ),
     );
@@ -362,7 +364,7 @@ describe('shared usage-card provider projections', () => {
     expect(buildCodexUsageCard(null, null, t, now).emptyText).toBe('quotaCard.waiting');
   });
 
-  it('preserves Grok product, prepaid USD, and instantaneous rate-limit details', () => {
+  it('keeps Grok shared remaining quota, prepaid USD and rate-limit details without presenting product contributions as balances', () => {
     const card = buildXaiUsageCard(
       {
         planLabel: 'SuperGrok',
@@ -387,16 +389,7 @@ describe('shared usage-card provider projections', () => {
       now,
     );
     expect(card.windows.map((window) => window.window.utilization)).toEqual([9]);
-    expect(card.windows[0].breakdown).toEqual([
-      {
-        label: 'quotaCard.includedLabel:{"name":"Grok Build"}',
-        value: 'quotaCard.usedPercent:{"percent":2}',
-      },
-      {
-        label: 'quotaCard.includedLabel:{"name":"Other Product"}',
-        value: 'quotaCard.usedPercent:{"percent":7}',
-      },
-    ]);
+    expect(card.windows[0].breakdown).toBeUndefined();
     expect(card.windows[0].detail).toBe('todaySpend.xai.accountWeeklyHint');
     expect(card.details).toEqual(
       expect.arrayContaining([
