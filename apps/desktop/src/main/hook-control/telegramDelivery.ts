@@ -108,6 +108,7 @@ export function createTelegramDeliveryBridge(deps: {
         if (row.opId !== result.opId || row.state === 'sent') return;
         row.state = result.ok && result.messageId?.trim() ? 'sent' : 'unknown';
         row.result = result;
+        if (row.state === 'sent') delete row.code;
         saveFile(file, row);
       } catch { /* missing/torn journal remains unresolved; never send here */ }
     },

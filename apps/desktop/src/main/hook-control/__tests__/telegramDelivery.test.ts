@@ -91,6 +91,7 @@ describe('official Telegram delivery', () => {
     bridge.onResult({ opId: unknown.opId, ok: true, messageId: 'late-42' });
     expect(bridge.receipt(input.idempotencyKey)).toMatchObject({ state: 'sent', result: { messageId: 'late-42' } });
     expect((await bridge.send(input)).state).toBe('sent');
+    expect(bridge.receipt(input.idempotencyKey)?.code).toBeUndefined();
     expect(send).toHaveBeenCalledTimes(1);
   });
   it('does not send after a torn journal write' , async () => {
