@@ -686,12 +686,13 @@ export async function writeNewFile(
     const links = await handle.stat({ bigint: true });
     if (links.nlink !== 1n) throw new Error(`staging link was replaced or moved: ${sub}`);
   } catch (err) {
-    // Fail closed without leaving content anywhere: zero through the handle (follows
-    // the inode wherever a directory went), drop the published entry only if it is
-    // still ours, drop the staging name only if it is still ours.
+    // Fail closed without leaving content anywhere: zero through the handle (follows the
+    // inode wherever a directory went). The pathnames (published entry, staging link) are
+    // left alone: a check-then-unlink on a mutable path can delete an unrelated entry that
+    // a workdir process placed there in between, and the content is already gone. Empty
+    // names are the conservative residue; a leftover staging name also keeps verifyNewFile
+    // from ever accepting this withdrawn publish.
     await handle.truncate(0).catch(() => undefined);
-    if (published && (await isOurs(abs))) await fs.unlink(abs).catch(() => undefined);
-    if (await isOurs(stagingAbs)) await fs.unlink(stagingAbs).catch(() => undefined);
     await handle.close().catch(() => undefined);
     throw err;
   }

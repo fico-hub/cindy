@@ -478,7 +478,9 @@ async function writeWithinVerifiedParent(
     await syncDirectory(workingDir);
     return { dev: st.dev, ino: st.ino };
   } catch (error) {
-    inFlight = null;
+    // `inFlight` stays registered until the finally below: a cooperative abort arriving
+    // while this fail-closed cleanup is still running must join the same (memoized) run
+    // through the retained handle instead of reporting "nothing to clean".
     if (committedOverwrite) {
       // The rename already replaced the user's file; destroying the replacement now would
       // lose both versions. Report the failure and keep the published replacement.

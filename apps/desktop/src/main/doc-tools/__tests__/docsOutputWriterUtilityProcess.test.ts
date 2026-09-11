@@ -463,6 +463,45 @@ process.stdout.write(JSON.stringify({ code, outsideExists, movedValue }));
     }
   });
 
+  // Codex P1 (round 26): while the writer's own fail-closed cleanup is still running (e.g. a
+  // blocking truncate), the in-flight capability stays registered so a cooperative abort
+  // joins that cleanup instead of answering cleaned:false.
+  it('abortInFlightWrite joins an in-progress failure cleanup instead of reporting nothing to clean', async () => {
+    const realOpen = fs.promises.open.bind(fs.promises);
+    const realLink = fs.promises.link.bind(fs.promises);
+    let releaseTruncate: () => void = () => {};
+    let truncateStarted = false;
+    const gate = new Promise<void>((r) => { releaseTruncate = r; });
+    const openSpy = vi.spyOn(fs.promises, 'open').mockImplementation(async (...args: Parameters<typeof fs.promises.open>) => {
+      const handle = await realOpen(...args);
+      if (String(args[0]).includes('.cindy-docs-staging-')) {
+        const origTruncate = handle.truncate.bind(handle);
+        handle.truncate = (async (len?: number) => { truncateStarted = true; await gate; return origTruncate(len); }) as typeof handle.truncate;
+      }
+      return handle;
+    });
+    // Induce a post-publication failure: staging link renamed away (extra link detected).
+    const linkSpy = vi.spyOn(fs.promises, 'link').mockImplementation(async (from, to) => {
+      await realLink(from, to);
+      await fs.promises.rename(String(from), path.join(root, 'stolen-copy'));
+    });
+    try {
+      const pending = runDocsOutputWriteForTest(await request('report.bin', 'private-result', false), root).then(() => 'resolved', (e: Error) => e.message);
+      await waitFor(() => truncateStarted);
+      let abortSettled = false;
+      const abort = abortInFlightWrite().then((r) => { abortSettled = true; return r; });
+      await new Promise((r) => setTimeout(r, 30));
+      expect(abortSettled).toBe(false); // waiting on the shared cleanup, not answering false
+      releaseTruncate();
+      expect(await abort).toEqual({ cleaned: true });
+      await pending;
+      expect((await fs.promises.stat(path.join(root, 'stolen-copy'))).size).toBe(0);
+    } finally {
+      openSpy.mockRestore();
+      linkSpy.mockRestore();
+    }
+  });
+
   // Codex P1 (round 25): an abort that lands while the exclusive open of the staging file
   // is still pending must wait for it, then clean the (still empty) inode; no byte is written.
   it('abortInFlightWrite waits for a pending staging open and cleans it before any byte is written', async () => {

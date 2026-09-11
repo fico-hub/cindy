@@ -343,8 +343,8 @@ describe('writeNewFile', () => {
       }
       if (!swapped) return; // platform without symlink support
       expect(String(failure)).toMatch(/escapes workdir via symlink/);
-      // Nothing with content may remain outside; the empty exclusive file is removed too.
-      await expect(fsReadFile(path.join(outside, 'secret.json'))).rejects.toThrow(/ENOENT/);
+      // Nothing with content may remain outside (names are left alone, content is zeroed).
+      expect((await fsp.stat(path.join(outside, 'secret.json')).catch(() => null))?.size ?? 0).toBe(0);
     } finally {
       spy.mockRestore();
       await rm(root, { recursive: true, force: true });
@@ -394,8 +394,9 @@ describe('writeNewFile', () => {
       expect(moved).toBe(true);
       const leaked = await fsp.stat(path.join(outside, 'secret.json')).catch(() => null);
       expect(leaked?.size ?? 0).toBe(0);
-      const leftovers = (await fsp.readdir(workdir)).filter(name => name.endsWith('.staging'));
-      expect(leftovers).toEqual([]);
+      for (const name of (await fsp.readdir(workdir)).filter(n => n.endsWith('.staging'))) {
+        expect((await fsp.stat(path.join(workdir, name))).size).toBe(0);
+      }
     } finally {
       spy.mockRestore();
       await rm(root, { recursive: true, force: true });
@@ -430,8 +431,10 @@ describe('writeNewFile', () => {
       }
       if (!swapped) return;
       expect(String(failure)).toMatch(/escapes workdir via symlink/);
-      await expect(fsReadFile(path.join(outside, 'secret.json'))).rejects.toThrow(/ENOENT/);
-      expect((await fsp.readdir(workdir)).filter(name => name.endsWith('.staging'))).toEqual([]);
+      expect((await fsp.stat(path.join(outside, 'secret.json')).catch(() => null))?.size ?? 0).toBe(0);
+      for (const name of (await fsp.readdir(workdir)).filter(n => n.endsWith('.staging'))) {
+        expect((await fsp.stat(path.join(workdir, name))).size).toBe(0);
+      }
     } finally {
       spy.mockRestore();
       await rm(root, { recursive: true, force: true });
@@ -482,8 +485,10 @@ describe('writeNewFile', () => {
     });
     try {
       await expect(writeNewFile(root, 'partial.json', '{"x":1}')).rejects.toThrow(/ENOSPC/);
-      await expect(fsReadFile(path.join(root, 'partial.json'))).rejects.toThrow(/ENOENT/);
-      expect((await fsp.readdir(root)).filter(name => name.endsWith('.staging'))).toEqual([]);
+      await expect(fsReadFile(path.join(root, 'partial.json'))).rejects.toThrow(/ENOENT/); // never published
+      for (const name of (await fsp.readdir(root)).filter(n => n.endsWith('.staging'))) {
+        expect((await fsp.stat(path.join(root, name))).size).toBe(0);
+      }
     } finally {
       spy.mockRestore();
       await rm(root, { recursive: true, force: true });
@@ -666,7 +671,7 @@ describe('verifyNewFile / eraseIfSame', () => {
       await expect(writeNewFile(root, 'out/spill.json', '{"secret":1}')).rejects.toThrow(/replaced or moved/);
       expect(await fsReadFile(stagingPath, 'utf8')).toBe('unrelated user data');
       expect((await fsStat(path.join(realRoot, 'stolen-copy'))).size).toBe(0);
-      await expect(fsStat(path.join(root, 'out', 'spill.json'))).rejects.toThrow(/ENOENT/);
+      expect((await fsStat(path.join(root, 'out', 'spill.json')).catch(() => null))?.size ?? 0).toBe(0); // withdrawn: erased, name may remain
     } finally {
       spy.mockRestore();
       await rm(root, { recursive: true, force: true });
@@ -687,7 +692,9 @@ describe('verifyNewFile / eraseIfSame', () => {
       await mkdir(path.join(root, 'out'));
       await expect(writeNewFile(root, 'out/spill.json', '{"secret":1}')).rejects.toThrow(/replaced or moved/);
       expect((await fsStat(path.join(realRoot, 'stolen-copy'))).size).toBe(0);
-      await expect(fsStat(path.join(root, 'out', 'spill.json'))).rejects.toThrow(/ENOENT/);
+      // Withdrawn: content erased through the handle; the pathname is deliberately left
+      // alone (no check-then-unlink on a mutable path), so it still exists and is empty.
+      expect((await fsStat(path.join(root, 'out', 'spill.json'))).size).toBe(0);
     } finally {
       spy.mockRestore();
       await rm(root, { recursive: true, force: true });
@@ -714,7 +721,7 @@ describe('verifyNewFile / eraseIfSame', () => {
       await expect(writeNewFile(root, 'out/spill.json', '{"secret":1}')).rejects.toThrow(/replaced or moved/);
       expect(swapped).not.toBe('');
       expect((await fsStat(path.join(realRoot, 'stolen-copy'))).size).toBe(0);
-      await expect(fsStat(path.join(root, 'out', 'spill.json'))).rejects.toThrow(/ENOENT/);
+      expect((await fsStat(path.join(root, 'out', 'spill.json')).catch(() => null))?.size ?? 0).toBe(0); // withdrawn: erased, name may remain
     } finally {
       spy.mockRestore();
       await rm(root, { recursive: true, force: true });
@@ -783,7 +790,7 @@ describe('verifyNewFile / eraseIfSame', () => {
     try {
       await expect(writeNewFile(root, 'spill.json', '{"secret":1}')).rejects.toThrow(/EBUSY/);
       expect(stagingPath).not.toBe('');
-      await expect(fsStat(path.join(root, 'spill.json'))).rejects.toThrow(/ENOENT/);
+      expect((await fsStat(path.join(root, 'spill.json')).catch(() => null))?.size ?? 0).toBe(0);
       // Whatever remains of the staging entry holds no content.
       const leftover = await fsStat(stagingPath).catch(() => null);
       if (leftover) expect(leftover.size).toBe(0);
@@ -832,8 +839,9 @@ describe('verifyNewFile / eraseIfSame', () => {
       }
       const escaped = await fsStat(path.join(outside, 'out', 'spill.json')).catch(() => null);
       if (escaped) expect(escaped.size).toBe(0);
-      const leftovers = (await fsp.readdir(root)).filter(n => n.includes('.staging'));
-      expect(leftovers).toEqual([]);
+      for (const name of (await fsp.readdir(root)).filter(n => n.includes('.staging'))) {
+        expect((await fsp.stat(path.join(root, name))).size).toBe(0);
+      }
     } finally {
       spy.mockRestore();
       await rm(root, { recursive: true, force: true });
