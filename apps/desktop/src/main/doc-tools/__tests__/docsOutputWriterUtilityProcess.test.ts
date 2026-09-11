@@ -304,6 +304,8 @@ process.stdout.write(JSON.stringify({ code, outsideExists, movedValue }));
   it('announces the staged inode and syncs the parent directory after removing staging', async () => {
     const realOpen = fs.promises.open.bind(fs.promises);
     const dirSyncs: string[] = [];
+    const notices: unknown[] = [];
+    const order: string[] = [];
     const openSpy = vi.spyOn(fs.promises, 'open').mockImplementation(async (...args: Parameters<typeof fs.promises.open>) => {
       const handle = await realOpen(...args);
       const st = await handle.stat();
@@ -314,17 +316,45 @@ process.stdout.write(JSON.stringify({ code, outsideExists, movedValue }));
           dirSyncs.push(`${leftovers.length}`);
           await origSync();
         };
+      } else {
+        const origWrite = handle.writeFile.bind(handle);
+        handle.writeFile = (async (...w: Parameters<typeof origWrite>) => {
+          order.push(`write:${notices.length}`); // notices already announced when bytes start
+          return origWrite(...w);
+        }) as typeof handle.writeFile;
       }
       return handle;
     });
     try {
-      const notices: unknown[] = [];
-      const identity = await runDocsOutputWriteForTest(await request('report.bin', 'payload', false), root, (n) => notices.push(n));
+      const identity = await runDocsOutputWriteForTest(await request('report.bin', 'payload', false), root, (n) => { notices.push(n); order.push('staged'); });
+      // Codex P1 (round 17): the inode is announced before the first private byte is written.
+      expect(order).toEqual(['staged', 'write:1']);
       const st = await fs.promises.lstat(path.join(root, 'report.bin'), { bigint: true });
       expect(identity).toEqual({ dev: st.dev, ino: st.ino });
       expect(notices).toEqual([{ type: 'staged', identity: { dev: st.dev, ino: st.ino }, stagingName: expect.stringMatching(/^\.cindy-docs-staging-.*-report\.bin$/) }]);
       // Parent directory synced exactly when no staging entry remained.
       expect(dirSyncs).toEqual(['0']);
+    } finally {
+      openSpy.mockRestore();
+    }
+  });
+
+  // Codex P1 (round 17): after an overwrite rename the old inode is gone; a later failure
+  // must not destroy the replacement, which is now the user's only copy.
+  it('keeps the overwrite replacement when a post-rename step fails', async () => {
+    await runDocsOutputWriteForTest(await request('report.bin', 'old', false), root);
+    const realOpen = fs.promises.open.bind(fs.promises);
+    const openSpy = vi.spyOn(fs.promises, 'open').mockImplementation(async (...args: Parameters<typeof fs.promises.open>) => {
+      const handle = await realOpen(...args);
+      const st = await handle.stat();
+      if (st.isDirectory()) {
+        handle.sync = async () => { throw Object.assign(new Error('EIO: disk'), { code: 'EIO' }); };
+      }
+      return handle;
+    });
+    try {
+      await expect(runDocsOutputWriteForTest(await request('report.bin', 'new', true), root)).rejects.toMatchObject({ code: 'EIO' });
+      expect(await fs.promises.readFile(path.join(root, 'report.bin'), 'utf8')).toBe('new');
     } finally {
       openSpy.mockRestore();
     }

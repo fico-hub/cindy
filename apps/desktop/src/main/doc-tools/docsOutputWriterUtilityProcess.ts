@@ -142,25 +142,20 @@ async function ensureParent(request: DocsOutputWriteRequest, workingDir: string)
 }
 
 /**
- * Create the staging file exclusively, write and sync the bytes, and hand back the
- * still-open handle: it is the only capability bound to the inode itself, used later
- * to report the published identity and to zero the content if publication must be
- * withdrawn.
+ * Create the staging file exclusively and hand back the still-open handle before any
+ * byte is written: it is the only capability bound to the inode itself, used to announce
+ * the identity to the parent (so a timeout kill can still be cleaned up), to report the
+ * published identity, and to zero the content if publication must be withdrawn.
  */
-async function writeExclusive(target: string, data: Uint8Array): Promise<fs.promises.FileHandle> {
+async function openExclusive(target: string): Promise<fs.promises.FileHandle> {
   const flags =
     fs.constants.O_WRONLY |
     fs.constants.O_CREAT |
     fs.constants.O_EXCL |
     (fs.constants.O_NOFOLLOW ?? 0);
-  let handle: fs.promises.FileHandle | undefined;
   try {
-    handle = await fs.promises.open(target, flags, 0o600);
-    await handle.writeFile(data);
-    await handle.sync();
-    return handle;
+    return await fs.promises.open(target, flags, 0o600);
   } catch (error) {
-    await handle?.close().catch(() => undefined);
     if (hasCode(error, 'EEXIST')) {
       throw new OutputWriteError('FILE_EXISTS', `目标文件已存在: ${target}`);
     }
@@ -276,15 +271,22 @@ async function writeWithinVerifiedParent(
   const staging = outputPath(stagingName);
   let handle: fs.promises.FileHandle | undefined;
   let published = false;
+  // overwrite: once the rename over the old target has happened, the old inode is gone
+  // for good; the replacement is the user's only copy and must never be withdrawn.
+  let committedOverwrite = false;
   try {
-    handle = await writeExclusive(staging, request.data);
-    // Tell the parent which inode now holds the private bytes: if this process is killed
-    // (timeout) before it can report, the parent can still clean up exactly that inode.
+    handle = await openExclusive(staging);
+    // Announce the inode *before* the first private byte is written: if writeFile/sync
+    // hang past the parent's watchdog and this process is killed, the parent can still
+    // reclaim exactly this inode.
     const staged = await handle.stat({ bigint: true });
     onStaged?.({ type: 'staged', identity: { dev: staged.dev, ino: staged.ino }, stagingName });
+    await handle.writeFile(request.data);
+    await handle.sync();
     await verifyParent(request, workingDir);
     if (request.overwrite) {
       await replaceFile(request, workingDir, staging, target);
+      committedOverwrite = true;
     } else {
       await publishExclusive(staging, target);
     }
@@ -300,6 +302,11 @@ async function writeWithinVerifiedParent(
     await syncDirectory(workingDir);
     return { dev: st.dev, ino: st.ino };
   } catch (error) {
+    if (committedOverwrite) {
+      // The rename already replaced the user's file; destroying the replacement now would
+      // lose both versions. Report the failure and keep the published replacement.
+      throw error;
+    }
     // Fail closed: no private content may remain, least of all outside the session
     // root. Zero it through the inode-bound handle (follows the file wherever its
     // directory went) and withdraw the published name only if it is still ours.

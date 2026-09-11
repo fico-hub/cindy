@@ -690,10 +690,19 @@ export async function writeNewFile(
   return { size: Number(st.size), mtimeMs: Number(st.mtimeMs), ...identityOf(st) };
 }
 
-/** True while a writeNewFile staging link for `name` still exists at the workdir root. */
+/**
+ * True while a writeNewFile staging link for `name` still exists at the workdir root.
+ * A scan failure is not "no marker": it propagates so the caller retries instead of
+ * accepting a publish the original writer may still withdraw.
+ */
 async function hasStagingSibling(wdReal: string, name: string): Promise<boolean> {
   const prefix = `.${name}.`;
-  const entries = await fs.readdir(wdReal).catch(() => [] as string[]);
+  let entries: string[];
+  try {
+    entries = await fs.readdir(wdReal);
+  } catch (err) {
+    throw new Error(`cannot scan completion marker: ${(err as NodeJS.ErrnoException)?.code ?? 'unknown'}`);
+  }
   return entries.some((entry) => entry.startsWith(prefix) && entry.endsWith('.staging'));
 }
 

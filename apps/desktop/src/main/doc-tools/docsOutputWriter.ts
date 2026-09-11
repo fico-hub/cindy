@@ -242,8 +242,11 @@ export const writeDocsOutput: WriteDocsOutputFn = async (input) => {
       }
       const notice = staged;
       const parentDir = path.join(realRoot, parentRelativePath);
+      // overwrite: after the rename the announced inode *is* the user's replaced file, so
+      // only the staging name may be reclaimed; the target name is never touched.
+      const names = request.overwrite ? [notice?.stagingName ?? ''] : [notice?.stagingName ?? '', request.targetName];
       const reclaim = notice
-        ? reclaimStagedInode(parentDir, [notice.stagingName, request.targetName], notice.identity)
+        ? reclaimStagedInode(parentDir, names.filter(Boolean), notice.identity)
         : Promise.resolve();
       void reclaim.finally(() => finish(new Error('文档落盘隔离进程超时')));
     }, DOCS_OUTPUT_WRITER_TIMEOUT.ms);

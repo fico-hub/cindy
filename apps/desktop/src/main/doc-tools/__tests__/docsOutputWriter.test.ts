@@ -106,6 +106,27 @@ describe('writeDocsOutput beforeCommit boundary', () => {
     }
   });
 
+  // Codex P1 (round 17): for overwrite the announced inode becomes the user's replaced file
+  // once renamed; timeout reclamation may only touch the staging name.
+  it('never reclaims the target name of an overwrite request on timeout', async () => {
+    DOCS_OUTPUT_WRITER_TIMEOUT.ms = 30;
+    try {
+      const target = path.join(root, 'out.txt');
+      await fs.promises.writeFile(target, 'replacement already renamed into place');
+      const st = await fs.promises.lstat(target, { bigint: true });
+      child.result = null;
+      child.postMessage = function (this: FakeChild, message: unknown) {
+        this.posted.push(message);
+        queueMicrotask(() => this.emit('message', { type: 'staged', identity: { dev: st.dev, ino: st.ino }, stagingName: '.cindy-docs-staging-u-out.txt' }));
+      };
+      const pending = writeDocsOutput({ root, path: target, data: new Uint8Array([1]), overwrite: true }).catch((e: Error) => e.message);
+      expect(await pending).toBe('文档落盘隔离进程超时');
+      expect(await fs.promises.readFile(target, 'utf8')).toBe('replacement already renamed into place');
+    } finally {
+      DOCS_OUTPUT_WRITER_TIMEOUT.ms = 60_000;
+    }
+  });
+
   it('leaves unrelated files alone on timeout when the announced inode does not match', async () => {
     DOCS_OUTPUT_WRITER_TIMEOUT.ms = 30;
     try {

@@ -648,6 +648,24 @@ describe('verifyNewFile / unlinkIfSame', () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
+  // Codex P1 (round 17): an unreadable marker directory is not "no marker".
+  it('verifyNewFile fails closed when the completion-marker scan cannot be performed', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-verify-scanfail-'));
+    const realRoot = await fsp.realpath(root);
+    const realReaddir = fsp.readdir.bind(fsp);
+    const spy = vi.spyOn(fsp, 'readdir').mockImplementation((async (...args: Parameters<typeof fsp.readdir>) => {
+      if (String(args[0]) === realRoot) throw Object.assign(new Error('EIO'), { code: 'EIO' });
+      return realReaddir(...args);
+    }) as typeof fsp.readdir);
+    try {
+      await fsWriteFile(path.join(root, 'r.json'), '{"a":1}');
+      await expect(verifyNewFile(root, 'r.json', sha('{"a":1}'), 7)).rejects.toThrow(/cannot scan completion marker/);
+    } finally {
+      spy.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('writeNewFile keeps the publish when only the root fsync after staging removal fails', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-root-sync-fail-'));
     const realRoot = await fsp.realpath(root);
