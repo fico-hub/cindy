@@ -29,6 +29,7 @@ import { handleGhostCall } from 'cindy-tools';
 
 const { writeDocsOutputMock } = vi.hoisted(() => ({ writeDocsOutputMock: vi.fn<WriteDocsOutputFn>(async () => {}) }));
 vi.mock('../../doc-tools/docsOutputWriter.js', () => ({ writeDocsOutput: writeDocsOutputMock }));
+import type { CindyGhostsHostDeps } from '../ghost';
 
 const tmpUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'ghost-workdir-gate-'));
 const prefsFile = () => path.join(tmpUserData, 'ghost-workdir-prefs.json');
@@ -316,6 +317,7 @@ function makeDeps(
   sessionId: string | null = 's1',
   sessionInstanceId: string | null = sessionId ? `${sessionId}-instance` : null,
   vendorOptions: Record<string, unknown> = {},
+  pluginMarket?: CindyGhostsHostDeps['pluginMarket'],
 ) {
   const ctx = {
     agentKind,
@@ -328,6 +330,7 @@ function makeDeps(
   // 在 tool-call 时从 ALS 恢复真实 ctx。
   alsSessionContextMock.mockReturnValue(agentKind === 'claude-code' ? undefined : ctx);
   return getCindyGhostsMcpDeps(agentKind === 'claude-code' ? ctx : undefined, {
+    pluginMarket,
     getAppVersion: appVersionMock,
     getLiveSessionGrantState: liveGrantStateMock,
   });
@@ -792,23 +795,13 @@ describe('写路径 roundtrip(真实存储,tmp userData)', () => {
   });
 });
 
-describe('connect_account frozen plugin policy', () => {
-  it.each([
-    { __cindyAllowedBuiltinPluginIds: ['other'] },
-    { __cindyDisabledBuiltinPluginIds: ['art'] },
-  ])('rejects a disabled plugin before creating a card: %j', async (policy) => {
-    const deps = makeDeps('claude-code', 'bot-session', 'bot-instance', policy);
-    await expect(deps.connectAccount!({ kind: 'plugin', id: 'art' })).resolves.toMatchObject({
-      ok: false, errorCode: 'GHOST_DISABLED_IN_WORKDIR',
-    });
-    expect(authorizationRequestMock).not.toHaveBeenCalled();
-  });
-
-  it('allows an enabled plugin and keeps Host login independent of plugin policy', async () => {
+describe('connect_account shares Host live plugin policy', () => {
+  it('passes dynamically discovered plugins to Host without treating builtin toolsets as plugin grants', async () => {
     const deps = makeDeps('claude-code', 'bot-session', 'bot-instance', {
-      __cindyAllowedBuiltinPluginIds: ['art'],
+      __cindyAllowedBuiltinPluginIds: ['memory', 'xdt_helper'],
     });
     await deps.connectAccount!({ kind: 'plugin', id: 'art' });
+    expect(authorizationRequestMock).toHaveBeenCalledWith('bot-session', { kind: 'plugin', id: 'art' });
     await deps.connectAccount!({ kind: 'host', id: 'grok' });
     expect(authorizationRequestMock).toHaveBeenCalledTimes(2);
   });
@@ -3222,5 +3215,62 @@ describe('oversized ghost result Host storage', () => {
     liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-2' });
     await expect(deps.saveLargeGhostResult!('result')).rejects.toThrow();
     expect(remoteFsRequestMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('market install live authority', () => {
+  function marketHarness(agentKind: TestAgentKind = 'claude-code') {
+    const ghost = { manifest: { id: 'mail-suite', name: 'Mail', version: '1' }, enabled: true };
+    const market = {
+      snapshot: vi.fn(async () => ({ items: [], unavailableReason: null, customSourceNames: [], unavailableCustomSourceNames: [] })),
+      detail: vi.fn(async () => ({ ghostId: 'mail-suite', releaseId: 'r1', manifest: ghost.manifest })),
+      install: vi.fn(async (_id: string, _options: unknown, guard?: () => void) => { guard?.(); return { ghost }; }),
+    };
+    const deps = makeDeps(agentKind, 's1', 's1-instance', {}, market as unknown as CindyGhostsHostDeps['pluginMarket']);
+    return { deps, market };
+  }
+
+  it.each(['claude-code', 'codex', 'pi'] as const)('uses the live %s task and does not connect on install', async (kind) => {
+    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', isCurrent: () => true });
+    const { deps, market } = marketHarness(kind);
+    expect(await deps.searchMarket!('gmail')).toMatchObject({ ok: true, items: [] });
+    expect(market.install).not.toHaveBeenCalled();
+    expect(await deps.installMarket!({ pluginId: 'p1', releaseId: 'r1' })).toMatchObject({ status: 'installed', ghost_id: 'mail-suite' });
+    expect(liveGrantStateMock).toHaveBeenCalledWith('s1', 's1-instance');
+    expect(releaseMutationMock).toHaveBeenCalledOnce();
+    expect(authorizationRequestMock).not.toHaveBeenCalled();
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([null, { permissionMode: 'plan', isCurrent: () => true }, { permissionMode: 'auto' }, { permissionMode: 'auto', isCurrent: () => false }])('rejects unavailable or non-writable live authority %j', async (live) => {
+    liveGrantStateMock.mockReturnValue(live);
+    const { deps, market } = marketHarness();
+    expect(await deps.installMarket!({ pluginId: 'p1', releaseId: 'r1' })).toMatchObject({ ok: false, errorCode: 'PERMISSION_DENIED' });
+    expect(market.detail).not.toHaveBeenCalled();
+    expect(acquireMutationLeaseMock).not.toHaveBeenCalled();
+  });
+
+  it.each(['cancel', 'permission-change'])('rechecks %s at placement and releases the owner lease', async (change) => {
+    let current = true;
+    const controller = new AbortController();
+    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', isCurrent: () => current });
+    const { deps, market } = marketHarness();
+    const place = vi.fn();
+    market.install.mockImplementation(async (_id, _options, guard) => {
+      if (change === 'cancel') controller.abort(); else current = false;
+      guard?.(); place();
+      throw new Error('unreachable');
+    });
+    expect(await deps.installMarket!({ pluginId: 'p1', releaseId: 'r1' }, controller.signal)).toMatchObject({ ok: false, errorCode: 'PERMISSION_DENIED' });
+    expect(place).not.toHaveBeenCalled();
+    expect(releaseMutationMock).toHaveBeenCalledOnce();
+  });
+
+  it('rejects an already cancelled request before catalog access', async () => {
+    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', isCurrent: () => true });
+    const { deps, market } = marketHarness();
+    const controller = new AbortController(); controller.abort();
+    expect(await deps.installMarket!({ pluginId: 'p1', releaseId: 'r1' }, controller.signal)).toMatchObject({ ok: false, errorCode: 'PERMISSION_DENIED' });
+    expect(market.detail).not.toHaveBeenCalled();
   });
 });

@@ -1,3 +1,4 @@
+import { getPluginMarketService } from '../plugin-market/service.js';
 import { activeOwnerScopeKey, getActiveAppSession, isAppSessionBoundaryPending } from '../appSessionState.js';
 import type { createBotCapabilityService } from '../maker-ipc/botCapabilityService.js';
 import { routineTools } from '../routines/service.js';
@@ -590,7 +591,7 @@ export function createDesktopMcpProviders(deps: DesktopMcpProvidersDeps): LiziMc
         },
       },
       botProfiles: {
-        create: async ({ callerSessionId, name, description, identitySource, welcomeMessage }) => {
+        create: async ({ callerSessionId, name, description, identitySource }) => {
           const dbClient = tryGetDbClient();
           if (!dbClient) {
             return { ok: false, errorCode: 'HOST_NOT_READY', message: 'localDb not ready' };
@@ -615,7 +616,7 @@ export function createDesktopMcpProviders(deps: DesktopMcpProvidersDeps): LiziMc
               name,
               description,
               identitySource,
-              welcomeMessage,
+              prepareInvitation: true,
             });
             return {
               ok: true,
@@ -772,6 +773,7 @@ export function createDesktopMcpProviders(deps: DesktopMcpProvidersDeps): LiziMc
       name: 'cindy',
       instance: createCindyGhostsMcpServer(
         getCindyGhostsMcpDeps(ctx, {
+          pluginMarket: getPluginMarketService(),
           getAppVersion: deps.getAppVersion,
           getLiveSessionGrantState: deps.getLiveSessionGrantState,
           createMediaDownloadContext: deps.createMediaDownloadContext,
