@@ -106,6 +106,28 @@ describe('writeDocsOutput beforeCommit boundary', () => {
     }
   });
 
+  // Codex P1 (round 17b): a crash / external kill after the staged notice must reclaim the
+  // inode exactly like the watchdog does, not just reject.
+  it.each(['exit', 'error'])('reclaims the staged inode when the writer terminates abnormally (%s)', async (kind) => {
+    const staging = path.join(root, '.cindy-docs-staging-u-out.txt');
+    const target = path.join(root, 'out.txt');
+    await fs.promises.writeFile(staging, 'private bytes', { mode: 0o600 });
+    await fs.promises.link(staging, target);
+    const st = await fs.promises.lstat(staging, { bigint: true });
+    child.result = null;
+    child.postMessage = function (this: FakeChild, message: unknown) {
+      this.posted.push(message);
+      queueMicrotask(() => {
+        this.emit('message', { type: 'staged', identity: { dev: st.dev, ino: st.ino }, stagingName: '.cindy-docs-staging-u-out.txt' });
+        queueMicrotask(() => (kind === 'exit' ? this.emit('exit', 137) : this.emit('error', new Error('spawn lost'))));
+      });
+    };
+    const outcome = await writeDocsOutput({ root, path: target, data: new Uint8Array([1]), overwrite: false }).then(() => 'resolved', (e: Error) => e.message);
+    expect(outcome).toMatch(kind === 'exit' ? /异常退出\(137\)/ : /spawn lost/);
+    await expect(fs.promises.access(staging)).rejects.toThrow();
+    await expect(fs.promises.access(target)).rejects.toThrow();
+  });
+
   // Codex P1 (round 17): for overwrite the announced inode becomes the user's replaced file
   // once renamed; timeout reclamation may only touch the staging name.
   it('never reclaims the target name of an overwrite request on timeout', async () => {

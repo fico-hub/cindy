@@ -231,10 +231,14 @@ export const writeDocsOutput: WriteDocsOutputFn = async (input) => {
       if (error) reject(error);
       else resolve(outcome);
     };
-    const timer = setTimeout(() => {
-      // The child is killed without running its fail-closed path. If it already reported
-      // the staged inode, reclaim it (staging + target names) before surfacing the error,
-      // so no private bytes survive without an anchor or lifecycle.
+    // Any termination that skips the child's own fail-closed path (watchdog kill, crash,
+    // external kill, spawn error) goes through here: if the child already reported the
+    // staged inode, reclaim it before surfacing the error, so no private bytes survive
+    // without an anchor or lifecycle.
+    let aborting = false;
+    const abort = (error: Error): void => {
+      if (settled || aborting) return;
+      aborting = true;
       try {
         child.kill();
       } catch {
@@ -248,8 +252,9 @@ export const writeDocsOutput: WriteDocsOutputFn = async (input) => {
       const reclaim = notice
         ? reclaimStagedInode(parentDir, names.filter(Boolean), notice.identity)
         : Promise.resolve();
-      void reclaim.finally(() => finish(new Error('文档落盘隔离进程超时')));
-    }, DOCS_OUTPUT_WRITER_TIMEOUT.ms);
+      void reclaim.finally(() => finish(error));
+    };
+    const timer = setTimeout(() => abort(new Error('文档落盘隔离进程超时')), DOCS_OUTPUT_WRITER_TIMEOUT.ms);
     timer.unref?.();
 
     child.on('message', (message) => {
@@ -291,10 +296,10 @@ export const writeDocsOutput: WriteDocsOutputFn = async (input) => {
         }
       }
     });
-    child.on('error', (error) => finish(error));
+    child.on('error', (error) => abort(error instanceof Error ? error : new Error(String(error))));
     child.on('exit', (code) => {
       if (!settled) {
-        finish(new Error(stderr.trim() || `文档落盘隔离进程异常退出(${String(code)})`));
+        abort(new Error(stderr.trim() || `文档落盘隔离进程异常退出(${String(code)})`));
       }
     });
   });
