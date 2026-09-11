@@ -26,4 +26,3 @@ describe('scheduler official Telegram tools', () => {
     expect(send).toHaveBeenCalledTimes(1);
   });
 });
-

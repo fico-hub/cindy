@@ -45,4 +45,3 @@ export function registerTelegramDeliveryTools(registry: SchedulerToolRegistry, d
     handler: async ({ idempotencyKey }) => invoke(bridge => bridge.receipt(idempotencyKey)),
   });
 }
-

@@ -149,4 +149,3 @@ describe('official Telegram delivery', () => {
     expect(h.send).not.toHaveBeenCalled();
   });
 });
-

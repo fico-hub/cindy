@@ -188,4 +188,3 @@ export function createTelegramDeliveryBridge(deps: {
 let bridge: TelegramDeliveryBridge | null = null;
 export function registerTelegramDeliveryBridge(value: TelegramDeliveryBridge | null): void { bridge = value; }
 export function getTelegramDeliveryBridge(): TelegramDeliveryBridge | null { return bridge; }
-
