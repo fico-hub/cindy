@@ -346,12 +346,26 @@ process.stdout.write(JSON.stringify({ code, outsideExists, movedValue }));
     await fs.promises.mkdir(safe);
     const pending = await request('report.bin', 'private-result', false, safe);
     const realLink = fs.promises.link.bind(fs.promises);
+    // Windows refuses to move a directory while a file inside it is open; the race then
+    // cannot be staged there and the plain publish must succeed instead.
+    let moved = false;
     const linkSpy = vi.spyOn(fs.promises, 'link').mockImplementation(async (from, to) => {
       await realLink(from, to);
-      await fs.promises.rename(safe, path.join(outside, 'safe'));
+      try {
+        await fs.promises.rename(safe, path.join(outside, 'safe'));
+        moved = true;
+      } catch (error) {
+        if (!['EPERM', 'EBUSY', 'EACCES', 'ENOTEMPTY'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
+      }
     });
     try {
-      await expect(runDocsOutputWriteForTest(pending, root)).rejects.toMatchObject({ code: 'PATH_NOT_ALLOWED' });
+      const outcome = runDocsOutputWriteForTest(pending, root);
+      if (moved || process.platform !== 'win32') {
+        await expect(outcome).rejects.toMatchObject({ code: 'PATH_NOT_ALLOWED' });
+      } else {
+        await expect(outcome).resolves.toMatchObject({ dev: expect.any(BigInt) });
+        return;
+      }
     } finally {
       linkSpy.mockRestore();
     }

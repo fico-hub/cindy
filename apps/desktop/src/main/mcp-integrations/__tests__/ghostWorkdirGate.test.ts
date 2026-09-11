@@ -2435,13 +2435,14 @@ describe('oversized ghost result Host storage', () => {
   it('keeps an Auto allow while the approving generation stays live', async () => {
     const deps = makeDeps('codex');
     sessionSnapshotMock.mockResolvedValue({ workingDir: WORKDIR, remoteHostId: null, permissionMode: 'auto', planModeEnabled: false });
-    let generation = 0;
+    const generation = 0;
     liveGrantStateMock.mockImplementation(() => {
       const captured = generation;
       return { permissionMode: 'auto', remoteHostId: null, isCurrent: () => generation === captured, reviewAction: reviewAllow };
     });
     writeDocsOutputMock.mockImplementation(async input => { await input.beforeCommit?.(); });
-    await expect(deps.saveLargeGhostResult!('result')).resolves.toMatch(/^tool-results\//);
+    const saved = await deps.saveLargeGhostResult!('result');
+    expect(path.dirname(saved)).toBe('tool-results'); // platform separator (Windows CI uses '\\')
     expect(reviewAllow).toHaveBeenCalledOnce();
   });
 

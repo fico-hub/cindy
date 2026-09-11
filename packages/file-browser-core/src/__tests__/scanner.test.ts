@@ -716,16 +716,29 @@ describe('verifyNewFile / unlinkIfSame', () => {
         const origSync = handle.sync.bind(handle);
         handle.sync = async () => {
           await origSync();
-          moved = true;
-          await fsp.rename(path.join(root, 'out'), path.join(outside, 'out'));
+          // Windows refuses to move a directory holding an open handle: then no race exists.
+          try {
+            await fsp.rename(path.join(root, 'out'), path.join(outside, 'out'));
+            moved = true;
+          } catch (error) {
+            if (!['EPERM', 'EBUSY', 'EACCES', 'ENOTEMPTY'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
+          }
         };
       }
       return handle;
     });
     try {
       await mkdir(path.join(root, 'out'));
-      await expect(writeNewFile(root, 'out/spill.json', '{"secret":1}')).rejects.toThrow(/escapes workdir/);
-      expect(moved).toBe(true);
+      const outcome = writeNewFile(root, 'out/spill.json', '{"secret":1}');
+      if (process.platform === 'win32') {
+        // Either the move happened (race reproduced) or the platform refused it (plain success).
+        const settled = await outcome.then(() => 'resolved', (e: Error) => e.message);
+        if (!moved) { expect(settled).toBe('resolved'); return; }
+        expect(settled).toMatch(/escapes workdir/);
+      } else {
+        await expect(outcome).rejects.toThrow(/escapes workdir/);
+        expect(moved).toBe(true);
+      }
       const escaped = await fsStat(path.join(outside, 'out', 'spill.json')).catch(() => null);
       if (escaped) expect(escaped.size).toBe(0);
       const leftovers = (await fsp.readdir(root)).filter(n => n.includes('.staging'));
