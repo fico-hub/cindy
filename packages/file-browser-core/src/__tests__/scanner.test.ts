@@ -885,9 +885,15 @@ describe('verifyNewFile / eraseIfSame', () => {
         const written = await writeNewFile(root, 'out/spill.json', '{"a":1}');
         const verified = await verifyNewFile(root, 'out/spill.json', sha('{"a":1}'), 7, holds);
         expect(verified).toMatchObject({ ino: written.ino, holdId: expect.stringMatching(/^[0-9a-f-]{36}$/) });
-        await fsp.rename(path.join(root, 'out'), path.join(outside, 'out'));
+        // Windows refuses to move a directory while a handle opened *through it* is held (the
+        // verify descriptor was opened by the target path): then no move-out race exists and
+        // the erase through the hold must still work in place.
+        const moved = await fsp.rename(path.join(root, 'out'), path.join(outside, 'out')).then(() => true, (err: NodeJS.ErrnoException) => {
+          if (process.platform === 'win32' && ['EPERM', 'EBUSY', 'EACCES'].includes(err?.code ?? '')) return false;
+          throw err;
+        });
         expect(await eraseIfSame(root, 'out/spill.json', verified.dev, verified.ino, holds, verified.holdId)).toEqual({ erased: true });
-        expect((await fsStat(path.join(outside, 'out', 'spill.json'))).size).toBe(0);
+        expect((await fsStat(path.join(moved ? outside : root, 'out', 'spill.json'))).size).toBe(0);
         // A refused verification retains nothing.
         await fsWriteFile(path.join(root, 'r.json'), '{"a":1}');
         await expect(verifyNewFile(root, 'r.json', sha('{"a":2}'), 7, holds)).rejects.toThrow(/content mismatch/);
