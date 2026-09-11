@@ -149,3 +149,24 @@ describe('official Telegram delivery', () => {
     expect(h.send).not.toHaveBeenCalled();
   });
 });
+
+it('preserves a sent receipt published between a stale read and its write', async () => {
+  const h = harness();
+  const bridge = createTelegramDeliveryBridge({ ...h, send: async () => null });
+  const row = await bridge.send(input);
+  const rename = fs.renameSync.bind(fs);
+  const spy = vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+    spy.mockRestore();
+    h.bridge.onResult(sent(row.opId, '999'));
+    rename(from, to);
+  });
+  try {
+    bridge.onResult({ opId: row.opId, ok: false, deliveryState: 'not_sent' });
+    expect(bridge.receipt(input.idempotencyKey)).toMatchObject({ state: 'sent', result: { messageId: '999' } });
+  } finally { spy.mockRestore(); }
+});
+it('keeps a confirmed plain presentation sent for an HTML request', async () => {
+  const h = harness();
+  h.send.mockImplementation(async p => ({ ...sent(p.opId), sentMessage: { ...sent(p.opId).sentMessage!, tier: 'plain' } }));
+  expect(await h.bridge.send(input)).toMatchObject({ state: 'sent', requestedTier: 'html', formatVerified: false, result: { sentMessage: { tier: 'plain' } } });
+});

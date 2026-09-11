@@ -81,7 +81,7 @@ function stateFromResult(row: TelegramDeliveryReceipt, result: MessageOpResultPa
   return result.ok && result.deliveryState === 'sent' && /^[1-9]\d*$/.test(result.messageId ?? '') &&
     result.sentMessage?.chatId === row.target.principalId &&
     typeof result.sentMessage.text === 'string' && Array.isArray(result.sentMessage.entities) &&
-    result.sentMessage.tier === row.requestedTier ? 'sent' : 'unknown';
+    ['html', 'plain'].includes(result.sentMessage.tier) ? 'sent' : 'unknown';
 }
 
 const hash = (value: string): string => createHash('sha256').update(value).digest('hex');
@@ -93,18 +93,40 @@ export function createTelegramDeliveryBridge(deps: {
   send(payload: MessageOpPayload): Promise<MessageOpResultPayload | null>;
 }): TelegramDeliveryBridge {
   const fileFor = (key: string): string => path.join(deps.directory, hash(key) + '.json');
-  function read(key: string): TelegramDeliveryReceipt | null {
-    try { return JSON.parse(fs.readFileSync(fileFor(key), 'utf8')) as TelegramDeliveryReceipt; }
+  function readFile(file: string): TelegramDeliveryReceipt | null {
+    try { return JSON.parse(fs.readFileSync(file, 'utf8')) as TelegramDeliveryReceipt; }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
       throw new Error('DELIVERY_JOURNAL_UNREADABLE');
     }
   }
-  function saveFile(destination: string, row: TelegramDeliveryReceipt): void {
+  function readReceipt(file: string): TelegramDeliveryReceipt | null {
+    const claim = readFile(file);
+    if (!claim || claim.state === 'sent') return claim; // legacy confirmed rows
+    const pending = readFile(file + '.result');
+    // Read confirmed evidence last. Writers never replace/delete this file, so
+    // stale result writers (including another process) cannot downgrade sent.
+    const confirmed = readFile(file + '.sent');
+    if (confirmed?.opId === claim.opId && confirmed.inputSha256 === claim.inputSha256 &&
+        stateFromResult(claim, confirmed.result ?? null) === 'sent') return confirmed;
+    return pending?.opId === claim.opId && pending.inputSha256 === claim.inputSha256 ? pending : claim;
+  }
+  function read(key: string): TelegramDeliveryReceipt | null { return readReceipt(fileFor(key)); }
+  function saveFile(file: string, row: TelegramDeliveryReceipt): void {
+    const destination = file + (row.state === 'sent' ? '.sent' : '.result');
     const tmp = destination + '.' + randomUUID() + '.tmp';
     try {
-      fs.writeFileSync(tmp, JSON.stringify(row), { mode: 0o600 });
-      fs.renameSync(tmp, destination);
+      const fd = fs.openSync(tmp, 'wx', 0o600);
+      try { fs.writeFileSync(fd, JSON.stringify(row)); fs.fsyncSync(fd); }
+      finally { fs.closeSync(fd); }
+      if (row.state === 'sent') {
+        // Atomic, no-clobber publication of a complete success record. No lock
+        // ownership can survive a process crash and block a late receipt.
+        try { fs.linkSync(tmp, destination); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+      } else {
+        fs.renameSync(tmp, destination);
+      }
     } finally { try { fs.unlinkSync(tmp); } catch { /* rename consumed tmp */ } }
   }
   return {
@@ -115,8 +137,8 @@ export function createTelegramDeliveryBridge(deps: {
       if (!match) return;
       const file = path.join(deps.directory, match[1]! + '.json');
       try {
-        const row = JSON.parse(fs.readFileSync(file, 'utf8')) as TelegramDeliveryReceipt;
-        if (row.opId !== result.opId || row.state === 'sent') return;
+        const row = readReceipt(file);
+        if (!row || row.opId !== result.opId || row.state === 'sent') return;
         row.state = stateFromResult(row, result);
         row.result = result;
         if (row.state === 'sent') delete row.code;
@@ -179,7 +201,7 @@ export function createTelegramDeliveryBridge(deps: {
       const reconciled = read(input.idempotencyKey);
       if (reconciled?.state === 'sent') return reconciled;
       saveFile(fileFor(input.idempotencyKey), row);
-      return row;
+      return read(input.idempotencyKey) ?? row;
     },
   };
 }

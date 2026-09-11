@@ -29,7 +29,7 @@ export function registerTelegramDeliveryTools(registry: SchedulerToolRegistry, d
   });
   registry.register({
     name: 'schedule_telegram_send', category: 'scheduler',
-    description: '经官方 Telegram IM 直接发送定时结果或用户明确授权的测试。先查 status，完整复用 target；按分段持久保存唯一 idempotencyKey 和原文/展示哈希。text 是最终 HTML 或纯文本。started/unknown 不得换 key 重发；sent 表示真实消息 ID 与绑定目标匹配；result.sentMessage 包含实际正文/entities，调用者应对照预期展示稿验真。formatVerified=false 表示 Host 未代替调用者比较格式。',
+    description: '经官方 Telegram IM 直接发送定时结果或用户明确授权的测试；发送遵循 Host 逐次授权策略，不因属于 scheduler 而免审。先查 status，完整复用 target；按分段持久保存唯一 idempotencyKey 和原文/展示哈希。text 是最终 HTML 或纯文本。started/unknown 不得换 key 重发；sent 表示真实消息 ID 与绑定目标匹配；result.sentMessage 包含实际正文/entities，调用者应对照预期展示稿验真。formatVerified=false 表示 Host 未代替调用者比较格式。',
     inputShape: {
       idempotencyKey: z.string().min(1).max(200), target,
       text: z.string().min(1).max(16000), tier: z.enum(['html', 'plain']),

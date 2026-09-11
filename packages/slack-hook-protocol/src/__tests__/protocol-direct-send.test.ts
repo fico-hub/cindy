@@ -27,3 +27,18 @@ describe('owner DM send wire compatibility', () => {
     expect(parseHookMessage(serializeHookMessage(makeMessageOpResult({ opId: 'op', ok: true, messageId: '1' })))).toMatchObject({ ok: true });
   });
 });
+
+describe('direct delivery metadata validation', () => {
+  it.each([null, 42, [], {}, { bindingId: '', epoch: 'e', expiresAt: 1 },
+    { bindingId: 'b', epoch: 42, expiresAt: 1 }, { bindingId: 'b', epoch: '', expiresAt: 1 },
+    ...['1', null, -1, 0, 1.5, Number.MAX_SAFE_INTEGER + 1, Infinity].map(expiresAt => ({ bindingId: 'b', epoch: 'e', expiresAt }))
+  ])('rejects malformed delivery %j', delivery => {
+    const frame = makeMessageOp({ opId: 'op', scope: { externalKey: 'telegram:dm:1:2:g1' }, action: { kind: 'send', text: 'hi' } });
+    Object.assign(frame.payload.action, { delivery });
+    expect(parseHookMessage(JSON.stringify(frame)).ok).toBe(false);
+  });
+  it('accepts a structurally valid old deadline; the executor decides expiry', () => {
+    const frame = makeMessageOp({ opId: 'op', scope: { externalKey: 'telegram:dm:1:2:g1' }, action: { kind: 'send', text: 'hi', delivery: { bindingId: 'b', epoch: 'e', expiresAt: 1 } } });
+    expect(parseHookMessage(JSON.stringify(frame)).ok).toBe(true);
+  });
+});

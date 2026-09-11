@@ -454,6 +454,14 @@ function validateMessageOp(p: Record<string, unknown>): string | null {
   const kind = action.kind;
   if (kind === 'send' || kind === 'edit') {
     if (typeof action.text !== 'string') return `msg.op.action.text must be a string`;
+    if (kind === 'send' && action.delivery !== undefined) {
+      const delivery = action.delivery;
+      if (!isPlainObject(delivery) || !isNonEmptyString(delivery.bindingId) ||
+          !isNonEmptyString(delivery.epoch) || !Number.isSafeInteger(delivery.expiresAt) ||
+          Number(delivery.expiresAt) <= 0) {
+        return 'msg.op.action.delivery requires bindingId, epoch and a positive safe integer expiresAt';
+      }
+    }
     if (kind === 'edit' && !isNonEmptyString(action.messageId)) {
       return 'msg.op.action.messageId must be a non-empty string';
     }
