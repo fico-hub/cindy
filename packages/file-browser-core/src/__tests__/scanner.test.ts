@@ -860,7 +860,7 @@ describe('verifyNewFile / eraseIfSame', () => {
         const written = await writeNewFile(root, 'out/spill.json', '{"a":1}');
         expect(written.pendingName).toMatch(/^\.spill\.json\.[0-9a-f-]{36}\.pending$/);
         const markerAbs = path.join(root, written.pendingName);
-        expect((await fsStat(markerAbs)).ino.toString()).toBe(written.ino);
+        expect((await fsp.stat(markerAbs, { bigint: true })).ino.toString()).toBe(written.ino); // bigint: Windows file ids are 64-bit
         expect((await fsStat(path.join(root, 'out', 'spill.json'))).nlink).toBe(2);
         // Lost-response recovery sees the pending state and learns the marker name.
         await expect(verifyNewFile(root, 'out/spill.json', sha('{"a":1}'), 7)).resolves.toMatchObject({ ino: written.ino, pendingName: written.pendingName });

@@ -665,8 +665,11 @@ process.stdout.write(JSON.stringify({ code, outsideExists, movedValue }));
     await fs.promises.mkdir(safe);
     const pending = await request('report.bin', 'private-result', false, safe);
     const realLink = fs.promises.link.bind(fs.promises);
-    // Windows refuses to move a directory while a file inside it is open; the race then
-    // cannot be staged there and the plain publish must succeed instead.
+    // Some Windows versions refuse to move a directory while a file inside it is open
+    // (the published hard link shares the open staging inode); the race then cannot be
+    // staged there and the plain publish must succeed instead. Whether the move happened
+    // is only known once the link mock has run, so the expectation is chosen after the
+    // outcome settled — never from a flag read synchronously before the write started.
     let moved = false;
     const linkSpy = vi.spyOn(fs.promises, 'link').mockImplementation(async (from, to) => {
       await realLink(from, to);
@@ -677,17 +680,21 @@ process.stdout.write(JSON.stringify({ code, outsideExists, movedValue }));
         if (!['EPERM', 'EBUSY', 'EACCES', 'ENOTEMPTY'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
       }
     });
+    let settled: { ok: true; value: unknown } | { ok: false; error: unknown };
     try {
-      const outcome = runDocsOutputWriteForTest(pending, root);
-      if (moved || process.platform !== 'win32') {
-        await expect(outcome).rejects.toMatchObject({ code: 'PATH_NOT_ALLOWED' });
-      } else {
-        await expect(outcome).resolves.toMatchObject({ dev: expect.any(BigInt) });
-        return;
-      }
+      settled = await runDocsOutputWriteForTest(pending, root).then(
+        (value) => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
     } finally {
       linkSpy.mockRestore();
     }
+    if (!moved) {
+      expect(process.platform).toBe('win32');
+      expect(settled).toMatchObject({ ok: true, value: { dev: expect.any(BigInt) } });
+      return;
+    }
+    expect(settled).toMatchObject({ ok: false, error: { code: 'PATH_NOT_ALLOWED' } });
     const escaped = await fs.promises.stat(path.join(outside, 'safe', 'report.bin')).catch(() => null);
     if (escaped) expect(escaped.size).toBe(0);
     const leftovers = (await fs.promises.readdir(path.join(outside, 'safe'))).filter((n) => n.includes('staging'));
