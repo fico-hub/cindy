@@ -30,6 +30,9 @@ const ROUTE_CHANGED_CHANNEL = 'maker:claude-session-route-changed';
 const UNSUPPORTED_RETRY_AFTER_MS = 15 * 60_000;
 
 const routeByKey = new Map<string, RemoteClaudeSessionRoute | null>();
+// 与 remoteDeviceUsageMirror 的 entry.revision 同口径:每次 applyRoute 递增;warm-start
+// GET 发起时捕获,返回时 revision 已变(期间来过 push)则丢弃迟到结果,不覆盖更新的值。
+const revisionByKey = new Map<string, number>();
 const unsupportedUntilByDevice = new Map<string, number>();
 const listenersByKey = new Map<string, Set<(r: RemoteClaudeSessionRoute | null) => void>>();
 let cacheOwner = getDataOwnerGeneration();
@@ -46,10 +49,12 @@ function ensureCacheOwnerCurrent(): void {
   if (isDataOwnerGenerationCurrent(cacheOwner)) return;
   cacheOwner = getDataOwnerGeneration();
   routeByKey.clear();
+  revisionByKey.clear();
   unsupportedUntilByDevice.clear();
 }
 
 function applyRoute(key: string, next: RemoteClaudeSessionRoute | null): void {
+  revisionByKey.set(key, (revisionByKey.get(key) ?? 0) + 1);
   routeByKey.set(key, next);
   const listeners = listenersByKey.get(key);
   if (!listeners) return;
@@ -59,6 +64,7 @@ function applyRoute(key: string, next: RemoteClaudeSessionRoute | null): void {
 /** 供单测重置 module 级缓存。 */
 export function resetRemoteClaudeSessionRouteCacheForTest(): void {
   routeByKey.clear();
+  revisionByKey.clear();
   unsupportedUntilByDevice.clear();
   listenersByKey.clear();
   cacheOwner = getDataOwnerGeneration();
@@ -69,12 +75,17 @@ function fetchRoute(deviceId: string, sessionId: string): void {
   const until = unsupportedUntilByDevice.get(deviceId);
   if (until !== undefined && Date.now() < until) return;
   const requestOwner = getDataOwnerGeneration();
+  const key = cacheKey(deviceId, sessionId);
+  const requestRevision = revisionByKey.get(key) ?? 0;
   void window.electronAPI.deviceLink
     .invoke(deviceId, ROUTE_GET_CHANNEL, [sessionId])
     .then((persisted) => {
       if (!isDataOwnerGenerationCurrent(requestOwner)) return;
       ensureCacheOwnerCurrent();
-      applyRoute(cacheKey(deviceId, sessionId), isRoute(persisted) ? persisted : null);
+      // A push (or a newer read) landed while this GET was in flight: it is newer than
+      // whatever the GET observed, so the late result must not overwrite it.
+      if ((revisionByKey.get(key) ?? 0) !== requestRevision) return;
+      applyRoute(key, isRoute(persisted) ? persisted : null);
     })
     .catch((err: unknown) => {
       if (!isDataOwnerGenerationCurrent(requestOwner)) return;

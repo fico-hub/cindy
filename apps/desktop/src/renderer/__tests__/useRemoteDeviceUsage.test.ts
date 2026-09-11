@@ -186,6 +186,32 @@ describe('useRemoteClaudeSessionRoute', () => {
     await flushMicrotasks();
     expect(result.current).toBe('gateway');
   });
+
+  // MagicLizi P1 (#3789): a warm-start GET that resolves after a newer push must not win.
+  it.each([null, 'gateway'])('迟到的 warm-start GET(%s)不覆盖在途期间到达的 push', async (late) => {
+    let resolveGet: (v: unknown) => void = () => {};
+    mocks.invoke.mockImplementation(() => new Promise((resolve) => { resolveGet = resolve; }));
+    const { result } = renderHook(() => useRemoteClaudeSessionRoute('device-1', 'sess-3'));
+    await flushMicrotasks();
+    expect(result.current).toBeNull();
+    act(() => emitPush({
+      deviceId: 'device-1',
+      channel: 'maker:claude-session-route-changed',
+      payload: { sessionId: 'sess-3', route: 'subscription' },
+    }));
+    expect(result.current).toBe('subscription');
+    await act(async () => { resolveGet(late); await flushMicrotasks(); });
+    expect(result.current).toBe('subscription');
+  });
+
+  it('无 push 时 warm-start GET 正常生效(revision 未变)', async () => {
+    let resolveGet: (v: unknown) => void = () => {};
+    mocks.invoke.mockImplementation(() => new Promise((resolve) => { resolveGet = resolve; }));
+    const { result } = renderHook(() => useRemoteClaudeSessionRoute('device-1', 'sess-4'));
+    await flushMicrotasks();
+    await act(async () => { resolveGet('gateway'); await flushMicrotasks(); });
+    expect(result.current).toBe('gateway');
+  });
 });
 
 
