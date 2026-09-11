@@ -675,6 +675,10 @@ export async function writeNewFile(
         throw new Error(`staging link was replaced or moved: ${sub}`);
       }
       await fs.unlink(stagingAbs);
+      // Close the lstat→unlink gap after the fact: our link count must have dropped by one,
+      // otherwise the name was swapped in between and our link still exists elsewhere.
+      const after = await handle.stat({ bigint: true });
+      if (after.nlink !== own.nlink - 1n) throw new Error(`staging link was replaced or moved: ${sub}`);
     }
   } catch (err) {
     // Fail closed without leaving content anywhere: zero through the handle (follows

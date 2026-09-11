@@ -412,6 +412,55 @@ process.stdout.write(JSON.stringify({ code, outsideExists, movedValue }));
     }
   });
 
+  // Codex P1 (round 21): the swap can also land between lstat and unlink; the retained
+  // handle's link count exposes it afterwards and the publish is withdrawn.
+  it('detects a staging swap that lands between lstat and unlink and withdraws', async () => {
+    const realUnlink = fs.promises.unlink.bind(fs.promises);
+    let swapped = '';
+    const unlinkSpy = vi.spyOn(fs.promises, 'unlink').mockImplementation(async (target) => {
+      const p = String(target);
+      if (p.includes('.cindy-docs-staging-') && !swapped) {
+        swapped = p;
+        await fs.promises.rename(p, path.join(root, 'stolen-copy'));
+        await fs.promises.writeFile(p, 'unrelated user data');
+      }
+      return realUnlink(target);
+    });
+    try {
+      await expect(runDocsOutputWriteForTest(await request('report.bin', 'private-result', false), root)).rejects.toMatchObject({ code: 'PATH_NOT_ALLOWED' });
+      expect(swapped).not.toBe('');
+      expect((await fs.promises.stat(path.join(root, 'stolen-copy'))).size).toBe(0);
+      await expect(fs.promises.stat(path.join(root, 'report.bin'))).rejects.toThrow();
+    } finally {
+      unlinkSpy.mockRestore();
+    }
+  });
+
+  // Codex P1 (round 21): an abort that lands while the overwrite rename is in flight must
+  // wait for its outcome; a successful rename makes the inode the user's only copy.
+  it('abortInFlightWrite waits for a pending overwrite rename and never zeroes a committed replacement', async () => {
+    await runDocsOutputWriteForTest(await request('report.bin', 'old', false), root);
+    const realRename = fs.promises.rename.bind(fs.promises);
+    let releaseRename: () => void = () => {};
+    const gate = new Promise<void>((r) => { releaseRename = r; });
+    const renameSpy = vi.spyOn(fs.promises, 'rename').mockImplementation(async (from, to) => {
+      await gate; // rename outcome unknown until released
+      return realRename(from, to);
+    });
+    try {
+      const pending = runDocsOutputWriteForTest(await request('report.bin', 'new', true), root);
+      await new Promise((r) => setTimeout(r, 30));
+      const abort = abortInFlightWrite(); // arrives while the rename is in flight
+      await new Promise((r) => setTimeout(r, 10));
+      releaseRename();
+      expect(await abort).toEqual({ cleaned: false });
+      await pending.catch(() => undefined);
+      expect(await fs.promises.readFile(path.join(root, 'report.bin'), 'utf8')).toBe('new');
+    } finally {
+      renameSpy.mockRestore();
+    }
+  });
+
   // Codex P1 (round 17): after an overwrite rename the old inode is gone; a later failure
   // must not destroy the replacement, which is now the user's only copy.
   it('keeps the overwrite replacement when a post-rename step fails', async () => {

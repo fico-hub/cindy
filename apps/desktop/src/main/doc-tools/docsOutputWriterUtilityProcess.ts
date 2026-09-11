@@ -187,7 +187,13 @@ async function syncDirectory(dirPath: string): Promise<void> {
   }
 }
 
-/** Remove a name only if it still carries our inode; 'foreign' = something else sits there now. */
+/**
+ * Remove a name only if it still carries our inode; 'foreign' = something else sits (or sat)
+ * there. POSIX has no unlink-by-inode, so the lstat→unlink gap is closed *after* the fact
+ * through the retained handle: our inode's link count must have dropped by exactly one. If
+ * it did not, the name had been swapped in between (the unlink hit someone else's entry and
+ * our link still exists elsewhere) — reported as 'foreign' so the caller withdraws and zeroes.
+ */
 async function removeOwnName(
   name: string,
   handle: fs.promises.FileHandle,
@@ -204,6 +210,8 @@ async function removeOwnName(
       return 'foreign';
     }
     await fs.promises.unlink(name);
+    const after = await handle.stat({ bigint: true });
+    if (after.nlink !== own.nlink - 1n) return 'foreign';
     return 'removed';
   } catch {
     return 'error';
@@ -226,6 +234,10 @@ async function unlinkIfOurs(target: string, handle: fs.promises.FileHandle): Pro
     }
     if (current.isFile() && !current.isSymbolicLink() && current.dev === own.dev && current.ino === own.ino) {
       await fs.promises.unlink(target);
+      // Same post-unlink link-count check as removeOwnName: a swap in the gap means our
+      // link is still out there, so the name is not known to be clear.
+      const after = await handle.stat({ bigint: true });
+      if (after.nlink !== own.nlink - 1n) return false;
     }
     return true;
   } catch {
@@ -304,6 +316,8 @@ let inFlight: {
   target: string;
   published: () => boolean;
   committedOverwrite: () => boolean;
+  /** Settles when an in-progress overwrite rename has a known outcome (either way). */
+  commitPending: () => Promise<void> | null;
 } | null = null;
 let abortRequested = false;
 
@@ -312,6 +326,11 @@ export async function abortInFlightWrite(): Promise<{ cleaned: boolean }> {
   abortRequested = true;
   const current = inFlight;
   if (!current) return { cleaned: false };
+  // An overwrite rename may be in flight: its outcome decides whether this inode is now the
+  // user's only copy. Never zero it while that outcome is unknown — wait for the rename to
+  // settle (success or failure) and then re-read the commit flag.
+  const pending = current.commitPending();
+  if (pending) await pending;
   if (current.committedOverwrite()) return { cleaned: false }; // the replacement is the user's file
   // Only a confirmed erasure + name removal counts; any I/O failure reports false so the
   // parent runs its own reclaim instead of trusting a partial cleanup.
@@ -351,7 +370,15 @@ async function writeWithinVerifiedParent(
   };
   try {
     handle = await openExclusive(staging);
-    inFlight = { handle, staging, target, published: () => published, committedOverwrite: () => committedOverwrite };
+    let commitPending: Promise<void> | null = null;
+    inFlight = {
+      handle,
+      staging,
+      target,
+      published: () => published,
+      committedOverwrite: () => committedOverwrite,
+      commitPending: () => commitPending,
+    };
     // Announce the inode *before* the first private byte is written: if writeFile/sync
     // hang past the parent's watchdog and this process is killed, the parent can still
     // reclaim exactly this inode.
@@ -362,8 +389,17 @@ async function writeWithinVerifiedParent(
     assertNotAborted();
     await verifyParent(request, workingDir);
     if (request.overwrite) {
-      await replaceFile(request, workingDir, staging, target);
-      committedOverwrite = true;
+      // The commit flag is set inside the same continuation the abort path awaits, so the
+      // abort can never observe "not committed" while the rename has actually succeeded.
+      commitPending = replaceFile(request, workingDir, staging, target).then(
+        () => { committedOverwrite = true; },
+        (error: unknown) => { throw error; },
+      );
+      try {
+        await commitPending;
+      } finally {
+        commitPending = null;
+      }
     } else {
       await publishExclusive(staging, target);
     }

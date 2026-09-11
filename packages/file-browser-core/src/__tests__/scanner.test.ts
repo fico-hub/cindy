@@ -673,6 +673,33 @@ describe('verifyNewFile / unlinkIfSame', () => {
     }
   });
 
+  // Codex P1 (round 21): a swap landing between lstat and unlink is caught by the link count.
+  it('writeNewFile detects a staging swap between lstat and unlink and withdraws', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-staging-swap-'));
+    const realRoot = await fsp.realpath(root);
+    const realUnlink = fsp.unlink.bind(fsp);
+    let swapped = '';
+    const spy = vi.spyOn(fsp, 'unlink').mockImplementation(async (target) => {
+      const p = String(target);
+      if (p.includes('.staging') && !swapped) {
+        swapped = p;
+        await fsp.rename(p, path.join(realRoot, 'stolen-copy'));
+        await fsWriteFile(p, 'unrelated user data');
+      }
+      return realUnlink(target);
+    });
+    try {
+      await mkdir(path.join(root, 'out'));
+      await expect(writeNewFile(root, 'out/spill.json', '{"secret":1}')).rejects.toThrow(/replaced or moved/);
+      expect(swapped).not.toBe('');
+      expect((await fsStat(path.join(realRoot, 'stolen-copy'))).size).toBe(0);
+      await expect(fsStat(path.join(root, 'out', 'spill.json'))).rejects.toThrow(/ENOENT/);
+    } finally {
+      spy.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   // Codex P1 (round 17): an unreadable marker directory is not "no marker".
   it('verifyNewFile fails closed when the completion-marker scan cannot be performed', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-verify-scanfail-'));
