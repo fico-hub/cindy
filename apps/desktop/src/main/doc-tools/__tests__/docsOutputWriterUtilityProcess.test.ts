@@ -621,6 +621,25 @@ process.stdout.write(JSON.stringify({ code, outsideExists, movedValue }));
     }
   });
 
+  // Codex P1 (round 28): the staging inode is created at the session root (not inside the
+  // output directory) so the parent can still reach it if the output directory is moved out.
+  it('stages at the session root even for a nested output directory', async () => {
+    const realOpen = fs.promises.open.bind(fs.promises);
+    let stagingPath = '';
+    const openSpy = vi.spyOn(fs.promises, 'open').mockImplementation(async (...args: Parameters<typeof fs.promises.open>) => {
+      if (String(args[0]).includes('.cindy-docs-staging-')) stagingPath = String(args[0]);
+      return realOpen(...args);
+    });
+    try {
+      await runDocsOutputWriteForTest(await missingParentRequest('report.bin', 'nested'), root);
+      expect(path.dirname(stagingPath)).toBe(await fs.promises.realpath(root));
+      expect(await fs.promises.readFile(path.join(root, 'nested', 'reports', 'report.bin'), 'utf8')).toBe('nested');
+      expect((await fs.promises.readdir(root)).filter((n) => n.includes('staging'))).toEqual([]);
+    } finally {
+      openSpy.mockRestore();
+    }
+  });
+
   it('returns the identity of the inode it published, read through its own handle', async () => {
     const identity = await runDocsOutputWriteForTest(await request('report.bin', 'payload', false), root);
     const st = await fs.promises.lstat(path.join(root, 'report.bin'), { bigint: true });

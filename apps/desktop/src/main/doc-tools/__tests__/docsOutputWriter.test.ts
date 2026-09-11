@@ -188,6 +188,36 @@ describe('writeDocsOutput beforeCommit boundary', () => {
     }
   });
 
+  // Codex P1 (round 28): the staging name is anchored at the session root, so a crash after
+  // the output directory was moved out of the workdir can still be reclaimed from the parent.
+  it('reclaims through the root-anchored staging name when the output directory was moved out before a crash', async () => {
+    const outside = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cindy-docs-writer-outside-'));
+    try {
+      await fs.promises.mkdir(path.join(root, 'out'));
+      const staging = path.join(root, '.cindy-docs-staging-u-out.txt');
+      const target = path.join(root, 'out', 'out.txt');
+      await fs.promises.writeFile(staging, 'private bytes', { mode: 0o600 });
+      await fs.promises.link(staging, target);
+      const st = await fs.promises.lstat(staging, { bigint: true });
+      child.result = null;
+      child.postMessage = function (this: FakeChild, message: unknown) {
+        this.posted.push(message);
+        queueMicrotask(() => {
+          this.emit('message', { type: 'staged', identity: { dev: st.dev, ino: st.ino }, stagingName: '.cindy-docs-staging-u-out.txt' });
+          // A workdir process moves the output directory out, then the child dies.
+          void fs.promises.rename(path.join(root, 'out'), path.join(outside, 'out')).then(() => this.emit('exit', 137));
+        });
+      };
+      const outcome = await writeDocsOutput({ root, path: target, data: new Uint8Array([1]), overwrite: false }).then(() => 'resolved', (e: Error) => e.message);
+      expect(outcome).toMatch(/异常退出\(137\)/);
+      // The moved target shares the inode with the root-anchored staging name: zeroed.
+      expect((await fs.promises.stat(path.join(outside, 'out', 'out.txt'))).size).toBe(0);
+      expect((await fs.promises.stat(staging)).size).toBe(0);
+    } finally {
+      await fs.promises.rm(outside, { recursive: true, force: true });
+    }
+  });
+
   // Codex P1 (round 17b): a crash / external kill after the staged notice must reclaim the
   // inode exactly like the watchdog does, not just reject.
   it.each(['exit', 'error'])('reclaims the staged inode when the writer terminates abnormally (%s)', async (kind) => {

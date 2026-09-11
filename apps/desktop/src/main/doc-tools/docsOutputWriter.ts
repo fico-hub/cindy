@@ -74,9 +74,8 @@ function parseStagedNotice(value: unknown): DocsOutputStagedNotice | null {
  * unrelated entry placed there in between (no unlink-by-inode exists). A zero-byte name is
  * the conservative residue; the child's own cwd-bound cleanup is what removes names.
  */
-async function reclaimStagedInode(parentDir: string, names: string[], identity: { dev: bigint; ino: bigint }): Promise<void> {
-  for (const name of names) {
-    const candidate = path.join(parentDir, name);
+async function reclaimStagedInode(candidates: string[], identity: { dev: bigint; ino: bigint }): Promise<void> {
+  for (const candidate of candidates) {
     try {
       const handle = await fs.open(candidate, fs.constants.O_RDWR | ((fs.constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0));
       try {
@@ -240,11 +239,15 @@ export const writeDocsOutput: WriteDocsOutputFn = async (input) => {
     let childConfirmedCleanup: ((cleaned: boolean) => void) | null = null;
     const reclaimByPath = (): Promise<void> => {
       const notice = staged;
-      const parentDir = path.join(realRoot, parentRelativePath);
+      if (!notice) return Promise.resolve();
+      // The staging name is anchored at the session root (which workdir content cannot
+      // relocate), so it stays reachable even after the output directory was moved out;
+      // zeroing the inode there also empties the published target, which shares it.
       // overwrite: after the rename the announced inode *is* the user's replaced file, so
       // only the staging name may be reclaimed; the target name is never touched.
-      const names = request.overwrite ? [notice?.stagingName ?? ''] : [notice?.stagingName ?? '', request.targetName];
-      return notice ? reclaimStagedInode(parentDir, names.filter(Boolean), notice.identity) : Promise.resolve();
+      const candidates = [path.join(realRoot, notice.stagingName)];
+      if (!request.overwrite) candidates.push(path.join(realRoot, parentRelativePath, request.targetName));
+      return reclaimStagedInode(candidates, notice.identity);
     };
     const abort = (error: Error): void => {
       if (settled || aborting) return;

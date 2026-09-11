@@ -2426,8 +2426,47 @@ describe('oversized ghost result Host storage', () => {
       await input.beforeCommit?.();
       bytesHandedOver = true;
     });
-    await expect(deps.saveLargeGhostResult!('result')).rejects.toThrow(/read-only or in plan mode/);
+    // The old allow does not carry over; the new Auto generation reviews the target itself
+    // at the boundary (round 28) and, allowing it, the write proceeds on that fresh review.
+    await expect(deps.saveLargeGhostResult!('result')).resolves.toMatch(/^tool-results/);
+    expect(reviewAllow).toHaveBeenCalledTimes(2);
+    expect(bytesHandedOver).toBe(true);
+  });
+
+  // Codex P1 (round 28): a Full Access clearance never stands in for an Auto review. When
+  // the session is downgraded to Auto while the writer starts, the current Auto generation
+  // must review the target itself at the final boundary.
+  it('requires a fresh Auto review at the boundary when Full Access was downgraded to Auto meanwhile', async () => {
+    const deps = makeDeps('codex');
+    sessionSnapshotMock.mockResolvedValue({ workingDir: WORKDIR, remoteHostId: null, permissionMode: 'bypassPermissions', planModeEnabled: false });
+    let mode: 'bypassPermissions' | 'auto' = 'bypassPermissions';
+    liveGrantStateMock.mockImplementation(() => ({ permissionMode: mode, remoteHostId: null, isCurrent: () => true, reviewAction: reviewAllow }));
+    const seen: string[] = [];
+    writeDocsOutputMock.mockImplementation(async input => {
+      mode = 'auto'; // downgraded while the utility process was starting
+      await input.beforeCommit?.();
+      seen.push('write');
+    });
+    const saved = await deps.saveLargeGhostResult!('result');
     expect(reviewAllow).toHaveBeenCalledOnce();
+    expect(reviewAllow).toHaveBeenCalledWith(expect.objectContaining({ kind: 'file-write', path: path.join(WORKDIR, saved) }));
+    expect(seen).toEqual(['write']);
+  });
+
+  it('withholds the write when the fresh Auto review after a downgrade blocks it', async () => {
+    const deps = makeDeps('codex');
+    sessionSnapshotMock.mockResolvedValue({ workingDir: WORKDIR, remoteHostId: null, permissionMode: 'bypassPermissions', planModeEnabled: false });
+    let mode: 'bypassPermissions' | 'auto' = 'bypassPermissions';
+    const reviewBlock = vi.fn(async () => ({ verdict: 'block' as const, reason: 'no spills' }));
+    liveGrantStateMock.mockImplementation(() => ({ permissionMode: mode, remoteHostId: null, isCurrent: () => true, reviewAction: reviewBlock }));
+    let bytesHandedOver = false;
+    writeDocsOutputMock.mockImplementation(async input => {
+      mode = 'auto';
+      await input.beforeCommit?.();
+      bytesHandedOver = true;
+    });
+    await expect(deps.saveLargeGhostResult!('result')).rejects.toThrow('no spills');
+    expect(reviewBlock).toHaveBeenCalledOnce();
     expect(bytesHandedOver).toBe(false);
     expect(ledgerAddRefMock).not.toHaveBeenCalled();
   });

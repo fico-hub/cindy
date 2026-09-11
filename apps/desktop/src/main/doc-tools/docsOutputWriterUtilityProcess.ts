@@ -371,7 +371,11 @@ async function writeWithinVerifiedParent(
 ): Promise<DocsOutputWrittenIdentity> {
   const target = outputPath(request.targetName);
   const stagingName = `.cindy-docs-staging-${randomUUID()}-${request.targetName}`;
-  const staging = outputPath(stagingName);
+  // The staging inode lives at the *session root*, not in the output directory: content
+  // inside the workdir cannot relocate the root, so the root-anchored staging name stays
+  // reachable to the parent (timeout / crash reclaim) even when the output directory has
+  // been moved out — the published target shares the inode, so zeroing it there suffices.
+  const staging = path.join(request.expectedRoot.realPath, stagingName);
   let handle: fs.promises.FileHandle | undefined;
   let published = false;
   let inFlightCleanup: (() => Promise<boolean>) | null = null;

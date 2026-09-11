@@ -408,34 +408,18 @@ async function resolveLargeResultSpillTarget(
   // that produced it. A later revalidate() gets a fresh snapshot whose own isCurrent() only
   // proves the *new* generation is Auto — it must also prove the approving one is still it.
   let approvedIsCurrent: (() => boolean) | null | undefined;
-  const revalidate = async (reviewTarget?: string): Promise<void> => {
-    const live = getLiveSessionGrantState(sessionId, sessionInstanceId);
-    if (!live) throw new Error('Tool result storage requires the live session');
-    if ((snapshot.remoteHostId ?? null) !== live.remoteHostId || live.remoteHostId !== remoteHostId) {
-      throw new Error('Tool result storage requires an authoritative session workdir');
-    }
-    // 计划模式同样 runtime-first:isCurrent 已含运行时 Plan 状态与权限/Plan 代次校验,
-    // 有它就必须为 true;旧装配方没有 isCurrent 时回退持久化行的 planModeEnabled。
-    if (live.isCurrent && live.isCurrent() !== true) throw readOnlyError();
-    const planModeEnabled = live.isCurrent ? false : snapshot.planModeEnabled;
-    const verdict = workdirWriteVerdict(live.permissionMode ?? '', planModeEnabled);
-    if (verdict === 'allow') return;
-    // Auto:workdir 写入交给当前会话的统一审阅器(与 fsSlot 的 workdir 写同口径),
-    // 没有审阅器、审阅异常、要求确认或拒绝都 fail closed —— 工具结果外置是宿主
-    // 内部动作,不弹确认卡。写入前审阅一次(reviewTarget),写后复验只查活性/归属。
-    if (verdict !== 'review' || !live.reviewAction) throw readOnlyError();
-    if (reviewTarget === undefined) {
-      // Post-approval boundaries: the allow only carries over if the approving
-      // generation is the live one (switch-away-and-back mints a new generation).
-      if (approvedIsCurrent && approvedIsCurrent() !== true) throw readOnlyError();
-      return;
-    }
+  // The exact target this write was cleared for. Remembered so that a later boundary
+  // (beforeCommit / beforeSend) can obtain a *fresh* Auto review if the session was
+  // downgraded from Full Access to Auto meanwhile — a Full Access allow never carries
+  // over into Auto, and Auto has to see the target itself.
+  let clearedTarget: string | undefined;
+  const reviewNow = async (live: NonNullable<ReturnType<NonNullable<typeof getLiveSessionGrantState>>>, target: string): Promise<void> => {
     let decision: AutoReviewDecision;
     try {
-      decision = await live.reviewAction({
+      decision = await live.reviewAction!({
         kind: 'file-write',
-        path: reviewTarget,
-        resolvedPath: reviewTarget,
+        path: target,
+        resolvedPath: target,
         resolvedWritableRoots: [workingDir],
       });
     } catch {
@@ -452,6 +436,41 @@ async function resolveLargeResultSpillTarget(
     // Bind the allow to the snapshot that produced it; a legacy provider without
     // isCurrent has no generation to bind (null keeps later checks fail-closed-neutral).
     approvedIsCurrent = live.isCurrent ?? null;
+  };
+  const revalidate = async (reviewTarget?: string): Promise<void> => {
+    const live = getLiveSessionGrantState(sessionId, sessionInstanceId);
+    if (!live) throw new Error('Tool result storage requires the live session');
+    if ((snapshot.remoteHostId ?? null) !== live.remoteHostId || live.remoteHostId !== remoteHostId) {
+      throw new Error('Tool result storage requires an authoritative session workdir');
+    }
+    // 计划模式同样 runtime-first:isCurrent 已含运行时 Plan 状态与权限/Plan 代次校验,
+    // 有它就必须为 true;旧装配方没有 isCurrent 时回退持久化行的 planModeEnabled。
+    if (live.isCurrent && live.isCurrent() !== true) throw readOnlyError();
+    const planModeEnabled = live.isCurrent ? false : snapshot.planModeEnabled;
+    const verdict = workdirWriteVerdict(live.permissionMode ?? '', planModeEnabled);
+    if (reviewTarget !== undefined) clearedTarget = reviewTarget;
+    if (verdict === 'allow') {
+      // Full Access: no reviewer involved. Any earlier Auto approval is irrelevant here,
+      // and (see below) a Full Access clearance never stands in for an Auto review later.
+      approvedIsCurrent = undefined;
+      return;
+    }
+    // Auto:workdir 写入交给当前会话的统一审阅器(与 fsSlot 的 workdir 写同口径),
+    // 没有审阅器、审阅异常、要求确认或拒绝都 fail closed —— 工具结果外置是宿主
+    // 内部动作,不弹确认卡。写入前审阅一次(reviewTarget),写后复验只查活性/归属。
+    if (verdict !== 'review' || !live.reviewAction) throw readOnlyError();
+    if (reviewTarget === undefined) {
+      // Post-clearance boundaries under Auto. The write may proceed only on an Auto
+      // approval whose generation is still live. No such approval (never reviewed under
+      // Auto — e.g. cleared under Full Access and downgraded meanwhile — or the approving
+      // generation is gone) means the *current* Auto generation must review the target
+      // now; before any target is known there is nothing to clear and nothing to review.
+      if (approvedIsCurrent === null || (approvedIsCurrent && approvedIsCurrent() === true)) return;
+      if (clearedTarget === undefined) return;
+      await reviewNow(live, clearedTarget);
+      return;
+    }
+    await reviewNow(live, reviewTarget);
   };
   // The snapshot read above is an async boundary; check the live state once more before returning.
   await revalidate();
