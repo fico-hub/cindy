@@ -461,8 +461,8 @@ describe('writeNewFile', () => {
       const result = await writeNewFile(root, 'out.json', '{"ok":true}');
       // bytes fsync → link → parent-directory fsync (round 11) → root fsync after staging unlink (round 12)
       expect(order).toEqual(['sync', 'link', 'sync', 'sync']);
-      const st = await fsp.lstat(path.join(root, 'out.json'));
-      expect(result).toMatchObject({ size: 11, dev: String(st.dev), ino: String(st.ino) });
+      const st = await fsp.lstat(path.join(root, 'out.json'), { bigint: true }); // 64-bit file ids: never compare through a lossy number
+      expect(result).toMatchObject({ size: 11, dev: st.dev.toString(), ino: st.ino.toString() });
     } finally {
       openSpy.mockRestore();
       linkSpy2.mockRestore();
