@@ -14,10 +14,11 @@ class FakeChild extends EventEmitter {
   readonly posted: unknown[] = [];
   killed = false;
   stderr = null;
+  result: unknown = { ok: true };
   postMessage(message: unknown): void {
     this.posted.push(message);
     // Echo a success result the way the real one-shot writer does.
-    queueMicrotask(() => this.emit('message', { ok: true }));
+    queueMicrotask(() => this.emit('message', this.result));
   }
   kill(): boolean {
     this.killed = true;
@@ -66,6 +67,18 @@ describe('writeDocsOutput beforeCommit boundary', () => {
     expect(child.posted).toEqual([]);
     expect(child.killed).toBe(true);
     await expect(fs.promises.access(path.join(root, 'out.txt'))).rejects.toThrow();
+  });
+
+  it('returns the published inode identity as decimal strings', async () => {
+    child.result = { ok: true, identity: { dev: 16777234n, ino: 2n ** 60n + 1n } };
+    const outcome = await writeDocsOutput({ root, path: path.join(root, 'out.txt'), data: new Uint8Array([1]), overwrite: false });
+    expect(outcome).toEqual({ identity: { dev: '16777234', ino: (2n ** 60n + 1n).toString() } });
+  });
+
+  it('reports no identity when the writer did not attest one', async () => {
+    child.result = { ok: true, identity: { dev: 1, ino: 2 } };
+    const outcome = await writeDocsOutput({ root, path: path.join(root, 'out.txt'), data: new Uint8Array([1]), overwrite: false });
+    expect(outcome).toEqual({});
   });
 
   it('keeps the plain path when no beforeCommit is supplied', async () => {

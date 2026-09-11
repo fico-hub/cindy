@@ -404,6 +404,10 @@ async function resolveLargeResultSpillTarget(
   const remoteHostId = first.remoteHostId;
   const readOnlyError = () =>
     new Error('Tool result storage is disabled while the session is read-only or in plan mode');
+  // Auto: the reviewer's allow is bound to the permission/Plan generation of the snapshot
+  // that produced it. A later revalidate() gets a fresh snapshot whose own isCurrent() only
+  // proves the *new* generation is Auto — it must also prove the approving one is still it.
+  let approvedIsCurrent: (() => boolean) | null | undefined;
   const revalidate = async (reviewTarget?: string): Promise<void> => {
     const live = getLiveSessionGrantState(sessionId, sessionInstanceId);
     if (!live) throw new Error('Tool result storage requires the live session');
@@ -420,7 +424,12 @@ async function resolveLargeResultSpillTarget(
     // 没有审阅器、审阅异常、要求确认或拒绝都 fail closed —— 工具结果外置是宿主
     // 内部动作,不弹确认卡。写入前审阅一次(reviewTarget),写后复验只查活性/归属。
     if (verdict !== 'review' || !live.reviewAction) throw readOnlyError();
-    if (reviewTarget === undefined) return;
+    if (reviewTarget === undefined) {
+      // Post-approval boundaries: the allow only carries over if the approving
+      // generation is the live one (switch-away-and-back mints a new generation).
+      if (approvedIsCurrent && approvedIsCurrent() !== true) throw readOnlyError();
+      return;
+    }
     let decision: AutoReviewDecision;
     try {
       decision = await live.reviewAction({
@@ -440,6 +449,9 @@ async function resolveLargeResultSpillTarget(
           : 'Tool result storage requires a write the session reviewer did not approve automatically',
       );
     }
+    // Bind the allow to the snapshot that produced it; a legacy provider without
+    // isCurrent has no generation to bind (null keeps later checks fail-closed-neutral).
+    approvedIsCurrent = live.isCurrent ?? null;
   };
   // The snapshot read above is an async boundary; check the live state once more before returning.
   await revalidate();
@@ -572,21 +584,6 @@ function isRemoteResultUnknown(err: unknown): boolean {
 /** dev/ino 以十进制字符串承载:Windows 文件 ID 为 64 位,JS number 会丢低位。 */
 interface SpillIdentity { dev: string; ino: string }
 type LocalSpillAnchor = SpillIdentity;
-
-/**
- * 写入后按真实父目录锚定并记录 inode:父目录 realpath 必须仍在 workdir realpath 内,
- * 且其中同名条目是普通文件。拿不到锚定时调用方记 null,后续清理直接放弃。
- */
-async function anchorLocalSpill(workdir: string, relPath: string): Promise<LocalSpillAnchor> {
-  const abs = path.join(workdir, relPath);
-  const [wdReal, parentReal] = await Promise.all([fs.promises.realpath(workdir), fs.promises.realpath(path.dirname(abs))]);
-  if (parentReal !== wdReal && !parentReal.startsWith(wdReal + path.sep)) {
-    throw new Error('Tool result storage requires an authoritative session workdir');
-  }
-  const st = await fs.promises.lstat(path.join(parentReal, path.basename(abs)), { bigint: true });
-  if (!st.isFile()) throw new Error('Tool result storage requires an authoritative session workdir');
-  return { dev: st.dev.toString(), ino: st.ino.toString() };
-}
 
 /**
  * 本地按 inode 身份清理:先以 O_NOFOLLOW 打开并 fstat 核对,通过后经该 fd 把私密内容清零
@@ -1743,16 +1740,17 @@ export function getCindyGhostsMcpDeps(
         // `beforeCommit` runs right before the isolated writer receives the bytes: the
         // realpath/lstat checks and utility-process start-up are async, and an instance that
         // ended, switched, entered Plan or lost its grant meanwhile must not get a file written.
-        await writeDocsOutput({
+        const outcome = await writeDocsOutput({
           root: target.workingDir,
           path: path.join(target.workingDir, relativePath),
           data: Buffer.from(text, 'utf8'),
           overwrite: false,
           beforeCommit: () => target.revalidate(),
         });
-        // Record the written inode so any later cleanup can only ever remove this file.
-        // Without an anchor cleanup is skipped (leaving our own file beats deleting someone else's).
-        anchor = await anchorLocalSpill(target.workingDir, relativePath).catch(() => null);
+        // The cleanup anchor is the identity the writer read through its own handle —
+        // never a separate path query, which a workdir process could have re-pointed at an
+        // unrelated file. Without an attested identity, cleanup is skipped.
+        anchor = outcome?.identity ?? null;
       }
       // The write is another async boundary: an instance that ended or lost its
       // automatic-write grant meanwhile must not have refs booked in its name.

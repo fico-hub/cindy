@@ -2408,6 +2408,101 @@ describe('oversized ghost result Host storage', () => {
     expect(ledgerAddRefMock).not.toHaveBeenCalled();
   });
 
+  // Codex P1 (round 15): the reviewer's allow belongs to the generation that produced it.
+  // Switching permission/Plan away and back mints a new generation whose own isCurrent()
+  // is true, but the approval must not carry over to it.
+  it('does not carry an Auto allow across a permission generation switch-away-and-back', async () => {
+    const deps = makeDeps('codex');
+    sessionSnapshotMock.mockResolvedValue({ workingDir: WORKDIR, remoteHostId: null, permissionMode: 'auto', planModeEnabled: false });
+    let generation = 0;
+    liveGrantStateMock.mockImplementation(() => {
+      const captured = generation;
+      return { permissionMode: 'auto', remoteHostId: null, isCurrent: () => generation === captured, reviewAction: reviewAllow };
+    });
+    let bytesHandedOver = false;
+    writeDocsOutputMock.mockImplementation(async input => {
+      // Away (e.g. to Ask / Plan) and back to Auto while the writer was starting up.
+      generation += 2;
+      await input.beforeCommit?.();
+      bytesHandedOver = true;
+    });
+    await expect(deps.saveLargeGhostResult!('result')).rejects.toThrow(/read-only or in plan mode/);
+    expect(reviewAllow).toHaveBeenCalledOnce();
+    expect(bytesHandedOver).toBe(false);
+    expect(ledgerAddRefMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps an Auto allow while the approving generation stays live', async () => {
+    const deps = makeDeps('codex');
+    sessionSnapshotMock.mockResolvedValue({ workingDir: WORKDIR, remoteHostId: null, permissionMode: 'auto', planModeEnabled: false });
+    let generation = 0;
+    liveGrantStateMock.mockImplementation(() => {
+      const captured = generation;
+      return { permissionMode: 'auto', remoteHostId: null, isCurrent: () => generation === captured, reviewAction: reviewAllow };
+    });
+    writeDocsOutputMock.mockImplementation(async input => { await input.beforeCommit?.(); });
+    await expect(deps.saveLargeGhostResult!('result')).resolves.toMatch(/^tool-results\//);
+    expect(reviewAllow).toHaveBeenCalledOnce();
+  });
+
+  // Codex P1 (round 15): the cleanup anchor comes from the writer's own handle, never from
+  // a later path query; a path re-pointed at an unrelated file must not be destroyed.
+  it('never destroys a file that replaced the spill path when rolling back', async () => {
+    const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ghost-spill-replaced-'));
+    try {
+      const deps = makeDeps();
+      sessionSnapshotMock.mockResolvedValue({ workingDir: root, remoteHostId: null, permissionMode: 'auto', planModeEnabled: false });
+      writeDocsOutputMock.mockImplementation(async input => {
+        await fs.promises.mkdir(path.dirname(input.path), { recursive: true });
+        await fs.promises.writeFile(input.path, input.data);
+        const st = await fs.promises.lstat(input.path, { bigint: true });
+        // A workdir process swaps the UUID path for an unrelated file right after the write.
+        await fs.promises.rename(input.path, `${input.path}.moved`);
+        await fs.promises.writeFile(input.path, 'someone else');
+        return { identity: { dev: st.dev.toString(), ino: st.ino.toString() } };
+      });
+      const broken = 'f'.repeat(64);
+      ledgerAddRefMock.mockImplementation(async () => { throw new Error('FOREIGN KEY constraint failed'); });
+      await expect(deps.saveLargeGhostResult!(JSON.stringify({ c: `cindy-media://blobs/${broken}.png` }))).rejects.toThrow('media references unavailable');
+      const written = writeDocsOutputMock.mock.calls[0]![0].path;
+      expect(await fs.promises.readFile(written, 'utf8')).toBe('someone else');
+      // Our own inode (now under the moved name) was the only thing eligible for cleanup;
+      // it is left untouched because it no longer sits at the spill path.
+      expect(await fs.promises.readFile(`${written}.moved`, 'utf8')).toContain(broken);
+    } finally {
+      ledgerAddRefMock.mockImplementation(async (params: TestLedgerRef) => {
+        const id = params.id ?? `ref-${++ledgerRefSeq}`;
+        ledgerRefs.push({ ...params, id });
+        return id;
+      });
+      await fs.promises.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('skips cleanup entirely when the writer attested no identity', async () => {
+    const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ghost-spill-noid-'));
+    try {
+      const deps = makeDeps();
+      sessionSnapshotMock.mockResolvedValue({ workingDir: root, remoteHostId: null, permissionMode: 'auto', planModeEnabled: false });
+      writeDocsOutputMock.mockImplementation(async input => {
+        await fs.promises.mkdir(path.dirname(input.path), { recursive: true });
+        await fs.promises.writeFile(input.path, input.data);
+      });
+      const broken = 'f'.repeat(64);
+      ledgerAddRefMock.mockImplementation(async () => { throw new Error('FOREIGN KEY constraint failed'); });
+      await expect(deps.saveLargeGhostResult!(JSON.stringify({ c: `cindy-media://blobs/${broken}.png` }))).rejects.toThrow('media references unavailable');
+      const written = writeDocsOutputMock.mock.calls[0]![0].path;
+      await expect(fs.promises.access(written)).resolves.toBeUndefined();
+    } finally {
+      ledgerAddRefMock.mockImplementation(async (params: TestLedgerRef) => {
+        const id = params.id ?? `ref-${++ledgerRefSeq}`;
+        ledgerRefs.push({ ...params, id });
+        return id;
+      });
+      await fs.promises.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('passes a beforeCommit revalidation to the local writer on the happy path', async () => {
     const deps = makeDeps('codex');
     sessionSnapshotMock.mockResolvedValue({ workingDir: WORKDIR, remoteHostId: null, permissionMode: 'auto', planModeEnabled: false });
@@ -2590,6 +2685,8 @@ describe('oversized ghost result Host storage', () => {
       writeDocsOutputMock.mockImplementation(async input => {
         await fs.promises.mkdir(path.dirname(input.path), { recursive: true });
         await fs.promises.writeFile(input.path, input.data);
+        const st = await fs.promises.lstat(input.path, { bigint: true });
+        return { identity: { dev: st.dev.toString(), ino: st.ino.toString() } };
       });
       const existing = 'd'.repeat(64);
       const fresh = 'e'.repeat(64);
@@ -2735,6 +2832,8 @@ describe('oversized ghost result Host storage', () => {
       writeDocsOutputMock.mockImplementation(async input => {
         await fs.promises.mkdir(path.dirname(input.path), { recursive: true });
         await fs.promises.writeFile(input.path, input.data);
+        const st = await fs.promises.lstat(input.path, { bigint: true });
+        return { identity: { dev: st.dev.toString(), ino: st.ino.toString() } };
       });
       const hash = 'a'.repeat(64);
       await expect(deps.saveLargeGhostResult!(JSON.stringify({ image: `cindy-media://blobs/${hash}.png` }))).rejects.toThrow('live session');
@@ -2757,6 +2856,8 @@ describe('oversized ghost result Host storage', () => {
       writeDocsOutputMock.mockImplementation(async input => {
         await fs.promises.mkdir(path.dirname(input.path), { recursive: true });
         await fs.promises.writeFile(input.path, input.data);
+        const st = await fs.promises.lstat(input.path, { bigint: true });
+        return { identity: { dev: st.dev.toString(), ino: st.ino.toString() } };
       });
       ledgerAddRefMock.mockImplementation(async (params: TestLedgerRef) => {
         const id = params.id ?? `ref-${++ledgerRefSeq}`;

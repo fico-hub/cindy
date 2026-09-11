@@ -2,7 +2,11 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import type { DocsOutputWriteRequest, DocsOutputWriteResult } from './docsOutputWriterProtocol.js';
+import type {
+  DocsOutputWriteRequest,
+  DocsOutputWriteResult,
+  DocsOutputWrittenIdentity,
+} from './docsOutputWriterProtocol.js';
 
 interface ParentPortLike {
   postMessage(message: unknown): void;
@@ -136,7 +140,13 @@ async function ensureParent(request: DocsOutputWriteRequest, workingDir: string)
   await verifyParent(request, workingDir);
 }
 
-async function writeExclusive(target: string, data: Uint8Array): Promise<void> {
+/**
+ * Create the staging file exclusively, write and sync the bytes, and hand back the
+ * still-open handle: it is the only capability bound to the inode itself, used later
+ * to report the published identity and to zero the content if publication must be
+ * withdrawn.
+ */
+async function writeExclusive(target: string, data: Uint8Array): Promise<fs.promises.FileHandle> {
   const flags =
     fs.constants.O_WRONLY |
     fs.constants.O_CREAT |
@@ -147,13 +157,28 @@ async function writeExclusive(target: string, data: Uint8Array): Promise<void> {
     handle = await fs.promises.open(target, flags, 0o600);
     await handle.writeFile(data);
     await handle.sync();
+    return handle;
   } catch (error) {
+    await handle?.close().catch(() => undefined);
     if (hasCode(error, 'EEXIST')) {
       throw new OutputWriteError('FILE_EXISTS', `目标文件已存在: ${target}`);
     }
     throw error;
-  } finally {
-    await handle?.close().catch(() => undefined);
+  }
+}
+
+/** Remove `target` only if it still names the inode behind `handle`. */
+async function unlinkIfOurs(target: string, handle: fs.promises.FileHandle): Promise<void> {
+  try {
+    const [own, current] = await Promise.all([
+      handle.stat({ bigint: true }),
+      fs.promises.lstat(target, { bigint: true }),
+    ]);
+    if (current.isFile() && !current.isSymbolicLink() && current.dev === own.dev && current.ino === own.ino) {
+      await fs.promises.unlink(target);
+    }
+  } catch {
+    // Already gone or not ours: leave it.
   }
 }
 
@@ -219,19 +244,32 @@ async function writeWithinVerifiedParent(
   request: DocsOutputWriteRequest,
   workingDir: string,
   outputPath: (name: string) => string,
-): Promise<void> {
+): Promise<DocsOutputWrittenIdentity> {
   const target = outputPath(request.targetName);
   const staging = outputPath(`.cindy-docs-staging-${randomUUID()}-${request.targetName}`);
+  let handle: fs.promises.FileHandle | undefined;
+  let published = false;
   try {
-    await writeExclusive(staging, request.data);
+    handle = await writeExclusive(staging, request.data);
     await verifyParent(request, workingDir);
     if (request.overwrite) {
       await replaceFile(request, workingDir, staging, target);
     } else {
       await publishExclusive(staging, target);
     }
+    published = true;
     await verifyParent(request, workingDir);
+    const st = await handle.stat({ bigint: true });
+    return { dev: st.dev, ino: st.ino };
+  } catch (error) {
+    // Fail closed: no private content may remain, least of all outside the session
+    // root. Zero it through the inode-bound handle (follows the file wherever its
+    // directory went) and withdraw the published name only if it is still ours.
+    await handle?.truncate(0).catch(() => undefined);
+    if (published && handle) await unlinkIfOurs(target, handle);
+    throw error;
   } finally {
+    await handle?.close().catch(() => undefined);
     try {
       const stat = await fs.promises.lstat(staging);
       if (stat.isFile() && !stat.isSymbolicLink()) {
@@ -262,14 +300,14 @@ function assertValidRequest(request: DocsOutputWriteRequest): void {
 export async function runDocsOutputWriteForTest(
   request: DocsOutputWriteRequest,
   rootDir: string,
-): Promise<void> {
+): Promise<DocsOutputWrittenIdentity> {
   assertValidRequest(request);
   const workingDir = path.join(rootDir, request.parentRelativePath);
   await ensureParent(request, workingDir);
-  await writeWithinVerifiedParent(request, workingDir, (name) => path.join(workingDir, name));
+  return writeWithinVerifiedParent(request, workingDir, (name) => path.join(workingDir, name));
 }
 
-export async function runDocsOutputWrite(request: DocsOutputWriteRequest): Promise<void> {
+export async function runDocsOutputWrite(request: DocsOutputWriteRequest): Promise<DocsOutputWrittenIdentity> {
   assertValidRequest(request);
   // Production starts with `.` bound to the session root. Resolve and verify
   // the parent from that capability, then chdir into the verified directory so
@@ -285,7 +323,7 @@ export async function runDocsOutputWrite(request: DocsOutputWriteRequest): Promi
     // instead of following the replacement symlink.
     process.chdir(anchoredWorkingDir);
     await verifyParent(request, '.');
-    await writeWithinVerifiedParent(request, '.', (name) => name);
+    return await writeWithinVerifiedParent(request, '.', (name) => name);
   } finally {
     try {
       process.chdir(previousCwd);
@@ -306,7 +344,7 @@ if (parentPort) {
     handled = true;
     void runDocsOutputWrite(message.request)
       .then<DocsOutputWriteResult, DocsOutputWriteResult>(
-        () => ({ ok: true }),
+        (identity) => ({ ok: true, identity }),
         (error) => ({
           ok: false,
           errorCode: error instanceof OutputWriteError ? error.code : 'INTERNAL',

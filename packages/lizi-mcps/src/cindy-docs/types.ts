@@ -69,6 +69,16 @@ export type RenderHtmlToPdfFn = (input: DocsPdfRenderInput) => Promise<DocsPdfRe
  * Host-owned output commit. Desktop binds the final file operation to a
  * previously verified parent-directory identity in a one-shot utility process.
  */
+/**
+ * What the identity-bound writer reports back. `identity` is the dev/ino of the inode it
+ * actually published, read through its own open handle (decimal strings: 64-bit file ids
+ * do not survive as JS numbers). Absent when the host writer cannot attest it; callers
+ * must then skip any destructive cleanup keyed on that path.
+ */
+export interface WriteDocsOutputOutcome {
+  identity?: { dev: string; ino: string };
+}
+
 export type WriteDocsOutputFn = (input: {
   root: string;
   path: string;
@@ -81,7 +91,7 @@ export type WriteDocsOutputFn = (input: {
    * permission, Plan state) at the last async boundary before the side effect.
    */
   beforeCommit?: () => Promise<void>;
-}) => Promise<void>;
+}) => Promise<WriteDocsOutputOutcome | void>;
 
 /** 单页结构快照。宽高单位是 PDF point(1/72 英寸)。 */
 export interface DocsPdfPageInspection {

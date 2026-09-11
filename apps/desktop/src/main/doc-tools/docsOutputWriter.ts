@@ -4,7 +4,7 @@ import path from 'node:path';
 // eslint-disable-next-line no-restricted-imports -- final writes need a one-shot cwd-bound process, not a database worker.
 import { utilityProcess } from 'electron';
 
-import { DocsPathError, type WriteDocsOutputFn } from '@cindy/mcps';
+import { DocsPathError, type WriteDocsOutputFn, type WriteDocsOutputOutcome } from '@cindy/mcps';
 
 import {
   relativeOutputParentPath,
@@ -52,7 +52,15 @@ function forkDocsOutputWriter(rootDir: string): DocsOutputWriterChildLike {
 function parseResult(value: unknown): DocsOutputWriteResult | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const result = value as Partial<DocsOutputWriteResult>;
-  if (result.ok === true) return { ok: true };
+  if (result.ok === true) {
+    const identity = (result as { identity?: unknown }).identity;
+    return identity &&
+      typeof identity === 'object' &&
+      typeof (identity as { dev?: unknown }).dev === 'bigint' &&
+      typeof (identity as { ino?: unknown }).ino === 'bigint'
+      ? { ok: true, identity: identity as { dev: bigint; ino: bigint } }
+      : { ok: true };
+  }
   if (
     result.ok === false &&
     (result.errorCode === 'FILE_EXISTS' ||
@@ -155,13 +163,14 @@ export const writeDocsOutput: WriteDocsOutputFn = async (input) => {
   // same relative path from this cwd no longer resolves to that outside inode.
   const child = forkDocsOutputWriter(realRoot);
 
-  await new Promise<void>((resolve, reject) => {
+  return await new Promise<WriteDocsOutputOutcome>((resolve, reject) => {
     let settled = false;
     let ready = false;
     let stderr = '';
     child.stderr?.on('data', (chunk: Buffer | string) => {
       if (stderr.length < 8_000) stderr += String(chunk).slice(0, 8_000 - stderr.length);
     });
+    let outcome: WriteDocsOutputOutcome = {};
     const finish = (error?: unknown): void => {
       if (settled) return;
       settled = true;
@@ -172,7 +181,7 @@ export const writeDocsOutput: WriteDocsOutputFn = async (input) => {
         // One-shot process may already have exited after sending its result.
       }
       if (error) reject(error);
-      else resolve();
+      else resolve(outcome);
     };
     const timer = setTimeout(() => finish(new Error('文档落盘隔离进程超时')), 60_000);
     timer.unref?.();
@@ -197,7 +206,12 @@ export const writeDocsOutput: WriteDocsOutputFn = async (input) => {
       }
       const result = parseResult(message);
       if (!result) return;
-      if (result.ok) finish();
+      if (result.ok) {
+        // Identity is read by the writer through its own handle; carried as decimal
+        // strings (64-bit file ids do not survive as JS numbers).
+        if (result.identity) outcome = { identity: { dev: result.identity.dev.toString(), ino: result.identity.ino.toString() } };
+        finish();
+      }
       else {
         try {
           throwResultError(result, input.path);

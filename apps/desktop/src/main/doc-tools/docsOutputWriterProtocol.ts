@@ -38,8 +38,14 @@ export interface DocsOutputWriteRequest {
   overwrite: boolean;
 }
 
+/** Identity of the inode the writer actually published, read through its own open handle. */
+export interface DocsOutputWrittenIdentity {
+  dev: bigint;
+  ino: bigint;
+}
+
 export type DocsOutputWriteResult =
-  | { ok: true }
+  | { ok: true; identity?: DocsOutputWrittenIdentity }
   | {
       ok: false;
       errorCode: 'FILE_EXISTS' | 'PATH_NOT_ALLOWED' | 'ATOMIC_PUBLISH_UNSUPPORTED' | 'INTERNAL';

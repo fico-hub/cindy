@@ -299,6 +299,39 @@ process.stdout.write(JSON.stringify({ code, outsideExists, movedValue }));
     },
   );
 
+  it('returns the identity of the inode it published, read through its own handle', async () => {
+    const identity = await runDocsOutputWriteForTest(await request('report.bin', 'payload', false), root);
+    const st = await fs.promises.lstat(path.join(root, 'report.bin'), { bigint: true });
+    expect(identity).toEqual({ dev: st.dev, ino: st.ino });
+  });
+
+  // Codex P1 (round 15): if the anchored parent is moved out of the root after the
+  // hard-link publish but before the final parent check, the published content must be
+  // withdrawn through the held handle, not merely reported as PATH_NOT_ALLOWED.
+  it('withdraws a published file when the parent escapes the root after publication', async () => {
+    const safe = path.join(root, 'safe');
+    const outside = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cindy-docs-outside-'));
+    cleanup.push(outside);
+    await fs.promises.mkdir(safe);
+    const pending = await request('report.bin', 'private-result', false, safe);
+    const realLink = fs.promises.link.bind(fs.promises);
+    const linkSpy = vi.spyOn(fs.promises, 'link').mockImplementation(async (from, to) => {
+      await realLink(from, to);
+      await fs.promises.rename(safe, path.join(outside, 'safe'));
+    });
+    try {
+      await expect(runDocsOutputWriteForTest(pending, root)).rejects.toMatchObject({ code: 'PATH_NOT_ALLOWED' });
+    } finally {
+      linkSpy.mockRestore();
+    }
+    const escaped = await fs.promises.stat(path.join(outside, 'safe', 'report.bin')).catch(() => null);
+    if (escaped) expect(escaped.size).toBe(0);
+    const leftovers = (await fs.promises.readdir(path.join(outside, 'safe'))).filter((n) => n.includes('staging'));
+    for (const name of leftovers) {
+      expect((await fs.promises.stat(path.join(outside, 'safe', name))).size).toBe(0);
+    }
+  });
+
   it('anchors the final write at the session root when the parent inode moves away', async () => {
     const safe = path.join(root, 'safe');
     const moved = path.join(root, 'safe-original');
