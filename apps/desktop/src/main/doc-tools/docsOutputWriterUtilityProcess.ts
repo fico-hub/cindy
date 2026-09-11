@@ -419,6 +419,13 @@ async function writeWithinVerifiedParent(
         throw new OutputWriteError('PATH_NOT_ALLOWED', 'staging 名在发布后被替换或移走，已撤回本次输出');
       }
       if (removed === 'error') throw new Error('无法移除 staging 名');
+      // Removed by us or already absent (bare rename by a workdir process): either way the
+      // inode must now be reachable through the target only; an extra link is an untracked
+      // private copy and the publish is withdrawn (the catch zeroes it through the handle).
+      const links = await handle.stat({ bigint: true });
+      if (links.nlink !== 1n) {
+        throw new OutputWriteError('PATH_NOT_ALLOWED', 'staging 名在发布后被移走，已撤回本次输出');
+      }
     }
     await syncDirectory(workingDir);
     return { dev: st.dev, ino: st.ino };

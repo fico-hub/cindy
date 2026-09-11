@@ -680,6 +680,11 @@ export async function writeNewFile(
       const after = await handle.stat({ bigint: true });
       if (after.nlink !== own.nlink - 1n) throw new Error(`staging link was replaced or moved: ${sub}`);
     }
+    // Whether the staging name was removed by us or is already absent (a bare rename by a
+    // workdir process), the inode must now be reachable through the published target only.
+    // Any extra link is a private copy outside the ledger lifecycle: withdraw and zero.
+    const links = await handle.stat({ bigint: true });
+    if (links.nlink !== 1n) throw new Error(`staging link was replaced or moved: ${sub}`);
   } catch (err) {
     // Fail closed without leaving content anywhere: zero through the handle (follows
     // the inode wherever a directory went), drop the published entry only if it is

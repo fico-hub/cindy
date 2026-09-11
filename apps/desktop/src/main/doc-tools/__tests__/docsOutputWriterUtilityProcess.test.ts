@@ -412,6 +412,23 @@ process.stdout.write(JSON.stringify({ code, outsideExists, movedValue }));
     }
   });
 
+  // Codex P1 (round 22): a bare rename of the staging link (ENOENT at its name) must not
+  // pass as "removed by us"; the final link count exposes the extra link.
+  it('withdraws the publish when the staging link was merely renamed away', async () => {
+    const realLink = fs.promises.link.bind(fs.promises);
+    const linkSpy = vi.spyOn(fs.promises, 'link').mockImplementation(async (from, to) => {
+      await realLink(from, to);
+      await fs.promises.rename(String(from), path.join(root, 'stolen-copy'));
+    });
+    try {
+      await expect(runDocsOutputWriteForTest(await request('report.bin', 'private-result', false), root)).rejects.toMatchObject({ code: 'PATH_NOT_ALLOWED' });
+      expect((await fs.promises.stat(path.join(root, 'stolen-copy'))).size).toBe(0);
+      await expect(fs.promises.stat(path.join(root, 'report.bin'))).rejects.toThrow();
+    } finally {
+      linkSpy.mockRestore();
+    }
+  });
+
   // Codex P1 (round 21): the swap can also land between lstat and unlink; the retained
   // handle's link count exposes it afterwards and the publish is withdrawn.
   it('detects a staging swap that lands between lstat and unlink and withdraws', async () => {

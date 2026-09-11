@@ -673,6 +673,27 @@ describe('verifyNewFile / unlinkIfSame', () => {
     }
   });
 
+  // Codex P1 (round 22): a bare rename of the staging link (no replacement at its name)
+  // leaves an extra hard link with the private bytes; the final link count catches it.
+  it('writeNewFile withdraws the publish when the staging link was merely renamed away', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-staging-renamed-'));
+    const realRoot = await fsp.realpath(root);
+    const realLink = fsp.link.bind(fsp);
+    const spy = vi.spyOn(fsp, 'link').mockImplementation(async (from, to) => {
+      await realLink(from, to);
+      await fsp.rename(String(from), path.join(realRoot, 'stolen-copy'));
+    });
+    try {
+      await mkdir(path.join(root, 'out'));
+      await expect(writeNewFile(root, 'out/spill.json', '{"secret":1}')).rejects.toThrow(/replaced or moved/);
+      expect((await fsStat(path.join(realRoot, 'stolen-copy'))).size).toBe(0);
+      await expect(fsStat(path.join(root, 'out', 'spill.json'))).rejects.toThrow(/ENOENT/);
+    } finally {
+      spy.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   // Codex P1 (round 21): a swap landing between lstat and unlink is caught by the link count.
   it('writeNewFile detects a staging swap between lstat and unlink and withdraws', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-staging-swap-'));
