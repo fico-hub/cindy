@@ -7,7 +7,7 @@
 
 import { createHash } from 'node:crypto';
 import { PassThrough } from 'node:stream';
-import { mkdtemp, mkdir, rm, writeFile as fsWriteFile, readFile as fsReadFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rename, rm, writeFile as fsWriteFile, readFile as fsReadFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -163,31 +163,34 @@ describe('remote-file-service RPC end-to-end', () => {
     expect(await client.request('eraseIfSame', { workdir, relPath: 'tool-results/v.json', dev: written.dev, ino: written.ino })).toEqual({ erased: true });
   });
 
-  // Codex P1 (round 29): two-phase publish over the wire — the marker survives until
-  // finalize, verify reports it, erase reaches the inode through it, finalize validates params.
-  it('writeNewFile leaves a pending marker that finalizeNewFile removes and eraseIfSame can use', async () => {
+  // Codex P1 (round 29/30): the daemon keeps the writer's descriptor as the caller's inode
+  // capability — erase through it needs no pathname; release closes it; params validated.
+  it('writeNewFile returns a hold that eraseIfSame can use and releaseNewFile closes', async () => {
     await mkdir(path.join(workdir, 'tool-results'));
     const written = await client.request('writeNewFile', { workdir, relPath: 'tool-results/p.json', content: '{"p":1}' });
-    expect(written.pendingName).toMatch(/^\.p\.json\.[0-9a-f-]{36}\.pending$/);
+    expect(written.holdId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(written.durable).toBe(true);
     const sha256 = createHash('sha256').update('{"p":1}').digest('hex');
     const verified = await client.request('verifyNewFile', { workdir, relPath: 'tool-results/p.json', sha256, size: 7 });
-    expect(verified).toMatchObject({ ino: written.ino, pendingName: written.pendingName });
-    await expect(
-      client.request('finalizeNewFile', { workdir, relPath: 'tool-results/p.json', dev: written.dev, ino: written.ino } as never),
-    ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
-    await expect(
-      client.request('finalizeNewFile', { workdir, relPath: 'tool-results/p.json', pendingName: 'tool-results/p.json', dev: written.dev, ino: written.ino }),
-    ).rejects.toMatchObject({ code: 'OPERATION_FAILED' });
-    expect(await client.request('finalizeNewFile', { workdir, relPath: 'tool-results/p.json', pendingName: written.pendingName, dev: written.dev, ino: written.ino })).toEqual({ finalized: true });
-    const final = await client.request('verifyNewFile', { workdir, relPath: 'tool-results/p.json', sha256, size: 7 });
-    expect(final.pendingName).toBeUndefined();
+    expect(verified).toMatchObject({ ino: written.ino, holdId: expect.stringMatching(/^[0-9a-f-]{36}$/) });
+    await expect(client.request('releaseNewFile', {} as never)).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+    expect(await client.request('releaseNewFile', { holdId: written.holdId })).toEqual({ released: true });
+    expect(await client.request('releaseNewFile', { holdId: written.holdId })).toEqual({ released: false });
+    expect(await client.request('releaseNewFile', { holdId: verified.holdId })).toEqual({ released: true });
 
     const second = await client.request('writeNewFile', { workdir, relPath: 'tool-results/q.json', content: '{"q":1}' });
     await expect(
-      client.request('eraseIfSame', { workdir, relPath: 'tool-results/q.json', dev: second.dev, ino: second.ino, pendingName: 5 as unknown as string }),
+      client.request('eraseIfSame', { workdir, relPath: 'tool-results/q.json', dev: second.dev, ino: second.ino, holdId: 5 as unknown as string }),
     ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
-    expect(await client.request('eraseIfSame', { workdir, relPath: 'tool-results/q.json', dev: second.dev, ino: second.ino, pendingName: second.pendingName })).toEqual({ erased: true });
-    expect(await fsReadFile(path.join(workdir, second.pendingName), 'utf8')).toBe('');
+    // The directory leaves the workdir: the pathname no longer reaches the inode, the hold does.
+    await rename(path.join(workdir, 'tool-results'), path.join(workdir, '..', path.basename(workdir) + '-moved'));
+    try {
+      expect(await client.request('eraseIfSame', { workdir, relPath: 'tool-results/q.json', dev: second.dev, ino: second.ino })).toEqual({ erased: false });
+      expect(await client.request('eraseIfSame', { workdir, relPath: 'tool-results/q.json', dev: second.dev, ino: second.ino, holdId: second.holdId })).toEqual({ erased: true });
+      expect(await fsReadFile(path.join(workdir, '..', path.basename(workdir) + '-moved', 'q.json'), 'utf8')).toBe('');
+    } finally {
+      await rm(path.join(workdir, '..', path.basename(workdir) + '-moved'), { recursive: true, force: true });
+    }
   });
 
   it('unknown method → UNKNOWN_METHOD; bad params → BAD_REQUEST', async () => {

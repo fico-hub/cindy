@@ -2478,9 +2478,11 @@ describe('oversized ghost result Host storage', () => {
     expect(reviewAllow).toHaveBeenCalledOnce();
   });
 
-  // Codex P1 (round 15): the cleanup anchor comes from the writer's own handle, never from
-  // a later path query; a path re-pointed at an unrelated file must not be destroyed.
-  it('never destroys a file that replaced the spill path when rolling back', async () => {
+  // Codex P1 (round 15 / round 30): the cleanup anchor comes from the writer's own handle,
+  // never from a later path query; a path re-pointed at an unrelated file must not be
+  // destroyed — and a write whose inode can no longer be bound is an unsettled write: the
+  // call fails before anything is booked in its name.
+  it('never destroys a file that replaced the spill path and fails closed when the inode cannot be bound', async () => {
     const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ghost-spill-replaced-'));
     try {
       const deps = makeDeps();
@@ -2495,19 +2497,14 @@ describe('oversized ghost result Host storage', () => {
         return { identity: { dev: st.dev.toString(), ino: st.ino.toString() } };
       });
       const broken = 'f'.repeat(64);
-      ledgerAddRefMock.mockImplementation(async () => { throw new Error('FOREIGN KEY constraint failed'); });
-      await expect(deps.saveLargeGhostResult!(JSON.stringify({ c: `cindy-media://blobs/${broken}.png` }))).rejects.toThrow('media references unavailable');
+      await expect(deps.saveLargeGhostResult!(JSON.stringify({ c: `cindy-media://blobs/${broken}.png` }))).rejects.toThrow('lost its anchor');
+      expect(ledgerAddRefMock).not.toHaveBeenCalled();
       const written = writeDocsOutputMock.mock.calls[0]![0].path;
       expect(await fs.promises.readFile(written, 'utf8')).toBe('someone else');
       // Our own inode (now under the moved name) was the only thing eligible for cleanup;
       // it is left untouched because it no longer sits at the spill path.
       expect(await fs.promises.readFile(`${written}.moved`, 'utf8')).toContain(broken);
     } finally {
-      ledgerAddRefMock.mockImplementation(async (params: TestLedgerRef) => {
-        const id = params.id ?? `ref-${++ledgerRefSeq}`;
-        ledgerRefs.push({ ...params, id });
-        return id;
-      });
       await fs.promises.rm(root, { recursive: true, force: true });
     }
   });
@@ -3086,52 +3083,69 @@ describe('oversized ghost result Host storage', () => {
     expect(remoteFsRequestMock).toHaveBeenCalledWith('host-1', 'eraseIfSame', { workdir: '/srv/work', relPath: expect.stringMatching(/^tool-results\//), dev: '7', ino: '9' });
   });
 
-  // Codex P1 (round 29): the daemon's two-phase publish. The `.pending` marker returned by
-  // writeNewFile is the inode-bound capability across the client's own bookkeeping; it is
-  // dropped (finalizeNewFile) only after the last revalidation, and a refusal there — or any
-  // earlier failure — withdraws through eraseIfSame *with* the marker name.
-  it('finalizes a remote spill only after refs are committed and the instance was re-validated', async () => {
+  // Codex P1 (round 29/30): the daemon keeps the writer's descriptor (hold) as the client's
+  // inode capability across its own bookkeeping; it is released only after the last
+  // revalidation — re-checked again at the release frame boundary (`beforeSend`) — and any
+  // earlier failure withdraws through eraseIfSame *with* the hold. No pathname is deleted.
+  it('releases the remote hold only after refs are committed and re-validates at the send boundary', async () => {
     const deps = makeDeps('codex');
     sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
     liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => true, reviewAction: reviewAllow });
-    remoteFsRequestMock.mockImplementation(async (_host, method) => (method === 'writeNewFile' ? { size: 5, mtimeMs: 1, dev: '7', ino: '9', pendingName: '.x.json.u.pending' } : method === 'finalizeNewFile' ? { finalized: true } : {}));
-    const hash = 'a'.repeat(64);
-    const saved = await deps.saveLargeGhostResult!(JSON.stringify({ image: `cindy-media://blobs/${hash}.png` }));
-    const methods = remoteFsRequestMock.mock.calls.map(call => call[1]);
-    expect(methods).toEqual(['createFolder', 'writeNewFile', 'finalizeNewFile']);
-    expect(remoteFsRequestMock).toHaveBeenCalledWith('host-1', 'finalizeNewFile', { workdir: '/srv/work', relPath: saved, pendingName: '.x.json.u.pending', dev: '7', ino: '9' });
-    // Ledger first, finalize last: the marker outlives every async boundary of the bookkeeping.
-    expect(ledgerAddRefMock.mock.invocationCallOrder[0]!).toBeLessThan(remoteFsRequestMock.mock.invocationCallOrder.at(-1)!);
-    expect(liveGrantStateMock.mock.invocationCallOrder.at(-1)!).toBeLessThan(remoteFsRequestMock.mock.invocationCallOrder.at(-1)!);
-  });
-
-  it('withdraws a remote spill through the pending marker when finalize refuses', async () => {
-    const deps = makeDeps('codex');
-    sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
-    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => true, reviewAction: reviewAllow });
-    remoteFsRequestMock.mockImplementation(async (_host, method) => {
-      if (method === 'writeNewFile') return { size: 5, mtimeMs: 1, dev: '7', ino: '9', pendingName: '.x.json.u.pending' };
-      if (method === 'finalizeNewFile') throw new Error('OPERATION_FAILED: publish not anchored');
+    remoteFsRequestMock.mockImplementation(async (_host, method, _params, options) => {
+      if (method === 'writeNewFile') return { size: 5, mtimeMs: 1, dev: '7', ino: '9', holdId: 'hold-1', durable: true };
+      if (method === 'releaseNewFile') { await options?.beforeSend?.(); return { released: true }; }
       return {};
     });
     const hash = 'a'.repeat(64);
-    await expect(deps.saveLargeGhostResult!(JSON.stringify({ image: `cindy-media://blobs/${hash}.png` }))).rejects.toThrow('not anchored');
-    expect(remoteFsRequestMock.mock.calls.map(call => call[1])).toEqual(['createFolder', 'writeNewFile', 'finalizeNewFile', 'eraseIfSame']);
-    expect(remoteFsRequestMock).toHaveBeenCalledWith('host-1', 'eraseIfSame', { workdir: '/srv/work', relPath: expect.stringMatching(/^tool-results\//), dev: '7', ino: '9', pendingName: '.x.json.u.pending' });
+    await deps.saveLargeGhostResult!(JSON.stringify({ image: `cindy-media://blobs/${hash}.png` }));
+    const methods = remoteFsRequestMock.mock.calls.map(call => call[1]);
+    expect(methods).toEqual(['createFolder', 'writeNewFile', 'releaseNewFile']);
+    expect(remoteFsRequestMock).toHaveBeenCalledWith('host-1', 'releaseNewFile', { holdId: 'hold-1' }, { beforeSend: expect.any(Function) });
+    // Ledger first, release last: the hold outlives every async boundary of the bookkeeping.
+    expect(ledgerAddRefMock.mock.invocationCallOrder[0]!).toBeLessThan(remoteFsRequestMock.mock.invocationCallOrder.at(-1)!);
+  });
+
+  it('withdraws through the hold when the instance ended at the release frame boundary', async () => {
+    const deps = makeDeps('codex');
+    sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
+    let live = true;
+    liveGrantStateMock.mockImplementation(() => (live ? { permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => true, reviewAction: reviewAllow } : null));
+    remoteFsRequestMock.mockImplementation(async (_host, method, _params, options) => {
+      if (method === 'writeNewFile') return { size: 5, mtimeMs: 1, dev: '7', ino: '9', holdId: 'hold-1', durable: true };
+      if (method === 'releaseNewFile') { live = false; await options?.beforeSend?.(); return { released: true }; }
+      return {};
+    });
+    const hash = 'a'.repeat(64);
+    await expect(deps.saveLargeGhostResult!(JSON.stringify({ image: `cindy-media://blobs/${hash}.png` }))).rejects.toThrow('live session');
+    expect(remoteFsRequestMock.mock.calls.map(call => call[1])).toEqual(['createFolder', 'writeNewFile', 'releaseNewFile', 'eraseIfSame']);
+    expect(remoteFsRequestMock).toHaveBeenCalledWith('host-1', 'eraseIfSame', { workdir: '/srv/work', relPath: expect.stringMatching(/^tool-results\//), dev: '7', ino: '9', holdId: 'hold-1' });
     expect(ledgerRemoveRefByIdMock).toHaveBeenCalledOnce();
     expect(ledgerRefs).not.toContainEqual(expect.objectContaining({ hash }));
   });
 
-  it('passes the pending marker to eraseIfSame when the ledger fails after a remote write', async () => {
+  it('keeps a completed remote spill when only the release response is lost', async () => {
     const deps = makeDeps('codex');
     sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
     liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => true, reviewAction: reviewAllow });
-    remoteFsRequestMock.mockImplementation(async (_host, method) => (method === 'writeNewFile' ? { size: 5, mtimeMs: 1, dev: '7', ino: '9', pendingName: '.x.json.u.pending' } : {}));
+    remoteFsRequestMock.mockImplementation(async (_host, method) => {
+      if (method === 'writeNewFile') return { size: 5, mtimeMs: 1, dev: '7', ino: '9', holdId: 'hold-1', durable: true };
+      if (method === 'releaseNewFile') throw Object.assign(new Error('releaseNewFile TIMEOUT'), { code: 'TIMEOUT' });
+      return {};
+    });
+    await expect(deps.saveLargeGhostResult!('result')).resolves.toMatch(/^tool-results\//);
+    expect(remoteFsRequestMock.mock.calls.map(call => call[1])).toEqual(['createFolder', 'writeNewFile', 'releaseNewFile']);
+  });
+
+  it('passes the hold to eraseIfSame when the ledger fails after a remote write', async () => {
+    const deps = makeDeps('codex');
+    sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
+    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => true, reviewAction: reviewAllow });
+    remoteFsRequestMock.mockImplementation(async (_host, method) => (method === 'writeNewFile' ? { size: 5, mtimeMs: 1, dev: '7', ino: '9', holdId: 'hold-1', durable: true } : {}));
     ledgerAddRefMock.mockImplementation(async () => { throw new Error('FOREIGN KEY constraint failed'); });
     try {
       await expect(deps.saveLargeGhostResult!(JSON.stringify({ image: `cindy-media://blobs/${'f'.repeat(64)}.png` }))).rejects.toThrow('media references unavailable');
       expect(remoteFsRequestMock.mock.calls.map(call => call[1])).toEqual(['createFolder', 'writeNewFile', 'eraseIfSame']);
-      expect(remoteFsRequestMock).toHaveBeenCalledWith('host-1', 'eraseIfSame', expect.objectContaining({ dev: '7', ino: '9', pendingName: '.x.json.u.pending' }));
+      expect(remoteFsRequestMock).toHaveBeenCalledWith('host-1', 'eraseIfSame', expect.objectContaining({ dev: '7', ino: '9', holdId: 'hold-1' }));
     } finally {
       ledgerAddRefMock.mockImplementation(async (params: TestLedgerRef) => {
         const id = params.id ?? `ref-${++ledgerRefSeq}`;
@@ -3141,19 +3155,32 @@ describe('oversized ghost result Host storage', () => {
     }
   });
 
-  it('carries the pending marker learned from verifyNewFile into finalize after a lost write response', async () => {
+  // Codex P1 (round 30): a staging removal that did not reach disk is reported, not swallowed;
+  // this client is the only party that accepted the publish and withdraws through the hold.
+  it('withdraws a remote write whose staging removal was not durable', async () => {
+    const deps = makeDeps('codex');
+    sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
+    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => true, reviewAction: reviewAllow });
+    remoteFsRequestMock.mockImplementation(async (_host, method) => (method === 'writeNewFile' ? { size: 5, mtimeMs: 1, dev: '7', ino: '9', holdId: 'hold-1', durable: false } : {}));
+    await expect(deps.saveLargeGhostResult!('result')).rejects.toThrow('not durable');
+    expect(remoteFsRequestMock.mock.calls.map(call => call[1])).toEqual(['createFolder', 'writeNewFile', 'eraseIfSame']);
+    expect(remoteFsRequestMock).toHaveBeenCalledWith('host-1', 'eraseIfSame', expect.objectContaining({ dev: '7', ino: '9', holdId: 'hold-1' }));
+    expect(ledgerAddRefMock).not.toHaveBeenCalled();
+  });
+
+  it('carries the hold learned from verifyNewFile into the release after a lost write response', async () => {
     const deps = makeDeps('codex');
     sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
     liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => true, reviewAction: reviewAllow });
     remoteFsRequestMock.mockImplementation(async (_host, method) => {
       if (method === 'writeNewFile') throw Object.assign(new Error('writeNewFile TIMEOUT'), { code: 'TIMEOUT' });
-      if (method === 'verifyNewFile') return { size: 5, mtimeMs: 1, dev: '7', ino: '9', pendingName: '.x.json.u.pending' };
-      if (method === 'finalizeNewFile') return { finalized: true };
+      if (method === 'verifyNewFile') return { size: 5, mtimeMs: 1, dev: '7', ino: '9', holdId: 'hold-v' };
+      if (method === 'releaseNewFile') return { released: true };
       return {};
     });
-    const saved = await deps.saveLargeGhostResult!('result');
-    expect(remoteFsRequestMock.mock.calls.map(call => call[1])).toEqual(['createFolder', 'writeNewFile', 'verifyNewFile', 'finalizeNewFile']);
-    expect(remoteFsRequestMock).toHaveBeenCalledWith('host-1', 'finalizeNewFile', { workdir: '/srv/work', relPath: saved, pendingName: '.x.json.u.pending', dev: '7', ino: '9' });
+    await deps.saveLargeGhostResult!('result');
+    expect(remoteFsRequestMock.mock.calls.map(call => call[1])).toEqual(['createFolder', 'writeNewFile', 'verifyNewFile', 'releaseNewFile']);
+    expect(remoteFsRequestMock).toHaveBeenCalledWith('host-1', 'releaseNewFile', { holdId: 'hold-v' }, { beforeSend: expect.any(Function) });
   });
 
   // Codex P1 (round 6): createFolder can time out while the daemon is still running mkdir.

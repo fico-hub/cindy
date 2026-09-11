@@ -559,10 +559,13 @@ export interface NewFileIdentity {
   dev: string;
   ino: string;
   /**
-   * Workdir-relative (posix) path of the `.pending` marker left by the two-phase publish;
-   * present after `writeNewFile` and after `verifyNewFile` of a not-yet-finalized publish.
+   * Daemon-side descriptor capability (present when a hold registry was supplied): lets
+   * `eraseIfSame` zero exactly this inode without a pathname; closed by `releaseNewFile`
+   * or after the registry's TTL.
    */
-  pendingName?: string;
+  holdId?: string;
+  /** writeNewFile only: whether the staging removal reached disk (false = withdraw via the hold). */
+  durable?: boolean;
 }
 
 /** Identity from bigint stats, serialised without precision loss. */
@@ -602,7 +605,8 @@ export async function writeNewFile(
   workdir: string,
   relPath: string,
   content: string,
-): Promise<NewFileIdentity & { pendingName: string }> {
+  holds?: NewFileHoldRegistry,
+): Promise<NewFileIdentity & { durable: boolean }> {
   const sub = assertInsideWorkdir(workdir, relPath);
   if (sub === '') throw new Error('cannot write workdir root');
   const abs = path.join(workdir, sub);
@@ -626,8 +630,8 @@ export async function writeNewFile(
   // Cross-device (round 29): `link` / `rename` cannot cross filesystems. When the output
   // directory is a nested mount, staging at the workdir root would fail with EXDEV, so the
   // staging inode is placed on the *target's* filesystem instead (inside the verified
-  // parent). The root-anchored capability then degrades to that directory: a later move
-  // of the directory out of workdir takes the pending marker with it (documented limit).
+  // parent). The inode capability is the daemon-held descriptor (see the hold registry),
+  // which is independent of where the staging name lived.
   const parentReal = await fs.realpath(path.dirname(abs));
   const [wdStat, parentStat] = await Promise.all([
     fs.lstat(wdReal, { bigint: true }),
@@ -635,7 +639,6 @@ export async function writeNewFile(
   ]);
   const stagingDir = chooseStagingDir(wdStat.dev, wdReal, parentStat.dev, parentReal);
   const stagingAbs = path.join(stagingDir, `.${path.basename(abs)}.${randomUUID()}.staging`);
-  const pendingAbs = stagingAbs.replace(/\.staging$/, '.pending');
   const handle = await fs.open(stagingAbs, 'wx', 0o600);
   let published = false;
   const escape = () => new Error(`path escapes workdir via symlink: ${sub}`);
@@ -678,32 +681,30 @@ export async function writeNewFile(
     ) {
       throw escape();
     }
-    // Two-phase publish (round 29): the staging link is not removed here. It is renamed —
-    // atomically, within its own directory — to a `.pending` marker that stays a second
-    // hard link to the published inode until the caller has finished its own bookkeeping
-    // (authorization re-check, media-ref ledger) and calls `finalizeNewFile`. Meanwhile the
-    // marker is the caller's inode-bound capability: `eraseIfSame` can reach the content
-    // through the root-anchored marker even after the output directory was moved out of
-    // workdir, and `verifyNewFile` distinguishes "in flight" (`.staging`) from "written,
-    // awaiting finalize" (`.pending`).
-    // The rename happens only if the staging name still carries our inode: a workdir
-    // process may have renamed the link away (an untracked private copy) and put an
-    // unrelated file at that name. Then the publish is withdrawn (the handle zeroes the
-    // moved copy too).
+    // The staging entry is a second hard link to the private content. Its removal is part
+    // of a successful publish (not best-effort); it is also the server-side completion
+    // marker verifyNewFile keys on: while `.<name>.<uuid>.staging` exists, the write is
+    // still in flight and may yet be withdrawn.
+    // The name is unlinked only if it still carries our inode: a workdir process may have
+    // renamed the staging link away (an untracked private copy) and put an unrelated file
+    // at that name. Then the publish is withdrawn (the handle zeroes the moved copy too).
     const stagingEntry = await fs.lstat(stagingAbs, { bigint: true }).catch(() => null);
-    const own = await handle.stat({ bigint: true });
-    if (!stagingEntry || !stagingEntry.isFile() || stagingEntry.dev !== own.dev || stagingEntry.ino !== own.ino) {
-      throw new Error(`staging link was replaced or moved: ${sub}`);
+    if (stagingEntry) {
+      const own = await handle.stat({ bigint: true });
+      if (!stagingEntry.isFile() || stagingEntry.dev !== own.dev || stagingEntry.ino !== own.ino) {
+        throw new Error(`staging link was replaced or moved: ${sub}`);
+      }
+      await fs.unlink(stagingAbs);
+      // Close the lstat→unlink gap after the fact: our link count must have dropped by one,
+      // otherwise the name was swapped in between and our link still exists elsewhere.
+      const after = await handle.stat({ bigint: true });
+      if (after.nlink !== own.nlink - 1n) throw new Error(`staging link was replaced or moved: ${sub}`);
     }
-    await fs.rename(stagingAbs, pendingAbs);
-    // Close the lstat→rename gap after the fact: the marker must be our inode and the link
-    // count must be exactly two (target + marker); anything else means the name was swapped
-    // in between or an extra private copy exists outside the ledger lifecycle.
-    const marker = await fs.lstat(pendingAbs, { bigint: true }).catch(() => null);
-    const after = await handle.stat({ bigint: true });
-    if (!marker || !marker.isFile() || marker.dev !== own.dev || marker.ino !== own.ino || after.nlink !== 2n) {
-      throw new Error(`staging link was replaced or moved: ${sub}`);
-    }
+    // Whether the staging name was removed by us or is already absent (a bare rename by a
+    // workdir process), the inode must now be reachable through the published target only.
+    // Any extra link is a private copy outside the ledger lifecycle: withdraw and zero.
+    const links = await handle.stat({ bigint: true });
+    if (links.nlink !== 1n) throw new Error(`staging link was replaced or moved: ${sub}`);
   } catch (err) {
     // Fail closed without leaving content anywhere: zero through the handle (follows the
     // inode wherever a directory went). The pathnames (published entry, staging link) are
@@ -715,24 +716,30 @@ export async function writeNewFile(
     await handle.close().catch(() => undefined);
     throw err;
   }
-  // Past this point the publish is complete and is never withdrawn by this call (a recovery
-  // caller may already have accepted it): make the marker rename durable, retrying once. A
-  // persistent fsync failure here leaves at worst a non-durable *rename* (after a crash the
-  // `.staging` name may reappear, which verifyNewFile treats as in flight), never a lost or
-  // zeroed publish.
+  // Past this point the publish is complete and is never withdrawn *by this call* (a recovery
+  // caller may already have accepted it): make the staging removal durable, retrying once.
+  // A persistent fsync failure is reported as `durable: false` rather than swallowed (round
+  // 30): the caller that receives this response is the only party that accepted the publish
+  // and still holds the inode capability below, so it can withdraw through the hold. A crash
+  // before the removal reached disk would otherwise bring the hidden hard link back with the
+  // full private content outside the ledger lifecycle.
+  let durable = true;
   try {
     await syncDirectory(stagingDir);
   } catch {
-    await syncDirectory(stagingDir).catch(() => undefined);
+    durable = await syncDirectory(stagingDir).then(() => true, () => false);
   }
   const st = await handle.stat({ bigint: true });
-  await handle.close();
-  return {
-    size: Number(st.size),
-    mtimeMs: Number(st.mtimeMs),
-    ...identityOf(st),
-    pendingName: toPosixRel(wdReal, pendingAbs),
-  };
+  const identity = { size: Number(st.size), mtimeMs: Number(st.mtimeMs), ...identityOf(st), durable };
+  if (!holds) {
+    await handle.close();
+    return identity;
+  }
+  // Inode-bound capability (round 29/30): the daemon keeps the writer's own descriptor open
+  // for the caller's bookkeeping window. `eraseIfSame` with this hold zeroes the content
+  // through the descriptor wherever the directory went; `releaseNewFile` closes it. Nothing
+  // is ever deleted by pathname after the fact — no marker, no finalize unlink.
+  return { ...identity, holdId: holds.register(handle, st) };
 }
 
 /**
@@ -744,98 +751,68 @@ export function chooseStagingDir(rootDev: bigint, rootDir: string, parentDev: bi
   return rootDev === parentDev ? rootDir : parentDir;
 }
 
-function toPosixRel(fromDir: string, abs: string): string {
-  return path.relative(fromDir, abs).split(path.sep).join('/');
-}
-
-const PENDING_MARKER_RE = /^\..+\.[0-9a-f-]{36}\.pending$/;
+export interface NewFileHold { handle: FileHandle; dev: bigint; ino: bigint }
 
 /**
- * Resolve a caller-supplied pending-marker path: inside workdir, marker-shaped basename,
- * real parent inside workdir. Returns the absolute path (lexical, under the given workdir).
+ * Open descriptors of freshly published files, kept for the caller's bookkeeping window so
+ * that a withdrawal can target the inode itself instead of a mutable pathname. Bounded in
+ * count and lifetime: an abandoned hold (client gone) is closed after `ttlMs`, which leaves
+ * the published file exactly as a plain `writeNewFile` would have.
  */
-async function resolvePendingMarker(workdir: string, pendingName: string): Promise<string> {
-  const pendingSub = assertInsideWorkdir(workdir, pendingName);
-  if (pendingSub === '' || !PENDING_MARKER_RE.test(path.basename(pendingSub))) {
-    throw new Error(`not a pending marker: ${pendingName}`);
+export class NewFileHoldRegistry {
+  private readonly holds = new Map<string, NewFileHold & { timer: NodeJS.Timeout }>();
+  constructor(private readonly opts: { ttlMs?: number; max?: number } = {}) {}
+
+  register(handle: FileHandle, st: { dev: bigint; ino: bigint }): string {
+    const max = this.opts.max ?? 64;
+    while (this.holds.size >= max) {
+      const oldest = this.holds.keys().next().value;
+      if (oldest === undefined) break;
+      void this.release(oldest);
+    }
+    const id = randomUUID();
+    const timer = setTimeout(() => { void this.release(id); }, this.opts.ttlMs ?? 120_000);
+    timer.unref?.();
+    this.holds.set(id, { handle, dev: st.dev, ino: st.ino, timer });
+    return id;
   }
-  const pendingAbs = path.join(workdir, pendingSub);
-  await assertRealParentInsideWorkdir(workdir, pendingAbs);
-  return pendingAbs;
+
+  get(id: string): NewFileHold | null {
+    const hold = this.holds.get(id);
+    return hold ? { handle: hold.handle, dev: hold.dev, ino: hold.ino } : null;
+  }
+
+  async release(id: string): Promise<boolean> {
+    const hold = this.holds.get(id);
+    if (!hold) return false;
+    this.holds.delete(id);
+    clearTimeout(hold.timer);
+    await hold.handle.close().catch(() => undefined);
+    return true;
+  }
+
+  async closeAll(): Promise<void> {
+    await Promise.all([...this.holds.keys()].map((id) => this.release(id)));
+  }
+
+  get size(): number {
+    return this.holds.size;
+  }
 }
 
-/**
- * Second phase of `writeNewFile`: drop the `.pending` marker once the caller has finished
- * its bookkeeping, leaving the published target as the inode's only name. Refuses (without
- * touching anything) when the target is no longer anchored inside workdir, when the marker
- * no longer carries the written inode, or when an extra link would remain — the caller then
- * withdraws through `eraseIfSame`. Idempotent: a marker already gone with the target as the
- * sole link is a completed finalize (lost-response retry).
- */
-export async function finalizeNewFile(
-  workdir: string,
-  relPath: string,
-  pendingName: string,
-  dev: string,
-  ino: string,
-): Promise<{ finalized: boolean }> {
-  const sub = assertInsideWorkdir(workdir, relPath);
-  if (sub === '') throw new Error('cannot finalize workdir root');
-  const abs = path.join(workdir, sub);
-  await assertRealParentInsideWorkdir(workdir, abs);
-  const pendingAbs = await resolvePendingMarker(workdir, pendingName);
-  const O_NOFOLLOW = (fsConstants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
-  // The published target must still be our inode, reached without following a final symlink.
-  const handle = await fs.open(abs, fsConstants.O_RDONLY | O_NOFOLLOW);
-  try {
-    const own = await handle.stat({ bigint: true });
-    if (!own.isFile() || !sameIdentity(own, dev, ino)) throw new Error(`publish not anchored: ${sub}`);
-    const marker = await fs.lstat(pendingAbs, { bigint: true }).catch((err: NodeJS.ErrnoException) => {
-      if (err?.code === 'ENOENT') return null;
-      throw err;
-    });
-    if (!marker) {
-      // Marker already gone: only a completed finalize leaves the target as the sole link.
-      if (own.nlink !== 1n) throw new Error(`pending link was replaced or moved: ${sub}`);
-      return { finalized: true };
-    }
-    if (!marker.isFile() || marker.dev !== own.dev || marker.ino !== own.ino) {
-      throw new Error(`pending link was replaced or moved: ${sub}`);
-    }
-    await fs.unlink(pendingAbs);
-    // Close the lstat→unlink gap after the fact: our link count must have dropped by one and
-    // the target must now be the only name; any extra link is an untracked private copy.
-    const after = await handle.stat({ bigint: true });
-    if (after.nlink !== own.nlink - 1n || after.nlink !== 1n) {
-      throw new Error(`pending link was replaced or moved: ${sub}`);
-    }
-  } finally {
-    await handle.close().catch(() => undefined);
-  }
-  // Durability of the marker removal, retrying once; a persistent failure leaves at worst a
-  // marker that reappears after a crash (verifyNewFile then reports the pending state again).
-  const markerDir = await fs.realpath(path.dirname(pendingAbs));
-  try {
-    await syncDirectory(markerDir);
-  } catch {
-    await syncDirectory(markerDir).catch(() => undefined);
-  }
-  return { finalized: true };
+/** Second phase of `writeNewFile` / `verifyNewFile`: drop the daemon-side descriptor. */
+export async function releaseNewFile(holds: NewFileHoldRegistry, holdId: string): Promise<{ released: boolean }> {
+  return { released: await holds.release(holdId) };
 }
 
 /**
- * Completion markers for `name` in the directories a writeNewFile may have staged in (the
- * workdir root, and the target's own directory for cross-device targets). A scan failure is
- * not "no marker": it propagates so the caller retries instead of accepting a publish the
- * original writer may still withdraw.
+ * True while a writeNewFile staging link for `name` still exists in one of the directories
+ * a write may have staged in (the workdir root; the target's own directory for
+ * cross-device targets). A scan failure is not "no marker": it propagates so the caller
+ * retries instead of accepting a publish the original writer may still withdraw.
  */
-async function scanMarkers(
-  dirs: string[],
-  name: string,
-): Promise<{ staging: boolean; pending: string[] }> {
+async function hasStagingSibling(dirs: string[], name: string): Promise<boolean> {
   const prefix = `.${name}.`;
-  let staging = false;
-  const pending: string[] = [];
   for (const dir of [...new Set(dirs)]) {
     let entries: string[];
     try {
@@ -843,28 +820,24 @@ async function scanMarkers(
     } catch (err) {
       throw new Error(`cannot scan completion marker: ${(err as NodeJS.ErrnoException)?.code ?? 'unknown'}`);
     }
-    for (const entry of entries) {
-      if (!entry.startsWith(prefix)) continue;
-      // Any `.<name>.*.staging` sibling is treated as in flight (conservative); only a
-      // well-formed `.pending` marker can vouch for a written-but-unfinalized publish.
-      if (entry.endsWith('.staging')) staging = true;
-      else if (PENDING_MARKER_RE.test(entry)) pending.push(path.join(dir, entry));
-    }
+    if (entries.some((entry) => entry.startsWith(prefix) && entry.endsWith('.staging'))) return true;
   }
-  return { staging, pending };
+  return false;
 }
 
 /**
  * Prove that the entry at `relPath` is the regular file this host wrote: not a symlink,
  * parent still inside workdir, exact size and SHA-256 of the content. Used after a lost
  * `writeNewFile` response, where size/mtime alone can be spoofed by a workdir-level
- * process. Returns the inode identity so a later cleanup can target only this file.
+ * process. Returns the inode identity so a later cleanup can target only this file; with a
+ * hold registry the verified descriptor is retained as the caller's inode capability.
  */
 export async function verifyNewFile(
   workdir: string,
   relPath: string,
   expectedSha256: string,
   expectedSize: number,
+  holds?: NewFileHoldRegistry,
 ): Promise<NewFileIdentity> {
   const sub = assertInsideWorkdir(workdir, relPath);
   if (sub === '') throw new Error('cannot verify workdir root');
@@ -873,9 +846,11 @@ export async function verifyNewFile(
   const entry = await fs.lstat(abs, { bigint: true });
   if (!entry.isFile()) throw new Error(`not a regular file: ${sub}`);
   if (Number(entry.size) !== expectedSize) throw new Error(`size mismatch: ${sub}`);
-  // Never follow a final symlink (a link to the renamed original must not pass).
+  // Never follow a final symlink (a link to the renamed original must not pass). Read/write
+  // so the retained descriptor can later zero the content.
   const O_NOFOLLOW = (fsConstants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
-  const handle = await fs.open(abs, fsConstants.O_RDONLY | O_NOFOLLOW);
+  const handle = await fs.open(abs, fsConstants.O_RDWR | O_NOFOLLOW);
+  let retained = false;
   try {
     const opened = await handle.stat({ bigint: true });
     // The opened inode must be the very entry lstat saw (no swap in between).
@@ -884,30 +859,18 @@ export async function verifyNewFile(
     // the writer is still in flight (its staging link) or the staging link was renamed
     // away — in both cases the writer may still withdraw (zero) this inode, so recovery
     // must not accept it. This holds even when the staging marker name is gone.
-    // Two links are accepted only when the second one is proven below to be this write's own
-    // `.pending` marker (written, awaiting finalize).
-    if (opened.nlink !== 1n && opened.nlink !== 2n) throw new Error(`write still in flight: ${sub}`);
+    if (opened.nlink !== 1n) throw new Error(`write still in flight: ${sub}`);
     const buf = await handle.readFile();
     if (buf.length !== expectedSize) throw new Error(`size mismatch: ${sub}`);
     const actual = createHash('sha256').update(buf).digest('hex');
     if (actual !== expectedSha256) throw new Error(`content mismatch: ${sub}`);
-    // Server-side completion: a matching published file is not enough while its `.staging`
+    // Server-side completion: a matching published file is not enough while its staging
     // link still exists — the original writeNewFile may still withdraw the publish on a
-    // later failure. With the staging link gone the publish is either final (single link) or
-    // awaiting finalize (exactly one `.pending` marker that is this very inode); a second
-    // link that is not such a marker is an untracked private copy and is refused.
+    // later failure. Only after the staging link is gone is the publish final.
     const wdReal = await fs.realpath(workdir);
-    const markers = await scanMarkers([wdReal, await fs.realpath(path.dirname(abs))], path.basename(abs));
-    if (markers.staging) throw new Error(`write still in flight: ${sub}`);
-    let pendingName: string | undefined;
-    for (const candidate of markers.pending) {
-      const st = await fs.lstat(candidate, { bigint: true }).catch(() => null);
-      if (st && st.isFile() && st.dev === opened.dev && st.ino === opened.ino) {
-        pendingName = toPosixRel(wdReal, candidate);
-        break;
-      }
+    if (await hasStagingSibling([wdReal, await fs.realpath(path.dirname(abs))], path.basename(abs))) {
+      throw new Error(`write still in flight: ${sub}`);
     }
-    if ((opened.nlink === 2n) !== (pendingName !== undefined)) throw new Error(`write still in flight: ${sub}`);
     // Reading was an await: the pathname must still name the inode whose content was
     // hashed, and its parent must still be inside workdir, or the recovery is void.
     await assertRealParentInsideWorkdir(workdir, abs);
@@ -915,14 +878,12 @@ export async function verifyNewFile(
     if (!after || !after.isFile() || after.dev !== opened.dev || after.ino !== opened.ino) {
       throw new Error(`identity mismatch after read: ${sub}`);
     }
-    return {
-      size: Number(opened.size),
-      mtimeMs: Number(opened.mtimeMs),
-      ...identityOf(opened),
-      ...(pendingName !== undefined ? { pendingName } : {}),
-    };
+    const identity = { size: Number(opened.size), mtimeMs: Number(opened.mtimeMs), ...identityOf(opened) };
+    if (!holds) return identity;
+    retained = true;
+    return { ...identity, holdId: holds.register(handle, opened) };
   } finally {
-    await handle.close();
+    if (!retained) await handle.close();
   }
 }
 
@@ -936,19 +897,35 @@ export async function verifyNewFile(
  * match dev/ino, truncate through that descriptor (bound to the inode, not to the pathname).
  * A zero-byte name may remain; that is the conservative outcome. Returns whether our inode
  * was erased.
+ *
+ * With a hold (the descriptor retained by writeNewFile / verifyNewFile) the erase goes
+ * through that descriptor and needs no pathname at all — the directory may have been moved
+ * out of workdir since. The hold is released afterwards.
  */
 export async function eraseIfSame(
   workdir: string,
   relPath: string,
   dev: string,
   ino: string,
-  pendingName?: string,
+  holds?: NewFileHoldRegistry,
+  holdId?: string,
 ): Promise<{ erased: boolean }> {
   const sub = assertInsideWorkdir(workdir, relPath);
   if (sub === '') throw new Error('cannot delete workdir root');
+  if (holdId !== undefined && holds) {
+    const hold = holds.get(holdId);
+    if (hold && sameIdentity(hold, dev, ino)) {
+      try {
+        await hold.handle.truncate(0);
+        return { erased: true };
+      } finally {
+        await holds.release(holdId);
+      }
+    }
+  }
   const abs = path.join(workdir, sub);
   // A vanished parent (the directory was moved out of workdir) is not an escape: the
-  // published name simply no longer reaches our inode, and the marker is tried next.
+  // published name simply no longer reaches our inode.
   const parentGone = await assertRealParentInsideWorkdir(workdir, abs).then(
     () => false,
     (err: NodeJS.ErrnoException) => {
@@ -956,13 +933,8 @@ export async function eraseIfSame(
       throw err;
     },
   );
-  if (!parentGone && (await truncateByIdentity(abs, dev, ino))) return { erased: true };
-  // The published name no longer reaches our inode (its directory may have been moved out
-  // of workdir after the write): the `.pending` marker left by the two-phase publish is a
-  // second name of the same inode, anchored where writeNewFile staged it.
-  if (pendingName === undefined) return { erased: false };
-  const pendingAbs = await resolvePendingMarker(workdir, pendingName);
-  return { erased: await truncateByIdentity(pendingAbs, dev, ino) };
+  if (parentGone) return { erased: false };
+  return { erased: await truncateByIdentity(abs, dev, ino) };
 }
 
 async function truncateByIdentity(abs: string, dev: string, ino: string): Promise<boolean> {

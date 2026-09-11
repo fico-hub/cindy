@@ -176,34 +176,31 @@ export interface FsRpcMethods {
   writeNewFile: {
     params: { workdir: string; relPath: string; content: string };
     /**
-     * 两阶段发布:成功后仍保留一个 `.pending` 硬链接标记(pendingName,workdir 相对 posix
-     * 路径)作为调用方后续登记期间的 inode 级清理能力;登记完成后须调 finalizeNewFile 收尾。
+     * 成功后 daemon 保留写入器自己的文件描述符作为调用方登记期间的 inode 级能力(holdId,
+     * 超时自动关闭);durable=false 表示 staging 移除未落盘,调用方应经 hold 撤回。
      */
-    result: { size: number; mtimeMs: number; dev: string; ino: string; pendingName: string };
+    result: { size: number; mtimeMs: number; dev: string; ino: string; holdId: string; durable: boolean };
   };
   /**
    * 核验 relPath 是本机写下的那份普通文件(非 symlink、父目录仍在 workdir 内、大小与
-   * 内容 SHA-256 一致),用于 writeNewFile 响应丢失后的消歧;返回 inode 身份。
-   * 尚未 finalize 的发布会带回 pendingName;`.staging` 仍在(写入进行中)则拒绝。
+   * 内容 SHA-256 一致),用于 writeNewFile 响应丢失后的消歧;返回 inode 身份,并把核验
+   * 用的描述符保留为 hold。`.staging` 仍在或链接数不为 1(写入进行中)则拒绝。
    */
   verifyNewFile: {
     params: { workdir: string; relPath: string; sha256: string; size: number };
-    result: { size: number; mtimeMs: number; dev: string; ino: string; pendingName?: string };
+    result: { size: number; mtimeMs: number; dev: string; ino: string; holdId: string };
   };
-  /**
-   * writeNewFile 的第二阶段:目标仍锚定在 workdir 内且 `.pending` 标记仍是该 inode 时移除标记,
-   * 之后目标必须是该 inode 唯一的名字;否则拒绝且不动任何东西(调用方转 eraseIfSame 撤回)。
-   */
-  finalizeNewFile: {
-    params: { workdir: string; relPath: string; pendingName: string; dev: string; ino: string };
-    result: { finalized: boolean };
+  /** 登记完成后释放 daemon 侧描述符;不删任何路径名。 */
+  releaseNewFile: {
+    params: { holdId: string };
+    result: { released: boolean };
   };
   /**
    * 仅当 relPath 仍是给定 inode 身份的普通文件时经 fd 清零其内容;不删路径名(路径名删除有 TOCTOU)。
-   * relPath 已不指向该 inode(目录被移出)时,可经 pendingName 标记(同 inode 的第二个名字)清零。
+   * 带 holdId 时直接经 daemon 保留的描述符清零(目录已被移出 workdir 也能触达),并释放 hold。
    */
   eraseIfSame: {
-    params: { workdir: string; relPath: string; dev: string; ino: string; pendingName?: string };
+    params: { workdir: string; relPath: string; dev: string; ino: string; holdId?: string };
     result: { erased: boolean };
   };
   createFolder: {

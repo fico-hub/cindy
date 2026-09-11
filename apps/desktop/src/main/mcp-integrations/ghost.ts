@@ -535,7 +535,16 @@ async function writeLargeResultToRemote(
       { workdir, relPath, content: text },
       { beforeSend: revalidate },
     );
-    return { dev: written.dev, ino: written.ino, ...(typeof written.pendingName === 'string' ? { pendingName: written.pendingName } : {}) };
+    const anchor: SpillAnchor = { dev: written.dev, ino: written.ino, ...(typeof written.holdId === 'string' ? { holdId: written.holdId } : {}) };
+    if (written.durable === false) {
+      // The staging removal did not reach disk (round 30): a crash could bring the hidden
+      // hard link back with the full private content outside the ledger lifecycle. This
+      // client is the only party that accepted the publish and still holds the descriptor:
+      // withdraw through it and report the write as failed.
+      await remote.request(remoteHostId, 'eraseIfSame', { workdir, relPath, dev: anchor.dev, ino: anchor.ino, ...(anchor.holdId !== undefined ? { holdId: anchor.holdId } : {}) }).catch(() => undefined);
+      throw new Error('remote spill not durable: staging removal did not reach disk');
+    }
+    return anchor;
   } catch (err) {
     if (isRemoteResultUnknown(err)) {
       return reconcileUnknownRemoteWrite(remote, remoteHostId, workdir, relPath, bytes, err);
@@ -618,7 +627,7 @@ async function reconcileUnknownRemoteWrite(
         remote.request(remoteHostId, 'verifyNewFile', { workdir, relPath, sha256, size }),
         budget,
       );
-      return { dev: verified.dev, ino: verified.ino, ...(typeof verified.pendingName === 'string' ? { pendingName: verified.pendingName } : {}) };
+      return { dev: verified.dev, ino: verified.ino, ...(typeof verified.holdId === 'string' ? { holdId: verified.holdId } : {}) };
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
     }
@@ -650,10 +659,10 @@ function isRemoteResultUnknown(err: unknown): boolean {
 /** dev/ino 以十进制字符串承载:Windows 文件 ID 为 64 位,JS number 会丢低位。 */
 interface SpillIdentity { dev: string; ino: string }
 /**
- * 清理锚:inode 身份,远端还带两阶段发布留下的 `.pending` 标记路径(workdir 相对 posix),
- * 目录被移出 workdir 后仍可经该标记触达同一 inode。
+ * 清理锚:inode 身份,远端还带 daemon 保留的描述符 hold(holdId):目录被移出 workdir 后
+ * 仍可经该描述符清零同一 inode,登记完成后 releaseNewFile 关闭。
  */
-interface SpillAnchor extends SpillIdentity { pendingName?: string }
+interface SpillAnchor extends SpillIdentity { holdId?: string }
 type LocalSpillAnchor = SpillAnchor;
 
 /**
@@ -711,11 +720,11 @@ async function discardLargeResultFile(
     if (!anchor) return;
     if (target.remoteHostId) {
       // Identity-checked deletion on the daemon: never follows a swapped symlink, never
-      // removes anything but the inode this call created/verified. The `.pending` marker
-      // of the two-phase publish is the fallback name when the output directory was moved.
+      // removes anything but the inode this call created/verified. With the daemon-held
+      // descriptor (hold) no pathname is needed at all: the directory may have been moved.
       await getRemoteFileBrowser().request(target.remoteHostId, 'eraseIfSame', {
         workdir: target.workingDir, relPath, dev: anchor.dev, ino: anchor.ino,
-        ...(anchor.pendingName !== undefined ? { pendingName: anchor.pendingName } : {}),
+        ...(anchor.holdId !== undefined ? { holdId: anchor.holdId } : {}),
       });
       return;
     }
@@ -1887,8 +1896,17 @@ export function getCindyGhostsMcpDeps(
         anchor = outcome?.identity ?? null;
         // Retain an inode-bound capability across the bookkeeping below (round 29): a
         // path-only cleanup cannot follow the output directory once a workdir process moves
-        // it out of the workdir between the writer's success and the ledger commit.
-        if (anchor) hold = await bindLocalSpill(path.join(target.workingDir, relativePath), anchor);
+        // it out of the workdir between the writer's success and the ledger commit. A
+        // write whose attested inode can no longer be bound (moved or replaced in that gap)
+        // is an unsettled write (round 30): nothing is booked in its name, the path is
+        // cleaned by identity where still reachable, and the call fails.
+        if (anchor) {
+          hold = await bindLocalSpill(path.join(target.workingDir, relativePath), anchor);
+          if (!hold) {
+            await discardLargeResultFile(target, relativePath, anchor);
+            throw new Error('Tool result file lost its anchor before registration');
+          }
+        }
       }
       try {
         // The write is another async boundary: an instance that ended or lost its
@@ -1906,18 +1924,36 @@ export function getCindyGhostsMcpDeps(
         // ended or lost its grant meanwhile must not keep refs or a private file in its name.
         try {
           await target.revalidate();
-          // Remote two-phase publish: only now is the daemon's `.pending` marker dropped. A
-          // refusal (target no longer anchored in the workdir, marker replaced, extra link)
-          // withdraws the whole spill; the marker itself is the name the erase reaches.
-          if (target.remoteHostId && anchor?.pendingName !== undefined) {
-            await getRemoteFileBrowser().request(target.remoteHostId, 'finalizeNewFile', {
-              workdir: target.workingDir, relPath: relativePath, pendingName: anchor.pendingName, dev: anchor.dev, ino: anchor.ino,
-            });
-          }
         } catch (err) {
           for (const id of insertedRefs) await ledger.removeRefById(id).catch(() => 0);
           await discardLargeResultFile(target, relativePath, anchor, hold);
           throw err;
+        }
+        // Remote: drop the daemon-held descriptor only now. The authorization is re-checked
+        // at the real frame boundary (round 30): reconnecting / handshaking the host may take
+        // long, and an instance that ended or lost its grant meanwhile withdraws the whole
+        // spill through the still-held descriptor instead of keeping the file in its name.
+        if (target.remoteHostId && anchor?.holdId !== undefined) {
+          let authorizationRevoked = false;
+          try {
+            await getRemoteFileBrowser().request(
+              target.remoteHostId,
+              'releaseNewFile',
+              { holdId: anchor.holdId },
+              { beforeSend: async () => { try { await target.revalidate(); } catch (err) { authorizationRevoked = true; throw err; } } },
+            );
+          } catch (err) {
+            if (authorizationRevoked) {
+              for (const id of insertedRefs) await ledger.removeRefById(id).catch(() => 0);
+              await discardLargeResultFile(target, relativePath, anchor, hold);
+              throw err;
+            }
+            // The bytes are durable, referenced and re-validated; a lost release response only
+            // leaves a daemon-side descriptor that its TTL closes.
+            log.warn('ghost large result: remote hold release failed; the daemon closes it after its TTL', {
+              remoteHostId: target.remoteHostId, relPath: relativePath, error: err instanceof Error ? err.message : String(err),
+            });
+          }
         }
         return relativePath;
       } finally {

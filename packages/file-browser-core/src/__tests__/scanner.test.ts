@@ -17,7 +17,8 @@ import {
   writeNewFile,
   verifyNewFile,
   eraseIfSame,
-  finalizeNewFile,
+  releaseNewFile,
+  NewFileHoldRegistry,
   chooseStagingDir,
   identityOf,
   sameIdentity,
@@ -703,21 +704,20 @@ describe('verifyNewFile / eraseIfSame', () => {
     }
   });
 
-  // Codex P1 (round 21 / round 29): a swap landing between the staging lstat and the
-  // rename to the `.pending` marker is caught by the marker identity and the link count.
-  it('writeNewFile detects a staging swap between lstat and the marker rename and withdraws', async () => {
+  // Codex P1 (round 21): a swap landing between lstat and unlink is caught by the link count.
+  it('writeNewFile detects a staging swap between lstat and unlink and withdraws', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-staging-swap-'));
     const realRoot = await fsp.realpath(root);
-    const realRename = fsp.rename.bind(fsp);
+    const realUnlink = fsp.unlink.bind(fsp);
     let swapped = '';
-    const spy = vi.spyOn(fsp, 'rename').mockImplementation(async (from, to) => {
-      const p = String(from);
-      if (p.endsWith('.staging') && !swapped) {
+    const spy = vi.spyOn(fsp, 'unlink').mockImplementation(async (target) => {
+      const p = String(target);
+      if (p.includes('.staging') && !swapped) {
         swapped = p;
-        await realRename(p, path.join(realRoot, 'stolen-copy'));
+        await fsp.rename(p, path.join(realRoot, 'stolen-copy'));
         await fsWriteFile(p, 'unrelated user data');
       }
-      return realRename(from, to);
+      return realUnlink(target);
     });
     try {
       await mkdir(path.join(root, 'out'));
@@ -725,10 +725,6 @@ describe('verifyNewFile / eraseIfSame', () => {
       expect(swapped).not.toBe('');
       expect((await fsStat(path.join(realRoot, 'stolen-copy'))).size).toBe(0);
       expect((await fsStat(path.join(root, 'out', 'spill.json')).catch(() => null))?.size ?? 0).toBe(0); // withdrawn: erased, name may remain
-      // The planted file (now under the marker name) is someone else's and is left intact.
-      const planted = (await fsp.readdir(realRoot)).find(n => n.endsWith('.pending'));
-      expect(planted).toBeDefined();
-      expect(await fsReadFile(path.join(realRoot, planted!), 'utf8')).toBe('unrelated user data');
     } finally {
       spy.mockRestore();
       await rm(root, { recursive: true, force: true });
@@ -766,7 +762,7 @@ describe('verifyNewFile / eraseIfSame', () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
-  it('writeNewFile keeps the publish when only the root fsync after the marker rename fails', async () => {
+  it('writeNewFile keeps the publish but reports durable:false when the root fsync after staging removal fails', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-root-sync-fail-'));
     const realRoot = await fsp.realpath(root);
     const realOpen = fsp.open.bind(fsp);
@@ -786,28 +782,28 @@ describe('verifyNewFile / eraseIfSame', () => {
       expect(rootSyncs).toBe(2); // one attempt + one retry, publish kept
       expect(await fsReadFile(path.join(root, 'out', 'spill.json'), 'utf8')).toBe('{"a":1}');
       expect((await fsp.readdir(root)).filter(n => n.includes('.staging'))).toEqual([]);
-      expect((await fsp.readdir(root)).filter(n => n.endsWith('.pending'))).toEqual([path.basename(written.pendingName)]);
+      // Round 30: the persistent sync failure is reported, not swallowed — the caller decides.
+      expect(written.durable).toBe(false);
     } finally {
       spy.mockRestore();
       await rm(root, { recursive: true, force: true });
     }
   });
 
-  // Codex P1 (round 12 / round 29): the staging hard link is a full private copy. Its
-  // rename to the `.pending` marker is required for writeNewFile's success (a failure zeroes
-  // the content and withdraws the publish); its removal is required for finalizeNewFile's
-  // success, and a failure there is reported so the caller withdraws through eraseIfSame.
-  it('writeNewFile fails closed when the staging link cannot be renamed to the marker', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-staging-rename-'));
-    const realRename = fsp.rename.bind(fsp);
+  // Codex P1 (round 12): the staging hard link is a full private copy; its removal is
+  // required for success, and a failure zeroes the content and withdraws the publish.
+  it('writeNewFile fails closed when the staging hard link cannot be removed', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-staging-unlink-'));
+    const realUnlink = fsp.unlink.bind(fsp);
     let stagingPath = '';
-    const spy = vi.spyOn(fsp, 'rename').mockImplementation(async (from, to) => {
-      const p = String(from);
-      if (p.endsWith('.staging') && !stagingPath) {
+    const spy = vi.spyOn(fsp, 'unlink').mockImplementation(async (target) => {
+      const p = String(target);
+      if (p.includes('.staging') && !stagingPath) {
         stagingPath = p;
-        throw Object.assign(new Error('EBUSY: resource busy'), { code: 'EBUSY' });
+        const err = Object.assign(new Error('EBUSY: resource busy'), { code: 'EBUSY' });
+        throw err;
       }
-      return realRename(from, to);
+      return realUnlink(target);
     });
     try {
       await expect(writeNewFile(root, 'spill.json', '{"secret":1}')).rejects.toThrow(/EBUSY/);
@@ -822,122 +818,117 @@ describe('verifyNewFile / eraseIfSame', () => {
     }
   });
 
-  it('finalizeNewFile reports a marker that cannot be removed and eraseIfSame still reaches the inode', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-finalize-unlink-'));
-    const realUnlink = fsp.unlink.bind(fsp);
-    let markerPath = '';
-    const spy = vi.spyOn(fsp, 'unlink').mockImplementation(async (target) => {
-      const p = String(target);
-      if (p.endsWith('.pending') && !markerPath) {
-        markerPath = p;
-        throw Object.assign(new Error('EBUSY: resource busy'), { code: 'EBUSY' });
-      }
-      return realUnlink(target);
-    });
-    try {
-      const written = await writeNewFile(root, 'spill.json', '{"secret":1}');
-      await expect(finalizeNewFile(root, 'spill.json', written.pendingName, written.dev, written.ino)).rejects.toThrow(/EBUSY/);
-      expect(markerPath).not.toBe('');
-      // Nothing was destroyed by the refusal; the caller's withdrawal zeroes both names.
-      expect(await fsReadFile(path.join(root, 'spill.json'), 'utf8')).toBe('{"secret":1}');
-      expect(await eraseIfSame(root, 'spill.json', written.dev, written.ino, written.pendingName)).toEqual({ erased: true });
-      expect((await fsStat(markerPath)).size).toBe(0);
-    } finally {
-      spy.mockRestore();
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  // Codex P1 (round 29): the caller's bookkeeping after writeNewFile (authorization
+  // Codex P1 (round 29/30): the caller's bookkeeping after writeNewFile (authorization
   // re-check, ledger) is an async window in which a workdir process can move the output
-  // directory out of the workdir; the `.pending` marker at the root is a second name of the
-  // same inode, so the withdrawal still reaches the content, and finalize refuses.
-  describe('two-phase publish (round 29)', () => {
-    it('leaves a root-anchored pending marker that verifyNewFile reports and finalizeNewFile removes', async () => {
-      const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-two-phase-'));
+  // directory out of the workdir. The daemon keeps the writer's own descriptor as the
+  // caller's inode capability: the withdrawal goes through it, never through a pathname.
+  describe('daemon-held descriptor (round 30)', () => {
+    it('writeNewFile retains a hold that eraseIfSame uses after the directory was moved out', async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-hold-moved-'));
+      const outside = await mkdtemp(path.join(os.tmpdir(), 'xdt-hold-outside-'));
+      const holds = new NewFileHoldRegistry();
       try {
         await mkdir(path.join(root, 'out'));
-        const written = await writeNewFile(root, 'out/spill.json', '{"a":1}');
-        expect(written.pendingName).toMatch(/^\.spill\.json\.[0-9a-f-]{36}\.pending$/);
-        const markerAbs = path.join(root, written.pendingName);
-        expect((await fsp.stat(markerAbs, { bigint: true })).ino.toString()).toBe(written.ino); // bigint: Windows file ids are 64-bit
-        expect((await fsStat(path.join(root, 'out', 'spill.json'))).nlink).toBe(2);
-        // Lost-response recovery sees the pending state and learns the marker name.
-        await expect(verifyNewFile(root, 'out/spill.json', sha('{"a":1}'), 7)).resolves.toMatchObject({ ino: written.ino, pendingName: written.pendingName });
-        expect(await finalizeNewFile(root, 'out/spill.json', written.pendingName, written.dev, written.ino)).toEqual({ finalized: true });
-        expect((await fsStat(path.join(root, 'out', 'spill.json'))).nlink).toBe(1);
-        expect((await fsp.readdir(root)).filter(n => n.endsWith('.pending') || n.endsWith('.staging'))).toEqual([]);
-        const final = await verifyNewFile(root, 'out/spill.json', sha('{"a":1}'), 7);
-        expect(final).toMatchObject({ ino: written.ino });
-        expect(final.pendingName).toBeUndefined();
-        // Idempotent after a lost finalize response.
-        expect(await finalizeNewFile(root, 'out/spill.json', written.pendingName, written.dev, written.ino)).toEqual({ finalized: true });
-      } finally { await rm(root, { recursive: true, force: true }); }
-    });
-
-    it('withdraws through the marker after the output directory was moved out before finalize', async () => {
-      const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-two-phase-moved-'));
-      const outside = await mkdtemp(path.join(os.tmpdir(), 'xdt-two-phase-outside-'));
-      try {
-        await mkdir(path.join(root, 'out'));
-        const written = await writeNewFile(root, 'out/spill.json', '{"secret":1}');
+        const written = await writeNewFile(root, 'out/spill.json', '{"secret":1}', holds);
+        expect(written.holdId).toMatch(/^[0-9a-f-]{36}$/);
+        expect(written.durable).toBe(true);
+        expect(holds.size).toBe(1);
+        // No marker, no second link: the published name is the inode's only name.
+        expect((await fsp.readdir(root)).filter(n => n.startsWith('.'))).toEqual([]);
+        expect((await fsp.stat(path.join(root, 'out', 'spill.json'), { bigint: true })).nlink).toBe(1n);
         await fsp.rename(path.join(root, 'out'), path.join(outside, 'out'));
-        // Finalize must not bless a publish whose target left the workdir.
-        await expect(finalizeNewFile(root, 'out/spill.json', written.pendingName, written.dev, written.ino)).rejects.toThrow();
-        expect(await fsReadFile(path.join(outside, 'out', 'spill.json'), 'utf8')).toBe('{"secret":1}');
-        // Without the marker the erase cannot reach the inode any more ...
+        // Without the hold the erase cannot reach the inode any more (vanished parent is not an escape) ...
         expect(await eraseIfSame(root, 'out/spill.json', written.dev, written.ino)).toEqual({ erased: false });
-        // ... with it, the content is zeroed wherever the directory went.
-        expect(await eraseIfSame(root, 'out/spill.json', written.dev, written.ino, written.pendingName)).toEqual({ erased: true });
+        expect(await fsReadFile(path.join(outside, 'out', 'spill.json'), 'utf8')).toBe('{"secret":1}');
+        // ... with it, the content is zeroed wherever the directory went, and the hold is released.
+        expect(await eraseIfSame(root, 'out/spill.json', written.dev, written.ino, holds, written.holdId)).toEqual({ erased: true });
         expect((await fsStat(path.join(outside, 'out', 'spill.json'))).size).toBe(0);
+        expect(holds.size).toBe(0);
+        expect(await releaseNewFile(holds, written.holdId!)).toEqual({ released: false });
       } finally {
+        await holds.closeAll();
         await rm(root, { recursive: true, force: true });
         await rm(outside, { recursive: true, force: true });
       }
     });
 
-    it('finalizeNewFile refuses a replaced marker, an extra link, and a foreign target', async () => {
-      const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-two-phase-refuse-'));
+    it('releaseNewFile closes the hold and a stale or foreign hold never erases anything', async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-hold-release-'));
+      const holds = new NewFileHoldRegistry();
       try {
-        const written = await writeNewFile(root, 'spill.json', '{"secret":1}');
-        const markerAbs = path.join(root, written.pendingName);
-        // Marker renamed away and replaced by an unrelated file: refused, nothing touched.
-        await fsp.rename(markerAbs, path.join(root, 'stolen-copy'));
-        await fsWriteFile(markerAbs, 'unrelated user data');
-        await expect(finalizeNewFile(root, 'spill.json', written.pendingName, written.dev, written.ino)).rejects.toThrow(/replaced or moved/);
-        expect(await fsReadFile(markerAbs, 'utf8')).toBe('unrelated user data');
-        expect(await fsReadFile(path.join(root, 'stolen-copy'), 'utf8')).toBe('{"secret":1}');
-        // Marker merely renamed away (extra private link remains): refused.
-        await rm(markerAbs);
-        await expect(finalizeNewFile(root, 'spill.json', written.pendingName, written.dev, written.ino)).rejects.toThrow(/replaced or moved/);
-        // Marker restored but a third link exists: the marker is removed, the extra link is reported.
-        await fsp.rename(path.join(root, 'stolen-copy'), markerAbs);
-        await fsLink(path.join(root, 'spill.json'), path.join(root, 'third-link'));
-        await expect(finalizeNewFile(root, 'spill.json', written.pendingName, written.dev, written.ino)).rejects.toThrow(/replaced or moved/);
-        await rm(path.join(root, 'third-link'));
-        // Target replaced by a foreign file: refused before touching anything.
-        const second = await writeNewFile(root, 'other.json', '{"b":2}');
+        const written = await writeNewFile(root, 'spill.json', '{"secret":1}', holds);
+        const other = await writeNewFile(root, 'other.json', '{"b":2}', holds);
+        expect(await releaseNewFile(holds, written.holdId!)).toEqual({ released: true });
+        expect(holds.size).toBe(1);
+        // Released hold: falls back to the pathname, which still reaches our inode.
+        expect(await eraseIfSame(root, 'spill.json', written.dev, written.ino, holds, written.holdId)).toEqual({ erased: true });
+        // A hold whose identity is not the requested inode is ignored; the pathname decides.
         await rm(path.join(root, 'other.json'));
         await fsWriteFile(path.join(root, 'other.json'), 'someone else');
-        await expect(finalizeNewFile(root, 'other.json', second.pendingName, second.dev, second.ino)).rejects.toThrow(/not anchored/);
-        expect(await fsReadFile(path.join(root, second.pendingName), 'utf8')).toBe('{"b":2}');
-        // Marker-shaped names only: an arbitrary workdir file is never accepted as a marker.
-        await expect(finalizeNewFile(root, 'spill.json', 'stolen-copy', written.dev, written.ino)).rejects.toThrow(/not a pending marker/);
-        await expect(eraseIfSame(root, 'other.json', second.dev, second.ino, 'stolen-copy')).rejects.toThrow(/not a pending marker/);
-        await expect(eraseIfSame(root, 'other.json', second.dev, second.ino, `../${path.basename(second.pendingName)}`)).rejects.toThrow();
-        expect(await fsReadFile(path.join(root, second.pendingName), 'utf8')).toBe('{"b":2}');
-      } finally { await rm(root, { recursive: true, force: true }); }
+        expect(await eraseIfSame(root, 'other.json', written.dev, written.ino, holds, other.holdId)).toEqual({ erased: false });
+        expect(await fsReadFile(path.join(root, 'other.json'), 'utf8')).toBe('someone else');
+        // The hold's own inode (renamed away by the workdir process) is still erasable through it.
+        expect(await eraseIfSame(root, 'other.json', other.dev, other.ino, holds, other.holdId)).toEqual({ erased: true });
+        expect(holds.size).toBe(0);
+      } finally {
+        await holds.closeAll();
+        await rm(root, { recursive: true, force: true });
+      }
     });
 
-    it('verifyNewFile refuses a two-link inode whose second link is not its own pending marker', async () => {
-      const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-two-phase-verify-'));
+    it('verifyNewFile retains the verified descriptor as a hold', async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-hold-verify-'));
+      const outside = await mkdtemp(path.join(os.tmpdir(), 'xdt-hold-verify-outside-'));
+      const holds = new NewFileHoldRegistry();
       try {
+        await mkdir(path.join(root, 'out'));
+        const written = await writeNewFile(root, 'out/spill.json', '{"a":1}');
+        const verified = await verifyNewFile(root, 'out/spill.json', sha('{"a":1}'), 7, holds);
+        expect(verified).toMatchObject({ ino: written.ino, holdId: expect.stringMatching(/^[0-9a-f-]{36}$/) });
+        await fsp.rename(path.join(root, 'out'), path.join(outside, 'out'));
+        expect(await eraseIfSame(root, 'out/spill.json', verified.dev, verified.ino, holds, verified.holdId)).toEqual({ erased: true });
+        expect((await fsStat(path.join(outside, 'out', 'spill.json'))).size).toBe(0);
+        // A refused verification retains nothing.
         await fsWriteFile(path.join(root, 'r.json'), '{"a":1}');
-        await fsWriteFile(path.join(root, 'other.json'), '{"a":1}');
-        // A pending-shaped marker that is a *different* inode does not vouch for r.json.
-        await fsLink(path.join(root, 'other.json'), path.join(root, `.r.json.${'0'.repeat(8)}-0000-0000-0000-${'0'.repeat(12)}.pending`));
-        await fsLink(path.join(root, 'r.json'), path.join(root, 'renamed-staging-copy'));
-        await expect(verifyNewFile(root, 'r.json', sha('{"a":1}'), 7)).rejects.toThrow(/still in flight/);
+        await expect(verifyNewFile(root, 'r.json', sha('{"a":2}'), 7, holds)).rejects.toThrow(/content mismatch/);
+        expect(holds.size).toBe(0);
+      } finally {
+        await holds.closeAll();
+        await rm(root, { recursive: true, force: true });
+        await rm(outside, { recursive: true, force: true });
+      }
+    });
+
+    it('holds expire after their TTL and are bounded in number', async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-hold-ttl-'));
+      const holds = new NewFileHoldRegistry({ ttlMs: 20, max: 2 });
+      try {
+        const a = await writeNewFile(root, 'a.json', '{"a":1}', holds);
+        const b = await writeNewFile(root, 'b.json', '{"b":1}', holds);
+        const c = await writeNewFile(root, 'c.json', '{"c":1}', holds);
+        expect(holds.size).toBe(2);
+        expect(holds.get(a.holdId!)).toBeNull(); // oldest evicted
+        expect(holds.get(c.holdId!)).not.toBeNull();
+        await new Promise(r => setTimeout(r, 60));
+        expect(holds.size).toBe(0);
+        // Expired: the published files are untouched and still erasable by pathname.
+        expect(await fsReadFile(path.join(root, 'b.json'), 'utf8')).toBe('{"b":1}');
+        expect(await eraseIfSame(root, 'b.json', b.dev, b.ino, holds, b.holdId)).toEqual({ erased: true });
+      } finally {
+        await holds.closeAll();
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it('verifyNewFile also treats a staging sibling in the target directory as in flight', async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-verify-parent-staging-'));
+      try {
+        await mkdir(path.join(root, 'out'));
+        await fsWriteFile(path.join(root, 'out', 'r.json'), '{"a":1}');
+        await fsWriteFile(path.join(root, 'out', '.r.json.some-uuid.staging'), '{"a":1}');
+        await expect(verifyNewFile(root, 'out/r.json', sha('{"a":1}'), 7)).rejects.toThrow(/still in flight/);
+        await rm(path.join(root, 'out', '.r.json.some-uuid.staging'));
+        await expect(verifyNewFile(root, 'out/r.json', sha('{"a":1}'), 7)).resolves.toMatchObject({ size: 7 });
       } finally { await rm(root, { recursive: true, force: true }); }
     });
 
