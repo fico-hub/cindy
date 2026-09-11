@@ -1,0 +1,154 @@
+import type {
+  RemoteDesktopCapabilities,
+  RemoteDesktopLease,
+  RemoteDesktopRequest,
+} from "./remoteDesktop.js";
+
+export type DesktopViewerRequest = <T>(
+  request: RemoteDesktopRequest,
+  beforeSend?: () => void,
+) => Promise<T>;
+
+/** Viewer-side lease ownership, shared by native Mobile and the Desktop window.
+ * A viewer never owns the shared Device Link: stop releases only its own lease.
+ */
+export class RemoteDesktopViewerSession {
+  private generation = 0;
+  private active: RemoteDesktopLease | null = null;
+  private controlPending: Promise<unknown> | null = null;
+  private controlGeneration = 0;
+  private releaseUnconfirmed = false;
+  constructor(private readonly request: DesktopViewerRequest) {}
+
+  get lease(): RemoteDesktopLease | null {
+    return this.active;
+  }
+
+  async connect(options: {
+    displayId?: string;
+    resume?: boolean;
+    takeover?: boolean;
+    isCurrent: () => boolean;
+    onCapabilities?: (caps: RemoteDesktopCapabilities) => void;
+  }): Promise<{ caps: RemoteDesktopCapabilities; lease: RemoteDesktopLease }> {
+    const generation = ++this.generation;
+    const check = () => {
+      if (generation !== this.generation || !options.isCurrent())
+        throw new Error("DESKTOP_VIDEO_STOPPED");
+    };
+    check();
+    const caps = await this.request<RemoteDesktopCapabilities>(
+      { op: "capabilities" },
+      check,
+    );
+    check();
+    if (caps?.version !== 1) throw new Error("CHANNEL_NOT_ALLOWED");
+    if (!caps.enabled) throw new Error("DESKTOP_DISABLED");
+    if (options.resume && !caps.automaticReconnect)
+      throw new Error("CHANNEL_NOT_ALLOWED");
+    options.onCapabilities?.(caps);
+    check();
+    const display =
+      caps.displays.find((d) => d.id === options.displayId) ?? caps.displays[0];
+    if (!display) throw new Error("DESKTOP_DISPLAY_MISSING");
+    const lease = await this.request<RemoteDesktopLease>(
+      {
+        op: "start",
+        displayId: display.id,
+        ...(options.takeover && caps.connectionTakeover
+          ? { takeover: true }
+          : options.resume
+            ? { resume: true }
+            : {}),
+      },
+      check,
+    );
+    if (generation !== this.generation || !options.isCurrent()) {
+      void this.request({ op: "stop", lease: lease.lease }).catch(() => {});
+      throw new Error("DESKTOP_VIDEO_STOPPED");
+    }
+    this.active = lease;
+    return { caps, lease };
+  }
+
+  async control(enabled: boolean): Promise<{ controlling: boolean }> {
+    const lease = this.active;
+    if (!lease) throw new Error("DESKTOP_LEASE_EXPIRED");
+    if (this.controlPending) throw new Error("DESKTOP_INPUT_BUSY");
+    if (enabled && this.releaseUnconfirmed)
+      throw new Error("DESKTOP_INPUT_BUSY");
+    this.controlGeneration++;
+    if (!enabled) this.releaseUnconfirmed = true;
+    const check = () => {
+      if (this.active !== lease) throw new Error("DESKTOP_LEASE_EXPIRED");
+    };
+    const operation = this.request<{ controlling: boolean }>(
+      { op: "control", lease: lease.lease, enabled },
+      check,
+    );
+    this.controlPending = operation;
+    try {
+      const result = await operation;
+      check();
+      lease.controlling = result.controlling === true;
+      if (!lease.controlling) this.releaseUnconfirmed = false;
+      return { controlling: lease.controlling };
+    } finally {
+      if (this.controlPending === operation) this.controlPending = null;
+    }
+  }
+
+  async heartbeat(): Promise<{ controlling: boolean }> {
+    const lease = this.active;
+    if (!lease) throw new Error("DESKTOP_LEASE_EXPIRED");
+    const pendingAtStart = this.controlPending;
+    const controlGeneration = this.controlGeneration;
+    const result = await this.request<{ controlling: boolean }>({
+      op: "heartbeat",
+      lease: lease.lease,
+    });
+    if (this.active !== lease) throw new Error("DESKTOP_LEASE_EXPIRED");
+    // A heartbeat sent before a control transition cannot acknowledge that transition.
+    if (
+      !pendingAtStart &&
+      !this.controlPending &&
+      controlGeneration === this.controlGeneration
+    ) {
+      lease.controlling = result.controlling === true;
+      if (!lease.controlling) this.releaseUnconfirmed = false;
+      else if (this.releaseUnconfirmed) {
+        await this.control(false);
+      }
+    }
+    return { controlling: lease.controlling };
+  }
+
+  stop(lockScreen = false): Promise<unknown> {
+    this.generation++;
+    const lease = this.active;
+    this.active = null;
+    this.controlPending = null;
+    this.controlGeneration++;
+    this.releaseUnconfirmed = false;
+    return lease
+      ? this.request({
+          op: "stop",
+          lease: lease.lease,
+          ...(lockScreen ? { lockScreen: true } : {}),
+        })
+      : Promise.resolve();
+  }
+}
+
+/** Only transient connection errors may restart a viewer. Explicit stop wins. */
+export function remoteDesktopFailureKey(code: string): string | null {
+  if (/ACCESS_REVOKED/.test(code)) return "accessRevoked";
+  if (/REMOTE_DISABLED/.test(code)) return "remoteDisabled";
+  if (/DESKTOP_BUSY/.test(code)) return "connectionBusy";
+  if (/CHANNEL_NOT_ALLOWED/.test(code)) return "upgrade";
+  if (/DESKTOP_DISABLED/.test(code)) return "disabled";
+  if (/PERMISSION|ACCESSIBILITY/.test(code)) return "permissionHint";
+  if (/DESKTOP_STOPPED|DESKTOP_AUTHENTICATION_REQUIRED/.test(code))
+    return "disconnected";
+  return null;
+}

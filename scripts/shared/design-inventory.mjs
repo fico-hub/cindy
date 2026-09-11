@@ -772,6 +772,23 @@ export function catalogSurfaces() {
       rendererEntryModules: { resourceUsageWindow: './resource-usage-entry' },
     },
     {
+      id: 'desktop.window.remote-desktop',
+      platform: 'desktop',
+      title: '远程桌面独立窗口',
+      productionEntry: '`?remoteDesktopViewer=1` → renderer/remote-desktop-viewer-entry.tsx',
+      reachableComponents: ['RemoteDesktopViewerWindow'],
+      styleRoots: [
+        'apps/desktop/src/renderer/remote-desktop-viewer-entry.tsx',
+        'apps/desktop/src/renderer/features/remote-desktop/RemoteDesktopViewerWindow.tsx',
+        'apps/desktop/src/renderer/features/remote-desktop/viewerWindow.css',
+        'apps/desktop/src/main/remote-desktop-viewer',
+        'apps/desktop/src/renderer/styles/globals.css',
+        'apps/desktop/src/renderer/styles/generated/tokens.css',
+      ],
+      routerPaths: [],
+      rendererEntryModules: { remoteDesktopViewer: './remote-desktop-viewer-entry' },
+    },
+    {
       id: 'desktop.window.voice-overlay',
       platform: 'desktop',
       title: '语音输入浮窗',
