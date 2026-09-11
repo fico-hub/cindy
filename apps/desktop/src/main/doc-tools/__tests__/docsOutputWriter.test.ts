@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const { forkMock } = vi.hoisted(() => ({ forkMock: vi.fn() }));
 vi.mock('electron', () => ({ utilityProcess: { fork: forkMock } }));
 
-import { DOCS_OUTPUT_WRITER_TIMEOUT, writeDocsOutput } from '../docsOutputWriter.js';
+import { DOCS_OUTPUT_WRITER_ABORT_GRACE, DOCS_OUTPUT_WRITER_TIMEOUT, writeDocsOutput } from '../docsOutputWriter.js';
 
 class FakeChild extends EventEmitter {
   readonly posted: unknown[] = [];
@@ -30,6 +30,7 @@ let root: string;
 let child: FakeChild;
 
 beforeEach(async () => {
+  DOCS_OUTPUT_WRITER_ABORT_GRACE.ms = 20;
   root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cindy-docs-writer-boundary-'));
   child = new FakeChild();
   forkMock.mockReset();
@@ -101,6 +102,37 @@ describe('writeDocsOutput beforeCommit boundary', () => {
       expect(child.killed).toBe(true);
       await expect(fs.promises.access(staging)).rejects.toThrow();
       await expect(fs.promises.access(target)).rejects.toThrow();
+    } finally {
+      DOCS_OUTPUT_WRITER_TIMEOUT.ms = 60_000;
+    }
+  });
+
+  // Codex P1 (round 18): on watchdog timeout the parent first asks the child to clean up
+  // through its cwd-bound capabilities (which survive a directory move-out); the parent's
+  // path-based reclaim is only the fallback for a silent child.
+  it('lets the child clean up on timeout and skips path reclaim when it confirms', async () => {
+    DOCS_OUTPUT_WRITER_TIMEOUT.ms = 30;
+    DOCS_OUTPUT_WRITER_ABORT_GRACE.ms = 500;
+    try {
+      const staging = path.join(root, '.cindy-docs-staging-u-out.txt');
+      const target = path.join(root, 'out.txt');
+      await fs.promises.writeFile(staging, 'child will handle these', { mode: 0o600 });
+      await fs.promises.link(staging, target);
+      const st = await fs.promises.lstat(staging, { bigint: true });
+      child.result = null;
+      const seen: string[] = [];
+      child.postMessage = function (this: FakeChild, message: unknown) {
+        const type = (message as { type?: string }).type ?? '';
+        seen.push(type);
+        if (type === 'write') queueMicrotask(() => this.emit('message', { type: 'staged', identity: { dev: st.dev, ino: st.ino }, stagingName: '.cindy-docs-staging-u-out.txt' }));
+        if (type === 'abort') queueMicrotask(() => this.emit('message', { type: 'aborted', cleaned: true }));
+      };
+      const outcome = await writeDocsOutput({ root, path: target, data: new Uint8Array([1]), overwrite: false }).then(() => 'resolved', (e: Error) => e.message);
+      expect(outcome).toBe('文档落盘隔离进程超时');
+      expect(seen).toEqual(['write', 'abort']);
+      expect(child.killed).toBe(true);
+      // The child said it cleaned up; the parent must not touch the names by path.
+      expect(await fs.promises.readFile(target, 'utf8')).toBe('child will handle these');
     } finally {
       DOCS_OUTPUT_WRITER_TIMEOUT.ms = 60_000;
     }

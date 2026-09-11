@@ -12,7 +12,9 @@ import {
   type DocsOutputWriteRequest,
 } from '../docsOutputWriterProtocol.js';
 import {
+  abortInFlightWrite,
   relativePathSegments,
+  resetAbortStateForTest,
   runDocsOutputWriteForTest,
   sameRelativePath,
 } from '../docsOutputWriterUtilityProcess.js';
@@ -30,6 +32,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  resetAbortStateForTest();
   vi.restoreAllMocks();
   while (cleanup.length > 0) {
     await fs.promises.rm(cleanup.pop()!, { recursive: true, force: true });
@@ -337,6 +340,36 @@ process.stdout.write(JSON.stringify({ code, outsideExists, movedValue }));
     } finally {
       openSpy.mockRestore();
     }
+  });
+
+  // Codex P1 (round 18): a cooperative abort cleans up through the retained handle and the
+  // writer's own names while a filesystem call is still hanging.
+  it('abortInFlightWrite zeroes and drops the staging inode while the write is still hanging', async () => {
+    const realOpen = fs.promises.open.bind(fs.promises);
+    let stagingPath = '';
+    const openSpy = vi.spyOn(fs.promises, 'open').mockImplementation(async (...args: Parameters<typeof fs.promises.open>) => {
+      const handle = await realOpen(...args);
+      if (String(args[0]).includes('.cindy-docs-staging-')) {
+        stagingPath = String(args[0]);
+        handle.writeFile = (() => new Promise<void>(() => {})) as typeof handle.writeFile; // hangs forever
+      }
+      return handle;
+    });
+    try {
+      const pending = runDocsOutputWriteForTest(await request('report.bin', 'private', false), root).catch(() => 'rejected');
+      await new Promise((r) => setTimeout(r, 30));
+      expect(stagingPath).not.toBe('');
+      expect(await abortInFlightWrite()).toEqual({ cleaned: true });
+      await expect(fs.promises.access(stagingPath)).rejects.toThrow();
+      await expect(fs.promises.access(path.join(root, 'report.bin'))).rejects.toThrow();
+      void pending;
+    } finally {
+      openSpy.mockRestore();
+    }
+  });
+
+  it('abortInFlightWrite leaves a committed overwrite replacement alone', async () => {
+    expect(await abortInFlightWrite()).toEqual({ cleaned: false }); // nothing in flight
   });
 
   // Codex P1 (round 17): after an overwrite rename the old inode is gone; a later failure

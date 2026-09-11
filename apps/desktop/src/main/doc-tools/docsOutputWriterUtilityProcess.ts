@@ -260,6 +260,40 @@ async function replaceFile(
   );
 }
 
+/**
+ * The write currently in flight, kept so a cooperative abort from the parent can run the
+ * same fail-closed cleanup this process would run itself. Names are cwd-relative in
+ * production (cwd is bound to the verified parent inode), so the cleanup keeps working
+ * even if that directory has since been renamed or moved out of the session root —
+ * something the parent, holding only a lexical path, cannot do.
+ */
+let inFlight: {
+  handle: fs.promises.FileHandle;
+  staging: string;
+  target: string;
+  published: () => boolean;
+  committedOverwrite: () => boolean;
+} | null = null;
+let abortRequested = false;
+
+/** Cooperative abort: zero the private inode and drop our names, through capabilities bound to it. */
+export async function abortInFlightWrite(): Promise<{ cleaned: boolean }> {
+  abortRequested = true;
+  const current = inFlight;
+  if (!current) return { cleaned: false };
+  if (current.committedOverwrite()) return { cleaned: false }; // the replacement is the user's file
+  await current.handle.truncate(0).catch(() => undefined);
+  if (current.published()) await unlinkIfOurs(current.target, current.handle);
+  await unlinkIfOurs(current.staging, current.handle);
+  return { cleaned: true };
+}
+
+/** Test hook: clear abort state between runs. */
+export function resetAbortStateForTest(): void {
+  abortRequested = false;
+  inFlight = null;
+}
+
 async function writeWithinVerifiedParent(
   request: DocsOutputWriteRequest,
   workingDir: string,
@@ -274,8 +308,12 @@ async function writeWithinVerifiedParent(
   // overwrite: once the rename over the old target has happened, the old inode is gone
   // for good; the replacement is the user's only copy and must never be withdrawn.
   let committedOverwrite = false;
+  const assertNotAborted = (): void => {
+    if (abortRequested) throw new OutputWriteError('INTERNAL', '文档落盘已被父进程中止');
+  };
   try {
     handle = await openExclusive(staging);
+    inFlight = { handle, staging, target, published: () => published, committedOverwrite: () => committedOverwrite };
     // Announce the inode *before* the first private byte is written: if writeFile/sync
     // hang past the parent's watchdog and this process is killed, the parent can still
     // reclaim exactly this inode.
@@ -283,6 +321,7 @@ async function writeWithinVerifiedParent(
     onStaged?.({ type: 'staged', identity: { dev: staged.dev, ino: staged.ino }, stagingName });
     await handle.writeFile(request.data);
     await handle.sync();
+    assertNotAborted();
     await verifyParent(request, workingDir);
     if (request.overwrite) {
       await replaceFile(request, workingDir, staging, target);
@@ -291,6 +330,7 @@ async function writeWithinVerifiedParent(
       await publishExclusive(staging, target);
     }
     published = true;
+    assertNotAborted();
     await verifyParent(request, workingDir);
     const st = await handle.stat({ bigint: true });
     // Durability of the directory entries (link + staging removal): the file bytes were
@@ -302,6 +342,7 @@ async function writeWithinVerifiedParent(
     await syncDirectory(workingDir);
     return { dev: st.dev, ino: st.ino };
   } catch (error) {
+    inFlight = null;
     if (committedOverwrite) {
       // The rename already replaced the user's file; destroying the replacement now would
       // lose both versions. Report the failure and keep the published replacement.
@@ -314,6 +355,7 @@ async function writeWithinVerifiedParent(
     if (published && handle) await unlinkIfOurs(target, handle);
     throw error;
   } finally {
+    inFlight = null;
     await handle?.close().catch(() => undefined);
     try {
       const stat = await fs.promises.lstat(staging);
@@ -389,6 +431,15 @@ if (parentPort) {
   parentPort.postMessage({ type: 'ready' });
   parentPort.on('message', (event) => {
     const message = event.data as { type?: unknown; request?: DocsOutputWriteRequest };
+    if (message?.type === 'abort') {
+      // Parent watchdog: clean up through our inode-bound handle and cwd-relative names,
+      // then confirm; the parent only falls back to path-based reclaim if we stay silent.
+      void abortInFlightWrite().then(
+        (r) => parentPort.postMessage({ type: 'aborted', cleaned: r.cleaned }),
+        () => parentPort.postMessage({ type: 'aborted', cleaned: false }),
+      );
+      return;
+    }
     if (handled || message?.type !== 'write' || !message.request) return;
     handled = true;
     void runDocsOutputWrite(message.request, (notice) => parentPort.postMessage(notice))

@@ -2943,6 +2943,20 @@ describe('oversized ghost result Host storage', () => {
     expect(Date.now() - started).toBeLessThan(1_000);
   });
 
+  // Codex P2 (round 18): a probe that never returns (daemon silent on a live channel) must
+  // not outlive the reconcile window; each probe is bounded by the remaining budget.
+  it('bounds a hanging verifyNewFile probe by the remaining reconcile window', async () => {
+    const deps = makeDeps('codex'); remoteSession();
+    REMOTE_WRITE_RECONCILE.maxAttempts = 40;
+    REMOTE_WRITE_RECONCILE.windowMs = 80;
+    const text = JSON.stringify({ ok: true, result: 'x'.repeat(100) });
+    const calls = timeoutThenVerify(() => new Promise(() => {})); // never settles
+    const started = Date.now();
+    await expect(deps.saveLargeGhostResult!(text)).rejects.toThrow('writeNewFile TIMEOUT');
+    expect(calls()).toBe(1);
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
   // Codex P1 (round 9): remote cleanup is identity-checked on the daemon and never path-based.
   it('cleans up a remote spill only through unlinkIfSame with the identity returned by writeNewFile', async () => {
     const deps = makeDeps('codex');

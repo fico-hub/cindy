@@ -148,6 +148,8 @@ function throwResultError(
 
 /** Writer watchdog; tests shrink it. */
 export const DOCS_OUTPUT_WRITER_TIMEOUT = { ms: 60_000 };
+/** How long the watchdog waits for the child's own cwd-bound cleanup before killing it. */
+export const DOCS_OUTPUT_WRITER_ABORT_GRACE = { ms: 2_000 };
 
 export const writeDocsOutput: WriteDocsOutputFn = async (input) => {
   const parentDir = path.dirname(input.path);
@@ -236,6 +238,15 @@ export const writeDocsOutput: WriteDocsOutputFn = async (input) => {
     // staged inode, reclaim it before surfacing the error, so no private bytes survive
     // without an anchor or lifecycle.
     let aborting = false;
+    let childConfirmedCleanup: ((cleaned: boolean) => void) | null = null;
+    const reclaimByPath = (): Promise<void> => {
+      const notice = staged;
+      const parentDir = path.join(realRoot, parentRelativePath);
+      // overwrite: after the rename the announced inode *is* the user's replaced file, so
+      // only the staging name may be reclaimed; the target name is never touched.
+      const names = request.overwrite ? [notice?.stagingName ?? ''] : [notice?.stagingName ?? '', request.targetName];
+      return notice ? reclaimStagedInode(parentDir, names.filter(Boolean), notice.identity) : Promise.resolve();
+    };
     const abort = (error: Error): void => {
       if (settled || aborting) return;
       aborting = true;
@@ -244,17 +255,37 @@ export const writeDocsOutput: WriteDocsOutputFn = async (input) => {
       } catch {
         // already gone
       }
-      const notice = staged;
-      const parentDir = path.join(realRoot, parentRelativePath);
-      // overwrite: after the rename the announced inode *is* the user's replaced file, so
-      // only the staging name may be reclaimed; the target name is never touched.
-      const names = request.overwrite ? [notice?.stagingName ?? ''] : [notice?.stagingName ?? '', request.targetName];
-      const reclaim = notice
-        ? reclaimStagedInode(parentDir, names.filter(Boolean), notice.identity)
-        : Promise.resolve();
-      void reclaim.finally(() => finish(error));
+      void reclaimByPath().finally(() => finish(error));
     };
-    const timer = setTimeout(() => abort(new Error('文档落盘隔离进程超时')), DOCS_OUTPUT_WRITER_TIMEOUT.ms);
+    // Watchdog: the child may merely be waiting on a slow filesystem call while its event
+    // loop is free. Ask it to clean up first — its cwd is bound to the verified parent
+    // inode and it holds the staging handle, so its cleanup survives a rename/move-out of
+    // that directory, which the parent's lexical path cannot follow. Only if the child stays
+    // silent past the grace is it killed and the parent falls back to path-based reclaim.
+    const cooperativeAbort = (error: Error): void => {
+      if (settled || aborting) return;
+      aborting = true;
+      let graceTimer: ReturnType<typeof setTimeout> | undefined;
+      const done = new Promise<boolean>((resolveGrace) => {
+        childConfirmedCleanup = (cleaned) => { clearTimeout(graceTimer); resolveGrace(cleaned); };
+        graceTimer = setTimeout(() => resolveGrace(false), DOCS_OUTPUT_WRITER_ABORT_GRACE.ms);
+        graceTimer.unref?.();
+      });
+      try {
+        child.postMessage({ type: 'abort' });
+      } catch {
+        childConfirmedCleanup?.(false);
+      }
+      void done.then(async (cleaned) => {
+        try {
+          child.kill();
+        } catch {
+          // already gone
+        }
+        if (!cleaned) await reclaimByPath();
+      }).finally(() => finish(error));
+    };
+    const timer = setTimeout(() => cooperativeAbort(new Error('文档落盘隔离进程超时')), DOCS_OUTPUT_WRITER_TIMEOUT.ms);
     timer.unref?.();
 
     child.on('message', (message) => {
@@ -278,6 +309,10 @@ export const writeDocsOutput: WriteDocsOutputFn = async (input) => {
       const notice = parseStagedNotice(message);
       if (notice) {
         staged = notice;
+        return;
+      }
+      if (message && typeof message === 'object' && (message as { type?: unknown }).type === 'aborted') {
+        childConfirmedCleanup?.((message as { cleaned?: unknown }).cleaned === true);
         return;
       }
       const result = parseResult(message);

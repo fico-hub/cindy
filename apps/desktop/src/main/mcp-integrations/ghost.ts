@@ -501,6 +501,16 @@ async function writeLargeResultToRemote(
   }
 }
 
+/** Race a probe against the remaining reconcile budget; the loser's outcome is ignored. */
+function withinBudget<T>(probe: Promise<T>, budgetMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const bound = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(Object.assign(new Error('verifyNewFile exceeded the reconcile budget'), { code: 'RECONCILE_BUDGET' })), budgetMs);
+  });
+  probe.catch(() => undefined); // a late rejection after the race must not be unhandled
+  return Promise.race([probe, bound]).finally(() => clearTimeout(timer));
+}
+
 /** 结果未知时的 stat 轮询节奏:总时长约 10s,覆盖慢文件系统上 2 MiB 上限的写入;测试可缩短。 */
 export const REMOTE_WRITE_RECONCILE = { intervalMs: 250, maxAttempts: 40, windowMs: 10_000 };
 
@@ -553,8 +563,17 @@ async function reconcileUnknownRemoteWrite(
   const deadline = Date.now() + REMOTE_WRITE_RECONCILE.windowMs;
   let lastError: string | null = null;
   for (let attempt = 0; attempt < REMOTE_WRITE_RECONCILE.maxAttempts; attempt += 1) {
+    // Each probe is bounded by the time left in the window: the client's default 15s
+    // request timeout (and any endpoint rebuild) must not push ghost_call and the owner
+    // lease past the configured 10s. A probe that outlives its bound is abandoned; its
+    // late outcome is ignored and the write stays "unverified".
+    const budget = deadline - Date.now();
+    if (budget <= 0) break;
     try {
-      const verified = await remote.request(remoteHostId, 'verifyNewFile', { workdir, relPath, sha256, size });
+      const verified = await withinBudget(
+        remote.request(remoteHostId, 'verifyNewFile', { workdir, relPath, sha256, size }),
+        budget,
+      );
       return { dev: verified.dev, ino: verified.ino };
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
