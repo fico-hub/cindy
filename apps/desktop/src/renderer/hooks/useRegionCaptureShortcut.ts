@@ -22,6 +22,8 @@ import {
 import { createLogger } from '../lib/logger';
 import type { AttachedFile } from '../lib/fileTypes';
 import { normalizeCaptureColor } from '../lib/normalizeCaptureColor';
+import { colorRegistry } from '../themes/color-registry';
+import { themeService } from '../themes/theme-service';
 import type { ScreenCaptureOverlayPalette } from '../../shared/screenCapture';
 import { useAppShortcut } from './useAppShortcut';
 
@@ -225,19 +227,29 @@ export function resolveRegionCaptureTargetFromPath(pathname: string): RegionCapt
  * 触发瞬间解析当前主题语义 token 的计算值 → 覆盖层配色(win/linux)。覆盖层是
  * main 自生成页面, 不加载 renderer 的主题 CSS 变量; 传"解析后的值"让
  * Light/Dark 与自定义主题 override 都自然生效(DESIGN.md 双模式门槛, review P1)。
- * fallback 与 main 侧 DEFAULT_OVERLAY_PALETTE 一致; 非法值由 main 严格校验兜底。
+ * CSS 变量缺失/非法时的兜底同样取自颜色注册表(当前主题 → 注册默认值),
+ * 不在这里手写字面量; 非法值由 main 严格校验兜底。
  */
-function resolveOverlayPalette(): ScreenCaptureOverlayPalette {
+function registeredCaptureColor(token: string): string {
+  const id = token.replace(/^--/, '');
+  const fromTheme = themeService.getColor(id);
+  if (fromTheme) return fromTheme;
+  const base = document.documentElement.classList.contains('dark') ? 'dark' : 'light';
+  return colorRegistry.resolveDefault(id, base) ?? colorRegistry.resolveDefault(id, 'light') ?? '';
+}
+
+/** @internal 仅供测试直接调用。 */
+export function resolveOverlayPalette(): ScreenCaptureOverlayPalette {
   const styles = getComputedStyle(document.documentElement);
-  const read = (token: string, fallback: string): string => {
+  const read = (token: string): string => {
     const value = styles.getPropertyValue(token).trim();
-    return normalizeCaptureColor(value, fallback);
+    return normalizeCaptureColor(value, registeredCaptureColor(token));
   };
   return {
-    scrim: read('--overlay-modal', 'rgba(0, 0, 0, 0.7)'),
-    selectionBorder: read('--region-capture-selection-border', 'rgba(255, 255, 255, 0.9)'),
-    pillBg: read('--tooltip-bg', '#1f1f1e'),
-    pillFg: read('--tooltip-text', '#ffffff'),
+    scrim: read('--overlay-modal'),
+    selectionBorder: read('--region-capture-selection-border'),
+    pillBg: read('--tooltip-bg'),
+    pillFg: read('--tooltip-text'),
   };
 }
 
