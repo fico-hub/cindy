@@ -2387,6 +2387,41 @@ describe('oversized ghost result Host storage', () => {
     liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: null, isCurrent: () => true, reviewAction: reviewAllow });
   });
 
+  // Codex P1 (round 10): the local writer's own realpath/lstat checks and utility-process
+  // start-up are async. Live instance/permission is re-checked at the writer's final
+  // `beforeCommit` boundary, so an instance that ended meanwhile never gets bytes written.
+  it('revalidates at the local writer boundary and withholds the bytes when the instance ended', async () => {
+    const deps = makeDeps('codex');
+    sessionSnapshotMock.mockResolvedValue({ workingDir: WORKDIR, remoteHostId: null, permissionMode: 'auto', planModeEnabled: false });
+    let current = true;
+    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: null, isCurrent: () => current, reviewAction: reviewAllow });
+    let bytesHandedOver = false;
+    writeDocsOutputMock.mockImplementation(async input => {
+      // Simulate the instance ending while the writer was starting up, then reach the boundary.
+      current = false;
+      await input.beforeCommit?.();
+      bytesHandedOver = true;
+    });
+    await expect(deps.saveLargeGhostResult!('result')).rejects.toThrow();
+    expect(writeDocsOutputMock).toHaveBeenCalledOnce();
+    expect(bytesHandedOver).toBe(false);
+    expect(ledgerAddRefMock).not.toHaveBeenCalled();
+  });
+
+  it('passes a beforeCommit revalidation to the local writer on the happy path', async () => {
+    const deps = makeDeps('codex');
+    sessionSnapshotMock.mockResolvedValue({ workingDir: WORKDIR, remoteHostId: null, permissionMode: 'auto', planModeEnabled: false });
+    const seen: string[] = [];
+    writeDocsOutputMock.mockImplementation(async input => {
+      seen.push('before');
+      await input.beforeCommit?.();
+      seen.push('write');
+    });
+    await deps.saveLargeGhostResult!('result');
+    expect(seen).toEqual(['before', 'write']);
+    expect(writeDocsOutputMock.mock.calls[0]![0].beforeCommit).toBeTypeOf('function');
+  });
+
   it('asks the session reviewer for the exact workdir target before writing in Auto', async () => {
     const deps = makeDeps('codex');
     sessionSnapshotMock.mockResolvedValue({ workingDir: WORKDIR, remoteHostId: null, permissionMode: 'auto', planModeEnabled: false });
@@ -2470,6 +2505,7 @@ describe('oversized ghost result Host storage', () => {
     expect(path.basename(saved)).toMatch(/^ghost-[0-9a-f-]+\.json$/);
     expect(writeDocsOutputMock).toHaveBeenCalledWith({
       root: WORKDIR, path: path.join(WORKDIR, saved), data: Buffer.from(text), overwrite: false,
+      beforeCommit: expect.any(Function),
     });
     expect(remoteFsRequestMock).not.toHaveBeenCalled();
     expect(captureMutationOwnerMock).toHaveBeenCalledOnce();

@@ -588,6 +588,26 @@ async function anchorLocalSpill(workdir: string, relPath: string): Promise<Local
 }
 
 /**
+ * 本地按 inode 身份清理:先以 O_NOFOLLOW 打开并 fstat 核对,通过后经该 fd 把私密内容清零
+ * (擦除与 inode 绑定,与路径无关);随后再 lstat 复核一次,仍是同一 inode 才 unlink 路径名。
+ * POSIX 没有"按 inode 删除路径名"的原语,所以内容擦除才是身份绑定的保证;
+ * 路径名删除在复核后仍有一个极窄的重命名竞态,但此时被删的只会是一个刚被放到同名处的空位。
+ */
+async function truncateAndUnlinkIfSame(candidate: string, anchor: SpillIdentity): Promise<void> {
+  const handle = await fs.promises.open(candidate, fs.constants.O_RDWR | ((fs.constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0));
+  try {
+    const st = await handle.stat();
+    if (!st.isFile() || st.dev !== anchor.dev || st.ino !== anchor.ino) return;
+    await handle.truncate(0);
+  } finally {
+    await handle.close();
+  }
+  const again = await fs.promises.lstat(candidate);
+  if (!again.isFile() || again.dev !== anchor.dev || again.ino !== anchor.ino) return;
+  await fs.promises.unlink(candidate);
+}
+
+/**
  * 清理刚写的外置文件。本地与远端都只按 inode 身份删:父目录可能已被换成指向别处的 symlink,并在
  * 那里放一个同名文件诱导删除。只有父目录 realpath 仍在 workdir 内、且同名条目的 dev/ino
  * 与写入时记录的一致,才删那一个条目;否则放弃(宁可留下自己的文件,不删别人的)。
@@ -610,10 +630,7 @@ async function discardLargeResultFile(
     const abs = path.join(target.workingDir, relPath);
     const [wdReal, parentReal] = await Promise.all([fs.promises.realpath(target.workingDir), fs.promises.realpath(path.dirname(abs))]);
     if (parentReal !== wdReal && !parentReal.startsWith(wdReal + path.sep)) return;
-    const candidate = path.join(parentReal, path.basename(abs));
-    const st = await fs.promises.lstat(candidate);
-    if (!st.isFile() || st.dev !== anchor.dev || st.ino !== anchor.ino) return;
-    await fs.promises.unlink(candidate);
+    await truncateAndUnlinkIfSame(path.join(parentReal, path.basename(abs)), anchor);
   } catch {
     /* best-effort: the write already failed to be accounted for; keep the original error */
   }
@@ -1722,7 +1739,16 @@ export function getCindyGhostsMcpDeps(
       } else {
         // Reuse the root-anchored, no-overwrite writer, including its symlink/race
         // checks. No plugin-controlled filename or raw fs write enters this path.
-        await writeDocsOutput({ root: target.workingDir, path: path.join(target.workingDir, relativePath), data: Buffer.from(text, 'utf8'), overwrite: false });
+        // `beforeCommit` runs right before the isolated writer receives the bytes: the
+        // realpath/lstat checks and utility-process start-up are async, and an instance that
+        // ended, switched, entered Plan or lost its grant meanwhile must not get a file written.
+        await writeDocsOutput({
+          root: target.workingDir,
+          path: path.join(target.workingDir, relativePath),
+          data: Buffer.from(text, 'utf8'),
+          overwrite: false,
+          beforeCommit: () => target.revalidate(),
+        });
         // Record the written inode so any later cleanup can only ever remove this file.
         // Without an anchor cleanup is skipped (leaving our own file beats deleting someone else's).
         anchor = await anchorLocalSpill(target.workingDir, relativePath).catch(() => null);

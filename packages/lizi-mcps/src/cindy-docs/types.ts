@@ -74,6 +74,13 @@ export type WriteDocsOutputFn = (input: {
   path: string;
   data: Uint8Array;
   overwrite: boolean;
+  /**
+   * Called immediately before the bytes are handed to the isolated writer, after all
+   * host-side validation and process start-up have completed. Throwing here aborts the
+   * write with nothing on disk. Callers use it to re-check live authorization (instance,
+   * permission, Plan state) at the last async boundary before the side effect.
+   */
+  beforeCommit?: () => Promise<void>;
 }) => Promise<void>;
 
 /** 单页结构快照。宽高单位是 PDF point(1/72 英寸)。 */

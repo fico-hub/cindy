@@ -185,7 +185,14 @@ export const writeDocsOutput: WriteDocsOutputFn = async (input) => {
         (message as { type?: unknown }).type === 'ready'
       ) {
         ready = true;
-        child.postMessage({ type: 'write', request });
+        // Last async boundary before the side effect: the caller may re-check live
+        // authorization here. A rejection means the child never receives the bytes.
+        void (input.beforeCommit ? input.beforeCommit() : Promise.resolve()).then(
+          () => {
+            if (!settled) child.postMessage({ type: 'write', request });
+          },
+          (error: unknown) => finish(error),
+        );
         return;
       }
       const result = parseResult(message);

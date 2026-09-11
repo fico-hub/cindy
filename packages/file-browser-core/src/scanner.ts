@@ -13,7 +13,8 @@
  * `assertInsideWorkdir` — renderer cannot ask for `../../etc/passwd`.
  */
 
-import { promises as fs, type Stats, type Dirent } from 'node:fs';
+import { promises as fs, constants as fsConstants, type Stats, type Dirent } from 'node:fs';
+import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 
@@ -661,8 +662,14 @@ export async function verifyNewFile(
 
 /**
  * Delete `relPath` only if it is still the regular file with the given inode identity.
- * `unlink` never follows a final symlink, and a swapped entry simply does not match, so
- * cleanup of a spill can never remove unrelated user data. Returns whether it removed it.
+ *
+ * POSIX has no "unlink by inode" primitive, so the identity-bound step is the erasure: the
+ * entry is opened with O_NOFOLLOW, fstat must match dev/ino, and the private content is
+ * truncated through that descriptor (bound to the inode, not to the pathname). Only then is
+ * the pathname re-checked with lstat and unlinked if it still names that inode. A rename race
+ * between the re-check and `unlink` can at worst remove a just-placed replacement name; it can
+ * never erase unrelated content, because nothing but the verified inode is ever truncated.
+ * Returns whether the pathname was removed.
  */
 export async function unlinkIfSame(
   workdir: string,
@@ -674,6 +681,23 @@ export async function unlinkIfSame(
   if (sub === '') throw new Error('cannot delete workdir root');
   const abs = path.join(workdir, sub);
   await assertRealParentInsideWorkdir(workdir, abs);
+  const O_NOFOLLOW = (fsConstants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
+  let handle: FileHandle;
+  try {
+    handle = await fs.open(abs, fsConstants.O_RDWR | O_NOFOLLOW);
+  } catch (err) {
+    // Missing, or a symlink refused by O_NOFOLLOW (ELOOP): not our inode, nothing to do.
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === 'ENOENT' || code === 'ELOOP') return { removed: false };
+    throw err;
+  }
+  try {
+    const opened = await handle.stat();
+    if (!opened.isFile() || opened.dev !== dev || opened.ino !== ino) return { removed: false };
+    await handle.truncate(0);
+  } finally {
+    await handle.close();
+  }
   const entry = await fs.lstat(abs).catch(() => null);
   if (!entry || !entry.isFile() || entry.dev !== dev || entry.ino !== ino) return { removed: false };
   await fs.unlink(abs);

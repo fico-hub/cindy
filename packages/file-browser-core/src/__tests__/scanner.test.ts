@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile as fsReadFile, rm, symlink, writeFile as fsWriteFile } from 'node:fs/promises';
+import { link as fsLink, mkdir, mkdtemp, readFile as fsReadFile, rm, stat as fsStat, symlink, writeFile as fsWriteFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -587,6 +587,24 @@ describe('verifyNewFile / unlinkIfSame', () => {
       const again = await writeNewFile(root, 'spill.json', '{"b":2}');
       expect(await unlinkIfSame(root, 'spill.json', again.dev, again.ino)).toEqual({ removed: true });
       await expect(fsReadFile(path.join(root, 'spill.json'))).rejects.toThrow(/ENOENT/);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  // Codex P1 (round 10): erasure is bound to the inode, not the pathname. A spill renamed
+  // away between identity check and unlink (modelled by a second hard link) still loses its
+  // private content, while a pathname that no longer names our inode is never truncated.
+  it('unlinkIfSame erases the verified inode through its descriptor before touching the name', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-unlink-erase-'));
+    try {
+      const written = await writeNewFile(root, 'spill.json', '{"secret":1}');
+      await fsLink(path.join(root, 'spill.json'), path.join(root, 'moved-away.json'));
+      expect(await unlinkIfSame(root, 'spill.json', written.dev, written.ino)).toEqual({ removed: true });
+      // Same inode reachable under another name: content gone, so a renamed-away copy leaks nothing.
+      expect((await fsStat(path.join(root, 'moved-away.json'))).size).toBe(0);
+      // A replacement that is not our inode keeps its content untouched.
+      await fsWriteFile(path.join(root, 'spill.json'), 'someone else');
+      expect(await unlinkIfSame(root, 'spill.json', written.dev, written.ino)).toEqual({ removed: false });
+      expect(await fsReadFile(path.join(root, 'spill.json'), 'utf8')).toBe('someone else');
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 });
