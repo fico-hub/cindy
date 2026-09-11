@@ -905,23 +905,28 @@ describe('verifyNewFile / eraseIfSame', () => {
       }
     });
 
-    it('holds expire after their TTL and are bounded in number', async () => {
+    it('holds are bounded in number (oldest evicted) and expire after their TTL', async () => {
       const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-hold-ttl-'));
-      const holds = new NewFileHoldRegistry({ ttlMs: 20, max: 2 });
+      // Count bound: a TTL long enough that the three fsync-heavy writes (slow on Windows CI)
+      // cannot expire anything while the assertions run.
+      const bounded = new NewFileHoldRegistry({ ttlMs: 60_000, max: 2 });
+      const expiring = new NewFileHoldRegistry({ ttlMs: 20 });
       try {
-        const a = await writeNewFile(root, 'a.json', '{"a":1}', holds);
-        const b = await writeNewFile(root, 'b.json', '{"b":1}', holds);
-        const c = await writeNewFile(root, 'c.json', '{"c":1}', holds);
-        expect(holds.size).toBe(2);
-        expect(holds.get(a.holdId!)).toBeNull(); // oldest evicted
-        expect(holds.get(c.holdId!)).not.toBeNull();
-        await new Promise(r => setTimeout(r, 60));
-        expect(holds.size).toBe(0);
-        // Expired: the published files are untouched and still erasable by pathname.
-        expect(await fsReadFile(path.join(root, 'b.json'), 'utf8')).toBe('{"b":1}');
-        expect(await eraseIfSame(root, 'b.json', b.dev, b.ino, holds, b.holdId)).toEqual({ erased: true });
+        const a = await writeNewFile(root, 'a.json', '{"a":1}', bounded);
+        await writeNewFile(root, 'b.json', '{"b":1}', bounded);
+        const c = await writeNewFile(root, 'c.json', '{"c":1}', bounded);
+        expect(bounded.size).toBe(2);
+        expect(bounded.get(a.holdId!)).toBeNull(); // oldest evicted
+        expect(bounded.get(c.holdId!)).not.toBeNull();
+        const d = await writeNewFile(root, 'd.json', '{"d":1}', expiring);
+        await new Promise(r => setTimeout(r, 100));
+        expect(expiring.size).toBe(0);
+        // Expired: the published file is untouched and still erasable by pathname.
+        expect(await fsReadFile(path.join(root, 'd.json'), 'utf8')).toBe('{"d":1}');
+        expect(await eraseIfSame(root, 'd.json', d.dev, d.ino, expiring, d.holdId)).toEqual({ erased: true });
       } finally {
-        await holds.closeAll();
+        await bounded.closeAll();
+        await expiring.closeAll();
         await rm(root, { recursive: true, force: true });
       }
     });
