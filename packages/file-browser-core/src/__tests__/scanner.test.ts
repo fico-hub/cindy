@@ -308,6 +308,44 @@ describe('readFile binary detection', () => {
 });
 
 describe('writeNewFile', () => {
+  it('fails closed when the parent is swapped for an outside symlink between the check and the open', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-write-new-swap-'));
+    const workdir = path.join(root, 'workdir');
+    const outside = path.join(root, 'outside');
+    await mkdir(path.join(workdir, 'tool-results'), { recursive: true });
+    await mkdir(outside);
+    const realOpen = fsp.open.bind(fsp);
+    let swapped = false;
+    const spy = vi.spyOn(fsp, 'open').mockImplementation(async (...args: Parameters<typeof fsp.open>) => {
+      if (!swapped) {
+        swapped = true;
+        // Race window: the parent dir was validated, now replace it with a link that escapes.
+        await rm(path.join(workdir, 'tool-results'), { recursive: true });
+        try {
+          await symlink(outside, path.join(workdir, 'tool-results'), 'dir');
+        } catch {
+          return realOpen(...args);
+        }
+      }
+      return realOpen(...args);
+    });
+    try {
+      let failure: unknown = null;
+      try {
+        await writeNewFile(workdir, 'tool-results/secret.json', '{"secret":true}');
+      } catch (err) {
+        failure = err;
+      }
+      if (!swapped) return; // platform without symlink support
+      expect(String(failure)).toMatch(/escapes workdir via symlink/);
+      // Nothing with content may remain outside; the empty exclusive file is removed too.
+      await expect(fsReadFile(path.join(outside, 'secret.json'))).rejects.toThrow(/ENOENT/);
+    } finally {
+      spy.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('removes the exclusively created file when the write itself fails', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-write-new-fail-'));
     const realOpen = fsp.open.bind(fsp);

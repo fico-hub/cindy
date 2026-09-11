@@ -2732,6 +2732,43 @@ describe('oversized ghost result Host storage', () => {
     } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
   });
 
+  // Codex P1 (round 5): after a client TIMEOUT the daemon may still be writing — a short file
+  // observed once is not a partial file. Poll until the size matches or stops growing.
+  it('waits for an in-progress remote write after a timeout instead of deleting it', async () => {
+    const deps = makeDeps('codex');
+    sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
+    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => true, reviewAction: reviewAllow });
+    const text = JSON.stringify({ ok: true, result: 'x'.repeat(100) });
+    const full = Buffer.byteLength(text, 'utf8');
+    const sizes = [3, 40, 80, full];
+    let statCalls = 0;
+    remoteFsRequestMock.mockImplementation(async (_host, method) => {
+      if (method === 'writeNewFile') throw Object.assign(new Error('writeNewFile TIMEOUT'), { code: 'TIMEOUT' });
+      if (method === 'stat') return { relPath: 'x', mtimeMs: 0, type: 'file', size: sizes[Math.min(statCalls++, sizes.length - 1)] };
+      return {};
+    });
+    await expect(deps.saveLargeGhostResult!(text)).resolves.toMatch(/^tool-results\//);
+    expect(statCalls).toBe(4);
+    expect(remoteFsRequestMock.mock.calls.map(call => call[1])).not.toContain('deleteEntry');
+  });
+
+  it('treats a remote file that stops growing short of the content as partial and deletes it', async () => {
+    const deps = makeDeps('codex');
+    sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
+    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => true, reviewAction: reviewAllow });
+    const text = JSON.stringify({ ok: true, result: 'x'.repeat(100) });
+    const sizes = [3, 40, 40, 40];
+    let statCalls = 0;
+    remoteFsRequestMock.mockImplementation(async (_host, method) => {
+      if (method === 'writeNewFile') throw Object.assign(new Error('writeNewFile TIMEOUT'), { code: 'TIMEOUT' });
+      if (method === 'stat') return { relPath: 'x', mtimeMs: 0, type: 'file', size: sizes[Math.min(statCalls++, sizes.length - 1)] };
+      return {};
+    });
+    await expect(deps.saveLargeGhostResult!(text)).rejects.toThrow('writeNewFile TIMEOUT');
+    expect(statCalls).toBe(4); // 3 → 40 → 40 → 40: three identical short readings
+    expect(remoteFsRequestMock.mock.calls.map(call => call[1]).at(-1)).toBe('deleteEntry');
+  });
+
   // Codex P1 (round 3): a lost RPC response is not a failed write; verify before deleting.
   it.each([
     { name: 'keeps a fully written file after a lost response', code: 'CHANNEL_CLOSED', statResult: { type: 'file', size: null as number | null }, expectDelete: false, expectOk: true },

@@ -471,14 +471,54 @@ async function writeLargeResultToRemote(
     await remote.request(remoteHostId, 'writeNewFile', { workdir, relPath, content: text });
   } catch (err) {
     if (isRemoteResultUnknown(err)) {
-      const stat = await remote.request(remoteHostId, 'stat', { workdir, relPath }).catch(() => null);
-      if (stat?.type === 'file' && stat.size === Buffer.byteLength(text, 'utf8')) return;
-      if (!stat) throw err;
-      await remote.request(remoteHostId, 'deleteEntry', { workdir, relPath }).catch(() => undefined);
+      await reconcileUnknownRemoteWrite(remote, remoteHostId, workdir, relPath, Buffer.byteLength(text, 'utf8'), err);
+      return;
     }
     // A definite failure (EEXIST, size limit, path rejection) wrote nothing.
     throw err;
   }
+}
+
+/** 结果未知时的 stat 轮询节奏:总时长约 10s,覆盖慢文件系统上 2 MiB 上限的写入。 */
+const REMOTE_WRITE_RECONCILE = { intervalMs: 250, maxAttempts: 40, stablePolls: 3 };
+
+/**
+ * 断链/超时后 daemon 可能仍在写:客户端超时只是把请求移出 pending 表,服务端写入继续。
+ * 所以不能凭一次 stat 看到短文件就删。轮询 stat:字节数达标 → 成功;文件缺失 → 失败但
+ * 无需删;长度超出/类型不对 → 删;连续 stablePolls 次长度不再增长且仍不足 → 视为部分
+ * 文件删除;轮询耗尽仍在增长 → 保留文件(不丢不可重放的结果)但按失败上报。
+ */
+async function reconcileUnknownRemoteWrite(
+  remote: ReturnType<typeof getRemoteFileBrowser>,
+  remoteHostId: string,
+  workdir: string,
+  relPath: string,
+  expectedBytes: number,
+  cause: unknown,
+): Promise<void> {
+  let lastSize = -1;
+  let stable = 0;
+  for (let attempt = 0; attempt < REMOTE_WRITE_RECONCILE.maxAttempts; attempt += 1) {
+    const stat = await remote.request(remoteHostId, 'stat', { workdir, relPath }).catch(() => null);
+    if (!stat) throw cause;
+    const size = stat.type === 'file' ? (stat.size ?? -1) : -1;
+    if (size === expectedBytes) return;
+    if (stat.type !== 'file' || size > expectedBytes) {
+      await remote.request(remoteHostId, 'deleteEntry', { workdir, relPath }).catch(() => undefined);
+      throw cause;
+    }
+    stable = size === lastSize ? stable + 1 : 1;
+    lastSize = size;
+    if (stable >= REMOTE_WRITE_RECONCILE.stablePolls) {
+      await remote.request(remoteHostId, 'deleteEntry', { workdir, relPath }).catch(() => undefined);
+      throw cause;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, REMOTE_WRITE_RECONCILE.intervalMs));
+  }
+  log.warn('ghost large result: remote write still in progress after reconcile window; keeping file', {
+    remoteHostId, relPath, lastSize, expectedBytes,
+  });
+  throw cause;
 }
 
 /**

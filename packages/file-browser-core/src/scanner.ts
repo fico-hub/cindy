@@ -564,12 +564,36 @@ export async function writeNewFile(
   }
   const handle = await fs.open(abs, 'wx');
   try {
+    // The parent check above and the open are separate steps: a watcher could swap
+    // the parent for a symlink in between, and `wx` still follows parent links. Node
+    // has no openat, so anchor after the fact and before any byte is written: the
+    // inode behind our handle must be the entry of that name inside the re-resolved
+    // real parent, which itself must still be inside workdir. Otherwise the (still
+    // empty) file was created elsewhere: remove it and fail closed.
+    const [created, parentReal, wdReal] = await Promise.all([
+      handle.stat(),
+      fs.realpath(path.dirname(abs)),
+      fs.realpath(workdir),
+    ]);
+    const anchored = await fs.lstat(path.join(parentReal, path.basename(abs))).catch(() => null);
+    if (
+      (parentReal !== wdReal && !parentReal.startsWith(wdReal + path.sep)) ||
+      !anchored?.isFile() ||
+      anchored.ino !== created.ino ||
+      anchored.dev !== created.dev
+    ) {
+      throw new Error(`path escapes workdir via symlink: ${sub}`);
+    }
     await handle.writeFile(buf);
   } catch (err) {
-    // A partial write (ENOSPC, I/O error) must not leave a truncated file at the
-    // final visible name: the caller treats a definite failure as "nothing written".
+    // A partial write (ENOSPC, I/O error) or a failed anchor must not leave the
+    // exclusively created file behind. Only unlink what is still our own inode.
+    const ours = await handle.stat().catch(() => null);
     await handle.close().catch(() => undefined);
-    await fs.unlink(abs).catch(() => undefined);
+    const current = await fs.lstat(abs).catch(() => null);
+    if (ours && current && current.ino === ours.ino && current.dev === ours.dev) {
+      await fs.unlink(abs).catch(() => undefined);
+    }
     throw err;
   }
   await handle.close();
