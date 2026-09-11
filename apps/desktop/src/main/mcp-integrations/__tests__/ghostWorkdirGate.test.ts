@@ -2775,6 +2775,39 @@ describe('oversized ghost result Host storage', () => {
     expect(ledgerAddRefMock).not.toHaveBeenCalled();
   });
 
+  it('waits for a file that only appears after the timeout and returns it once complete', async () => {
+    const deps = makeDeps('codex');
+    sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
+    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => true, reviewAction: reviewAllow });
+    const text = JSON.stringify({ ok: true, result: 'x'.repeat(100) });
+    let statCalls = 0;
+    remoteFsRequestMock.mockImplementation(async (_host, method) => {
+      if (method === 'writeNewFile') throw Object.assign(new Error('writeNewFile TIMEOUT'), { code: 'TIMEOUT' });
+      if (method === 'stat') {
+        statCalls += 1;
+        if (statCalls < 3) throw new Error('OPERATION_FAILED: ENOENT');
+        return { relPath: 'x', mtimeMs: 0, type: 'file', size: Buffer.byteLength(text, 'utf8') };
+      }
+      return {};
+    });
+    await expect(deps.saveLargeGhostResult!(text)).resolves.toMatch(/^tool-results\//);
+    expect(statCalls).toBe(3);
+  });
+
+  // Codex P1 (round 7): the directory RPC is an async boundary; re-check the instance before the private bytes go out.
+  it('does not send the remote write when the instance ends during the directory step', async () => {
+    const deps = makeDeps('codex');
+    sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
+    let calls = 0;
+    liveGrantStateMock.mockImplementation(() => (++calls <= 3 ? { permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => true, reviewAction: reviewAllow } : null));
+    const text = JSON.stringify({ ok: true, result: 'x'.repeat(100) });
+    await expect(deps.saveLargeGhostResult!(text)).rejects.toThrow('live session');
+    const methods = remoteFsRequestMock.mock.calls.map(call => call[1]);
+    expect(methods).toContain('createFolder');
+    expect(methods).not.toContain('writeNewFile');
+    expect(calls).toBe(4);
+  });
+
   // Codex P1 (round 6): createFolder can time out while the daemon is still running mkdir.
   it.each([
     { name: 'waits for the folder to appear after a createFolder timeout, then writes', appears: true },
@@ -2812,7 +2845,8 @@ describe('oversized ghost result Host storage', () => {
     { name: 'keeps a fully written file after a lost response', code: 'CHANNEL_CLOSED', statResult: { type: 'file', size: null as number | null }, expectOk: true },
     // Codex P1 (round 5): no completion token exists, so a short file is never deleted — it is kept and reported as unsaved.
     { name: 'keeps a short file untouched after a lost response and reports failure', code: 'CHANNEL_CLOSED', statResult: { type: 'file', size: 3 }, expectOk: false },
-    { name: 'gives up without deleting when the file is missing after a lost response', code: 'CHANNEL_CLOSED', statResult: null, expectOk: false },
+    // Codex P1 (round 7): a missing file is not proof either — the remote open may have blocked past the timeout.
+    { name: 'keeps waiting through the window when the file is missing after a lost response, then reports failure', code: 'CHANNEL_CLOSED', statResult: null, expectOk: false },
     // Codex P1 (round 4): a client-side TIMEOUT is equally ambiguous — the daemon may have finished.
     { name: 'keeps a fully written file after a client timeout', code: 'TIMEOUT', statResult: { type: 'file', size: null as number | null }, expectOk: true },
     { name: 'keeps a short file untouched after a client timeout and reports failure', code: 'TIMEOUT', statResult: { type: 'file', size: 3 }, expectOk: false },
@@ -2835,6 +2869,7 @@ describe('oversized ghost result Host storage', () => {
     const methods = remoteFsRequestMock.mock.calls.map(call => call[1]);
     expect(methods).not.toContain('deleteEntry');
     expect(methods.slice(0, 3)).toEqual(['createFolder', 'writeNewFile', 'stat']);
+    if (!expectOk) expect(methods.filter(m => m === 'stat')).toHaveLength(REMOTE_WRITE_RECONCILE.maxAttempts);
   });
 
   it('does not spill a remote session result when the live instance disagrees about the host', async () => {

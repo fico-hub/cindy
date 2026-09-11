@@ -562,19 +562,25 @@ export async function writeNewFile(
   if (buf.length > MAX_FILE_BYTES) {
     throw new Error(`content too large (>${MAX_FILE_BYTES} bytes)`);
   }
-  const handle = await fs.open(abs, 'wx');
-  try {
-    // The parent check above and the open are separate steps: a watcher could swap
-    // the parent for a symlink in between, and `wx` still follows parent links. Node
-    // has no openat, so anchor after the fact and before any byte is written: the
-    // inode behind our handle must be the entry of that name inside the re-resolved
-    // real parent, which itself must still be inside workdir. Otherwise the (still
-    // empty) file was created elsewhere: remove it and fail closed.
-    const [created, parentReal, wdReal] = await Promise.all([
+  // Private mode: the content is a session's tool output; never rely on the host umask.
+  const handle = await fs.open(abs, 'wx', 0o600);
+  // The parent check above and the open are separate steps, and so are the anchor
+  // check and the write: a watcher could swap or move the parent in between, and
+  // `wx` still follows parent links. Node has no openat / root-anchored write, so
+  // anchor twice — before any byte is written and again after the write. The inode
+  // behind our handle must be the entry of that name inside the re-resolved real
+  // parent, which itself must still be inside workdir. A failed post-write anchor
+  // means the directory moved during the write: zero the content through the
+  // handle (it follows the inode wherever the directory went) and fail closed.
+  const assertAnchored = async (): Promise<void> => {
+    // A parent that no longer resolves (moved away) is an escape too, not an I/O error.
+    const resolved = await Promise.all([
       handle.stat(),
       fs.realpath(path.dirname(abs)),
       fs.realpath(workdir),
-    ]);
+    ]).catch(() => null);
+    if (!resolved) throw new Error(`path escapes workdir via symlink: ${sub}`);
+    const [created, parentReal, wdReal] = resolved;
     const anchored = await fs.lstat(path.join(parentReal, path.basename(abs))).catch(() => null);
     if (
       (parentReal !== wdReal && !parentReal.startsWith(wdReal + path.sep)) ||
@@ -584,10 +590,15 @@ export async function writeNewFile(
     ) {
       throw new Error(`path escapes workdir via symlink: ${sub}`);
     }
+  };
+  try {
+    await assertAnchored();
     await handle.writeFile(buf);
+    await assertAnchored();
   } catch (err) {
-    // A partial write (ENOSPC, I/O error) or a failed anchor must not leave the
-    // exclusively created file behind. Only unlink what is still our own inode.
+    // A partial write (ENOSPC, I/O error) or a failed anchor must not leave content
+    // behind: truncate through the handle first, then unlink only our own inode.
+    await handle.truncate(0).catch(() => undefined);
     const ours = await handle.stat().catch(() => null);
     await handle.close().catch(() => undefined);
     const current = await fs.lstat(abs).catch(() => null);

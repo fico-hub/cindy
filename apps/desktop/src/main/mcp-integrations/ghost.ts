@@ -458,6 +458,7 @@ async function writeLargeResultToRemote(
   workdir: string,
   relPath: string,
   text: string,
+  revalidate: () => Promise<void>,
 ): Promise<void> {
   const remote = getRemoteFileBrowser();
   const dir = path.posix.dirname(relPath);
@@ -472,6 +473,9 @@ async function writeLargeResultToRemote(
     });
     if (!ready) throw err;
   }
+  // The directory RPC (and its reconcile window) is an async boundary: the exact
+  // instance and its write grant must still hold right before the private bytes go out.
+  await revalidate();
   try {
     await remote.request(remoteHostId, 'writeNewFile', { workdir, relPath, content: text });
   } catch (err) {
@@ -511,8 +515,9 @@ async function pollRemoteStat(
 /**
  * 断链/超时后 daemon 可能仍在写:客户端超时只是把请求移出 pending 表,服务端写入继续,
  * 而协议没有完成令牌,任何「长度不再增长」都不能证明写入已终止。因此这里**绝不删除**:
- * 轮询 stat,字节数达标即成功;文件缺失(daemon 从未创建)直接失败;窗口耗尽仍不达标则
- * 保留文件并按失败上报——宁可留下一个可人工回收的部分文件,也不丢不可重放的完整结果。
+ * 轮询 stat,字节数达标即成功;文件暂时缺失也不短路(daemon 的 open 本身可能阻塞过了
+ * 客户端超时,稍后才创建并写完),在窗口内继续等;窗口耗尽仍不达标则保留现场并按失败
+ * 上报——宁可留下一个可人工回收的部分文件,也不丢不可重放的完整结果。
  */
 async function reconcileUnknownRemoteWrite(
   remote: ReturnType<typeof getRemoteFileBrowser>,
@@ -522,23 +527,18 @@ async function reconcileUnknownRemoteWrite(
   expectedBytes: number,
   cause: unknown,
 ): Promise<void> {
-  let missing = false;
-  let lastSize: number | null = null;
+  let lastSeen: { type: string; size: number | null } | null = null;
   const complete = await pollRemoteStat(remote, remoteHostId, workdir, relPath, {
     attempts: REMOTE_WRITE_RECONCILE.maxAttempts,
-    done: (stat) => stat?.type === 'file' && stat.size === expectedBytes,
-    giveUp: (stat) => {
-      if (!stat) { missing = true; return true; }
-      lastSize = stat.type === 'file' ? (stat.size ?? null) : null;
-      return false;
+    done: (stat) => {
+      if (stat) lastSeen = { type: stat.type, size: stat.type === 'file' ? (stat.size ?? null) : null };
+      return stat?.type === 'file' && stat.size === expectedBytes;
     },
   });
   if (complete) return;
-  if (!missing) {
-    log.warn('ghost large result: remote write unverified after reconcile window; keeping file untouched', {
-      remoteHostId, relPath, lastSize, expectedBytes,
-    });
-  }
+  log.warn('ghost large result: remote write unverified after reconcile window; leaving the path untouched', {
+    remoteHostId, relPath, lastSeen, expectedBytes,
+  });
   throw cause;
 }
 
@@ -1655,7 +1655,7 @@ export function getCindyGhostsMcpDeps(
           : path.join(target.workingDir, relativePath),
       );
       if (target.remoteHostId) {
-        await writeLargeResultToRemote(target.remoteHostId, target.workingDir, relativePath, text);
+        await writeLargeResultToRemote(target.remoteHostId, target.workingDir, relativePath, text, () => target.revalidate());
       } else {
         // Reuse the root-anchored, no-overwrite writer, including its symlink/race
         // checks. No plugin-controlled filename or raw fs write enters this path.

@@ -346,6 +346,53 @@ describe('writeNewFile', () => {
     }
   });
 
+  it('creates the file with a private 0600 mode regardless of umask', async () => {
+    if (process.platform === 'win32') return;
+    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-write-new-mode-'));
+    try {
+      // umask can only clear bits: with an explicit 0o600 the result is never wider,
+      // whatever the process umask is (workers cannot change it).
+      await writeNewFile(root, 'private.json', '{"secret":true}');
+      const st = await fsp.lstat(path.join(root, 'private.json'));
+      expect(st.mode & 0o777).toBe(0o600);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('zeroes the content and fails when the parent is moved out during the write', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-write-new-move-'));
+    const workdir = path.join(root, 'workdir');
+    const outside = path.join(root, 'outside');
+    await mkdir(path.join(workdir, 'tool-results'), { recursive: true });
+    const realOpen = fsp.open.bind(fsp);
+    let moved = false;
+    const spy = vi.spyOn(fsp, 'open').mockImplementation(async (...args: Parameters<typeof fsp.open>) => {
+      const handle = await realOpen(...args);
+      const realWrite = handle.writeFile.bind(handle);
+      return Object.assign(Object.create(handle), {
+        writeFile: async (...w: Parameters<typeof handle.writeFile>) => {
+          await realWrite(...w);
+          // Race window: the write landed, now the directory is moved outside the workdir.
+          await fsp.rename(path.join(workdir, 'tool-results'), outside);
+          moved = true;
+        },
+        stat: () => handle.stat(),
+        truncate: (len?: number) => handle.truncate(len),
+        close: () => handle.close(),
+      }) as typeof handle;
+    });
+    try {
+      await expect(writeNewFile(workdir, 'tool-results/secret.json', '{"secret":true}')).rejects.toThrow(/escapes workdir via symlink/);
+      expect(moved).toBe(true);
+      const leaked = await fsp.stat(path.join(outside, 'secret.json')).catch(() => null);
+      expect(leaked?.size ?? 0).toBe(0);
+    } finally {
+      spy.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('removes the exclusively created file when the write itself fails', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-write-new-fail-'));
     const realOpen = fsp.open.bind(fsp);
