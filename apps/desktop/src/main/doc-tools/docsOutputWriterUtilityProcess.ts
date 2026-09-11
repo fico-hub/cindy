@@ -187,6 +187,29 @@ async function syncDirectory(dirPath: string): Promise<void> {
   }
 }
 
+/** Remove a name only if it still carries our inode; 'foreign' = something else sits there now. */
+async function removeOwnName(
+  name: string,
+  handle: fs.promises.FileHandle,
+): Promise<'removed' | 'absent' | 'foreign' | 'error'> {
+  try {
+    const own = await handle.stat({ bigint: true });
+    let current: fs.BigIntStats;
+    try {
+      current = await fs.promises.lstat(name, { bigint: true });
+    } catch (error) {
+      return hasCode(error, 'ENOENT') ? 'absent' : 'error';
+    }
+    if (!current.isFile() || current.isSymbolicLink() || current.dev !== own.dev || current.ino !== own.ino) {
+      return 'foreign';
+    }
+    await fs.promises.unlink(name);
+    return 'removed';
+  } catch {
+    return 'error';
+  }
+}
+
 /**
  * Remove `target` only if it still names the inode behind `handle`. Returns whether the
  * name is now known not to carry our inode (removed, absent, or pointing elsewhere);
@@ -352,7 +375,14 @@ async function writeWithinVerifiedParent(
     // fsynced in writeExclusive, but the names only survive a crash once the parent
     // directory is synced. Do it before success is reported and the caller books refs.
     if (!request.overwrite) {
-      await fs.promises.rm(staging, { force: true });
+      // Remove the staging name only if it still carries our inode. If a workdir process
+      // renamed the link away and put an unrelated file there, withdraw the publish: the
+      // moved link is an untracked private copy (zeroed through the handle in the catch).
+      const removed = await removeOwnName(staging, handle);
+      if (removed === 'foreign') {
+        throw new OutputWriteError('PATH_NOT_ALLOWED', 'staging 名在发布后被替换或移走，已撤回本次输出');
+      }
+      if (removed === 'error') throw new Error('无法移除 staging 名');
     }
     await syncDirectory(workingDir);
     return { dev: st.dev, ino: st.ino };
@@ -371,15 +401,10 @@ async function writeWithinVerifiedParent(
     throw error;
   } finally {
     inFlight = null;
+    // Drop our staging name only while it still carries our inode; anything else at that
+    // path belongs to someone else and is left untouched.
+    if (handle) await removeOwnName(staging, handle).catch(() => undefined);
     await handle?.close().catch(() => undefined);
-    try {
-      const stat = await fs.promises.lstat(staging);
-      if (stat.isFile() && !stat.isSymbolicLink()) {
-        await fs.promises.rm(staging, { force: true });
-      }
-    } catch {
-      // Unknown/replaced staging paths are deliberately left untouched.
-    }
   }
 }
 

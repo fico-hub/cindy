@@ -665,14 +665,24 @@ export async function writeNewFile(
     // of a successful publish (not best-effort); it is also the server-side completion
     // marker verifyNewFile keys on: while `.<name>.<uuid>.staging` exists at the workdir
     // root, the write is still in flight and may yet be withdrawn.
-    await fs.unlink(stagingAbs);
+    // The name is unlinked only if it still carries our inode: a workdir process may have
+    // renamed the staging link away (an untracked private copy) and put an unrelated file
+    // at that name. Then the publish is withdrawn (the handle zeroes the moved copy too).
+    const stagingEntry = await fs.lstat(stagingAbs, { bigint: true }).catch(() => null);
+    if (stagingEntry) {
+      const own = await handle.stat({ bigint: true });
+      if (!stagingEntry.isFile() || stagingEntry.dev !== own.dev || stagingEntry.ino !== own.ino) {
+        throw new Error(`staging link was replaced or moved: ${sub}`);
+      }
+      await fs.unlink(stagingAbs);
+    }
   } catch (err) {
     // Fail closed without leaving content anywhere: zero through the handle (follows
     // the inode wherever a directory went), drop the published entry only if it is
-    // still ours, drop the staging file.
+    // still ours, drop the staging name only if it is still ours.
     await handle.truncate(0).catch(() => undefined);
     if (published && (await isOurs(abs))) await fs.unlink(abs).catch(() => undefined);
-    await fs.unlink(stagingAbs).catch(() => undefined);
+    if (await isOurs(stagingAbs)) await fs.unlink(stagingAbs).catch(() => undefined);
     await handle.close().catch(() => undefined);
     throw err;
   }

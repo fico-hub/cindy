@@ -392,6 +392,26 @@ process.stdout.write(JSON.stringify({ code, outsideExists, movedValue }));
     expect(await abortInFlightWrite()).toEqual({ cleaned: false }); // nothing in flight
   });
 
+  // Codex P1 (round 20): the staging name is removed only while it still carries our inode.
+  it('withdraws the publish when the staging link was renamed away and replaced', async () => {
+    const realLink = fs.promises.link.bind(fs.promises);
+    let stagingPath = '';
+    const linkSpy = vi.spyOn(fs.promises, 'link').mockImplementation(async (from, to) => {
+      await realLink(from, to);
+      stagingPath = String(from);
+      await fs.promises.rename(stagingPath, path.join(root, 'stolen-copy'));
+      await fs.promises.writeFile(stagingPath, 'unrelated user data');
+    });
+    try {
+      await expect(runDocsOutputWriteForTest(await request('report.bin', 'private-result', false), root)).rejects.toMatchObject({ code: 'PATH_NOT_ALLOWED' });
+      expect(await fs.promises.readFile(stagingPath, 'utf8')).toBe('unrelated user data');
+      expect((await fs.promises.stat(path.join(root, 'stolen-copy'))).size).toBe(0);
+      await expect(fs.promises.stat(path.join(root, 'report.bin'))).rejects.toThrow();
+    } finally {
+      linkSpy.mockRestore();
+    }
+  });
+
   // Codex P1 (round 17): after an overwrite rename the old inode is gone; a later failure
   // must not destroy the replacement, which is now the user's only copy.
   it('keeps the overwrite replacement when a post-rename step fails', async () => {

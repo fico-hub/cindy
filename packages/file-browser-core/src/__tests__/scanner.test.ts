@@ -648,6 +648,31 @@ describe('verifyNewFile / unlinkIfSame', () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
+  // Codex P1 (round 20): the staging name is unlinked only while it still carries our inode.
+  it('writeNewFile withdraws the publish when the staging link was renamed away and replaced', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-staging-replaced-'));
+    const realRoot = await fsp.realpath(root);
+    const realLink = fsp.link.bind(fsp);
+    let stagingPath = '';
+    const spy = vi.spyOn(fsp, 'link').mockImplementation(async (from, to) => {
+      await realLink(from, to);
+      stagingPath = String(from);
+      // A workdir process moves the staging link away and puts an unrelated file at its name.
+      await fsp.rename(stagingPath, path.join(realRoot, 'stolen-copy'));
+      await fsWriteFile(stagingPath, 'unrelated user data');
+    });
+    try {
+      await mkdir(path.join(root, 'out'));
+      await expect(writeNewFile(root, 'out/spill.json', '{"secret":1}')).rejects.toThrow(/replaced or moved/);
+      expect(await fsReadFile(stagingPath, 'utf8')).toBe('unrelated user data');
+      expect((await fsStat(path.join(realRoot, 'stolen-copy'))).size).toBe(0);
+      await expect(fsStat(path.join(root, 'out', 'spill.json'))).rejects.toThrow(/ENOENT/);
+    } finally {
+      spy.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   // Codex P1 (round 17): an unreadable marker directory is not "no marker".
   it('verifyNewFile fails closed when the completion-marker scan cannot be performed', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-verify-scanfail-'));
