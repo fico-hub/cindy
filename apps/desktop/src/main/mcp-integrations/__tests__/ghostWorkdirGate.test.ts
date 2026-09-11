@@ -284,7 +284,7 @@ vi.mock('../ghostAttachmentResolve.js', () => ({
   resolveGhostAttachmentUrl: resolveGhostAttachmentUrlMock,
 }));
 
-const { getCindyGhostsMcpDeps, getGhostRosterPrompt } = await import('../ghost');
+const { getCindyGhostsMcpDeps, getGhostRosterPrompt, REMOTE_WRITE_RECONCILE } = await import('../ghost');
 const { createCindyGhostsMcpServer } = await import('cindy-tools');
 const { setGhostDisabledForWorkdir, listDisabledGhostIdsForWorkdir, isGhostDisabledForWorkdir } =
   await import('../../cindy-brain/ghostWorkdirPrefs');
@@ -2380,6 +2380,9 @@ describe('oversized ghost result Host storage', () => {
   const reviewAllow = vi.fn(async () => ({ verdict: 'allow' as const }));
   beforeEach(() => {
     reviewAllow.mockClear();
+    // Shorten the remote reconcile window so ambiguity paths stay fast in tests.
+    REMOTE_WRITE_RECONCILE.intervalMs = 1;
+    REMOTE_WRITE_RECONCILE.maxAttempts = 5;
     liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: null, isCurrent: () => true, reviewAction: reviewAllow });
   });
 
@@ -2752,7 +2755,7 @@ describe('oversized ghost result Host storage', () => {
     expect(remoteFsRequestMock.mock.calls.map(call => call[1])).not.toContain('deleteEntry');
   });
 
-  it('treats a remote file that stops growing short of the content as partial and deletes it', async () => {
+  it('keeps a remote file that stops growing short of the content and reports the timeout instead of deleting it', async () => {
     const deps = makeDeps('codex');
     sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
     liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => true, reviewAction: reviewAllow });
@@ -2765,19 +2768,55 @@ describe('oversized ghost result Host storage', () => {
       return {};
     });
     await expect(deps.saveLargeGhostResult!(text)).rejects.toThrow('writeNewFile TIMEOUT');
-    expect(statCalls).toBe(4); // 3 → 40 → 40 → 40: three identical short readings
-    expect(remoteFsRequestMock.mock.calls.map(call => call[1]).at(-1)).toBe('deleteEntry');
+    // The whole window is used (no stability shortcut) and nothing is deleted: a paused
+    // remote filesystem cannot be told apart from a finished partial write.
+    expect(statCalls).toBe(REMOTE_WRITE_RECONCILE.maxAttempts);
+    expect(remoteFsRequestMock.mock.calls.map(call => call[1])).not.toContain('deleteEntry');
+    expect(ledgerAddRefMock).not.toHaveBeenCalled();
+  });
+
+  // Codex P1 (round 6): createFolder can time out while the daemon is still running mkdir.
+  it.each([
+    { name: 'waits for the folder to appear after a createFolder timeout, then writes', appears: true },
+    { name: 'gives up without writing when the folder never appears after a createFolder timeout', appears: false },
+  ])('$name', async ({ appears }) => {
+    const deps = makeDeps('codex');
+    sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
+    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => true, reviewAction: reviewAllow });
+    const text = JSON.stringify({ ok: true, result: 'x'.repeat(100) });
+    let dirStats = 0;
+    remoteFsRequestMock.mockImplementation(async (_host, method, params) => {
+      if (method === 'createFolder') throw Object.assign(new Error('createFolder TIMEOUT'), { code: 'TIMEOUT' });
+      if (method === 'stat' && (params as { relPath: string }).relPath === 'tool-results') {
+        dirStats += 1;
+        if (appears && dirStats >= 3) return { relPath: 'tool-results', mtimeMs: 0, type: 'directory', size: 0 };
+        throw new Error('OPERATION_FAILED: ENOENT');
+      }
+      return {};
+    });
+    const outcome = deps.saveLargeGhostResult!(text);
+    const methods = () => remoteFsRequestMock.mock.calls.map(call => call[1]);
+    if (appears) {
+      await expect(outcome).resolves.toMatch(/^tool-results\//);
+      expect(dirStats).toBe(3);
+      expect(methods()).toContain('writeNewFile');
+    } else {
+      await expect(outcome).rejects.toThrow('createFolder TIMEOUT');
+      expect(dirStats).toBe(REMOTE_WRITE_RECONCILE.maxAttempts);
+      expect(methods()).not.toContain('writeNewFile');
+    }
   });
 
   // Codex P1 (round 3): a lost RPC response is not a failed write; verify before deleting.
   it.each([
-    { name: 'keeps a fully written file after a lost response', code: 'CHANNEL_CLOSED', statResult: { type: 'file', size: null as number | null }, expectDelete: false, expectOk: true },
-    { name: 'deletes a partial file after a lost response', code: 'CHANNEL_CLOSED', statResult: { type: 'file', size: 3 }, expectDelete: true, expectOk: false },
-    { name: 'gives up without deleting when the file is missing after a lost response', code: 'CHANNEL_CLOSED', statResult: null, expectDelete: false, expectOk: false },
+    { name: 'keeps a fully written file after a lost response', code: 'CHANNEL_CLOSED', statResult: { type: 'file', size: null as number | null }, expectOk: true },
+    // Codex P1 (round 5): no completion token exists, so a short file is never deleted — it is kept and reported as unsaved.
+    { name: 'keeps a short file untouched after a lost response and reports failure', code: 'CHANNEL_CLOSED', statResult: { type: 'file', size: 3 }, expectOk: false },
+    { name: 'gives up without deleting when the file is missing after a lost response', code: 'CHANNEL_CLOSED', statResult: null, expectOk: false },
     // Codex P1 (round 4): a client-side TIMEOUT is equally ambiguous — the daemon may have finished.
-    { name: 'keeps a fully written file after a client timeout', code: 'TIMEOUT', statResult: { type: 'file', size: null as number | null }, expectDelete: false, expectOk: true },
-    { name: 'deletes a partial file after a client timeout', code: 'TIMEOUT', statResult: { type: 'file', size: 3 }, expectDelete: true, expectOk: false },
-  ])('$name', async ({ code, statResult, expectDelete, expectOk }) => {
+    { name: 'keeps a fully written file after a client timeout', code: 'TIMEOUT', statResult: { type: 'file', size: null as number | null }, expectOk: true },
+    { name: 'keeps a short file untouched after a client timeout and reports failure', code: 'TIMEOUT', statResult: { type: 'file', size: 3 }, expectOk: false },
+  ])('$name', async ({ code, statResult, expectOk }) => {
     const deps = makeDeps('codex');
     sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
     liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => true, reviewAction: reviewAllow });
@@ -2794,7 +2833,7 @@ describe('oversized ghost result Host storage', () => {
     if (expectOk) await expect(outcome).resolves.toMatch(/^tool-results\//);
     else await expect(outcome).rejects.toThrow(`writeNewFile ${code}`);
     const methods = remoteFsRequestMock.mock.calls.map(call => call[1]);
-    expect(methods.includes('deleteEntry')).toBe(expectDelete);
+    expect(methods).not.toContain('deleteEntry');
     expect(methods.slice(0, 3)).toEqual(['createFolder', 'writeNewFile', 'stat']);
   });
 

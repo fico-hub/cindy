@@ -464,8 +464,13 @@ async function writeLargeResultToRemote(
   try {
     await remote.request(remoteHostId, 'createFolder', { workdir, relPath: dir });
   } catch (err) {
-    const existing = await remote.request(remoteHostId, 'stat', { workdir, relPath: dir }).catch(() => null);
-    if (existing?.type !== 'directory') throw err;
+    // 超时/断链时 daemon 可能仍在 mkdir:按结果未知轮询等目录出现;明确失败(EEXIST 等)
+    // 只 stat 一次确认目录已在。目录仍不可见就放弃,不能把唯一文件写进不存在的目录。
+    const ready = await pollRemoteStat(remote, remoteHostId, workdir, dir, {
+      attempts: isRemoteResultUnknown(err) ? REMOTE_WRITE_RECONCILE.maxAttempts : 1,
+      done: (stat) => stat?.type === 'directory',
+    });
+    if (!ready) throw err;
   }
   try {
     await remote.request(remoteHostId, 'writeNewFile', { workdir, relPath, content: text });
@@ -479,14 +484,35 @@ async function writeLargeResultToRemote(
   }
 }
 
-/** 结果未知时的 stat 轮询节奏:总时长约 10s,覆盖慢文件系统上 2 MiB 上限的写入。 */
-const REMOTE_WRITE_RECONCILE = { intervalMs: 250, maxAttempts: 40, stablePolls: 3 };
+/** 结果未知时的 stat 轮询节奏:总时长约 10s,覆盖慢文件系统上 2 MiB 上限的写入;测试可缩短。 */
+export const REMOTE_WRITE_RECONCILE = { intervalMs: 250, maxAttempts: 40 };
+
+type RemoteStatResult = { type: string; size?: number | null } | null;
+
+/** 轮询 stat 直到 done 为真(返回 true)或次数耗尽(false);stat 失败按 null 交给 done。 */
+async function pollRemoteStat(
+  remote: ReturnType<typeof getRemoteFileBrowser>,
+  remoteHostId: string,
+  workdir: string,
+  relPath: string,
+  options: { attempts: number; done: (stat: RemoteStatResult) => boolean; giveUp?: (stat: RemoteStatResult) => boolean },
+): Promise<boolean> {
+  for (let attempt = 0; attempt < options.attempts; attempt += 1) {
+    const stat = (await remote.request(remoteHostId, 'stat', { workdir, relPath }).catch(() => null)) as RemoteStatResult;
+    if (options.done(stat)) return true;
+    if (options.giveUp?.(stat)) return false;
+    if (attempt + 1 < options.attempts) {
+      await new Promise<void>((resolve) => setTimeout(resolve, REMOTE_WRITE_RECONCILE.intervalMs));
+    }
+  }
+  return false;
+}
 
 /**
- * 断链/超时后 daemon 可能仍在写:客户端超时只是把请求移出 pending 表,服务端写入继续。
- * 所以不能凭一次 stat 看到短文件就删。轮询 stat:字节数达标 → 成功;文件缺失 → 失败但
- * 无需删;长度超出/类型不对 → 删;连续 stablePolls 次长度不再增长且仍不足 → 视为部分
- * 文件删除;轮询耗尽仍在增长 → 保留文件(不丢不可重放的结果)但按失败上报。
+ * 断链/超时后 daemon 可能仍在写:客户端超时只是把请求移出 pending 表,服务端写入继续,
+ * 而协议没有完成令牌,任何「长度不再增长」都不能证明写入已终止。因此这里**绝不删除**:
+ * 轮询 stat,字节数达标即成功;文件缺失(daemon 从未创建)直接失败;窗口耗尽仍不达标则
+ * 保留文件并按失败上报——宁可留下一个可人工回收的部分文件,也不丢不可重放的完整结果。
  */
 async function reconcileUnknownRemoteWrite(
   remote: ReturnType<typeof getRemoteFileBrowser>,
@@ -496,28 +522,23 @@ async function reconcileUnknownRemoteWrite(
   expectedBytes: number,
   cause: unknown,
 ): Promise<void> {
-  let lastSize = -1;
-  let stable = 0;
-  for (let attempt = 0; attempt < REMOTE_WRITE_RECONCILE.maxAttempts; attempt += 1) {
-    const stat = await remote.request(remoteHostId, 'stat', { workdir, relPath }).catch(() => null);
-    if (!stat) throw cause;
-    const size = stat.type === 'file' ? (stat.size ?? -1) : -1;
-    if (size === expectedBytes) return;
-    if (stat.type !== 'file' || size > expectedBytes) {
-      await remote.request(remoteHostId, 'deleteEntry', { workdir, relPath }).catch(() => undefined);
-      throw cause;
-    }
-    stable = size === lastSize ? stable + 1 : 1;
-    lastSize = size;
-    if (stable >= REMOTE_WRITE_RECONCILE.stablePolls) {
-      await remote.request(remoteHostId, 'deleteEntry', { workdir, relPath }).catch(() => undefined);
-      throw cause;
-    }
-    await new Promise<void>((resolve) => setTimeout(resolve, REMOTE_WRITE_RECONCILE.intervalMs));
-  }
-  log.warn('ghost large result: remote write still in progress after reconcile window; keeping file', {
-    remoteHostId, relPath, lastSize, expectedBytes,
+  let missing = false;
+  let lastSize: number | null = null;
+  const complete = await pollRemoteStat(remote, remoteHostId, workdir, relPath, {
+    attempts: REMOTE_WRITE_RECONCILE.maxAttempts,
+    done: (stat) => stat?.type === 'file' && stat.size === expectedBytes,
+    giveUp: (stat) => {
+      if (!stat) { missing = true; return true; }
+      lastSize = stat.type === 'file' ? (stat.size ?? null) : null;
+      return false;
+    },
   });
+  if (complete) return;
+  if (!missing) {
+    log.warn('ghost large result: remote write unverified after reconcile window; keeping file untouched', {
+      remoteHostId, relPath, lastSize, expectedBytes,
+    });
+  }
   throw cause;
 }
 
