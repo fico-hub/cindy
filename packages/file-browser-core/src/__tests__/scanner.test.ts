@@ -383,10 +383,50 @@ describe('writeNewFile', () => {
       }) as typeof handle;
     });
     try {
-      await expect(writeNewFile(workdir, 'tool-results/secret.json', '{"secret":true}')).rejects.toThrow(/escapes workdir via symlink/);
+      // With root staging the bytes never travel through `tool-results`: moving it away
+      // during the write only makes the publish fail, and nothing with content leaks.
+      await expect(writeNewFile(workdir, 'tool-results/secret.json', '{"secret":true}')).rejects.toThrow();
       expect(moved).toBe(true);
       const leaked = await fsp.stat(path.join(outside, 'secret.json')).catch(() => null);
       expect(leaked?.size ?? 0).toBe(0);
+      const leftovers = (await fsp.readdir(workdir)).filter(name => name.endsWith('.staging'));
+      expect(leftovers).toEqual([]);
+    } finally {
+      spy.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('unlinks and zeroes a published entry when the parent is swapped right at publish time', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-write-new-publish-'));
+    const workdir = path.join(root, 'workdir');
+    const outside = path.join(root, 'outside');
+    await mkdir(path.join(workdir, 'tool-results'), { recursive: true });
+    await mkdir(outside);
+    const realLink = fsp.link.bind(fsp);
+    let swapped = false;
+    const spy = vi.spyOn(fsp, 'link').mockImplementation(async (from, to) => {
+      // Race window between the parent re-check and the link syscall.
+      await rm(path.join(workdir, 'tool-results'), { recursive: true });
+      try {
+        await symlink(outside, path.join(workdir, 'tool-results'), 'dir');
+        swapped = true;
+      } catch {
+        await mkdir(path.join(workdir, 'tool-results'));
+      }
+      return realLink(from, to);
+    });
+    try {
+      let failure: unknown = null;
+      try {
+        await writeNewFile(workdir, 'tool-results/secret.json', '{"secret":true}');
+      } catch (err) {
+        failure = err;
+      }
+      if (!swapped) return;
+      expect(String(failure)).toMatch(/escapes workdir via symlink/);
+      await expect(fsReadFile(path.join(outside, 'secret.json'))).rejects.toThrow(/ENOENT/);
+      expect((await fsp.readdir(workdir)).filter(name => name.endsWith('.staging'))).toEqual([]);
     } finally {
       spy.mockRestore();
       await rm(root, { recursive: true, force: true });
@@ -406,6 +446,7 @@ describe('writeNewFile', () => {
     try {
       await expect(writeNewFile(root, 'partial.json', '{"x":1}')).rejects.toThrow(/ENOSPC/);
       await expect(fsReadFile(path.join(root, 'partial.json'))).rejects.toThrow(/ENOENT/);
+      expect((await fsp.readdir(root)).filter(name => name.endsWith('.staging'))).toEqual([]);
     } finally {
       spy.mockRestore();
       await rm(root, { recursive: true, force: true });

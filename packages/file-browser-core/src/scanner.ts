@@ -15,6 +15,7 @@
 
 import { promises as fs, type Stats, type Dirent } from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 
 import { scopedLogger } from './logging.js';
 import { loadIgnoreMatcher, type Matcher } from './ignore.js';
@@ -562,51 +563,52 @@ export async function writeNewFile(
   if (buf.length > MAX_FILE_BYTES) {
     throw new Error(`content too large (>${MAX_FILE_BYTES} bytes)`);
   }
-  // Private mode: the content is a session's tool output; never rely on the host umask.
-  const handle = await fs.open(abs, 'wx', 0o600);
-  // The parent check above and the open are separate steps, and so are the anchor
-  // check and the write: a watcher could swap or move the parent in between, and
-  // `wx` still follows parent links. Node has no openat / root-anchored write, so
-  // anchor twice — before any byte is written and again after the write. The inode
-  // behind our handle must be the entry of that name inside the re-resolved real
-  // parent, which itself must still be inside workdir. A failed post-write anchor
-  // means the directory moved during the write: zero the content through the
-  // handle (it follows the inode wherever the directory went) and fail closed.
-  const assertAnchored = async (): Promise<void> => {
-    // A parent that no longer resolves (moved away) is an escape too, not an I/O error.
-    const resolved = await Promise.all([
-      handle.stat(),
-      fs.realpath(path.dirname(abs)),
-      fs.realpath(workdir),
-    ]).catch(() => null);
-    if (!resolved) throw new Error(`path escapes workdir via symlink: ${sub}`);
-    const [created, parentReal, wdReal] = resolved;
-    const anchored = await fs.lstat(path.join(parentReal, path.basename(abs))).catch(() => null);
-    if (
-      (parentReal !== wdReal && !parentReal.startsWith(wdReal + path.sep)) ||
-      !anchored?.isFile() ||
-      anchored.ino !== created.ino ||
-      anchored.dev !== created.dev
-    ) {
-      throw new Error(`path escapes workdir via symlink: ${sub}`);
-    }
+  // Root-staged publish. Node has no openat / root-anchored write, so instead of
+  // writing through a path whose parent a workdir-level watcher could swap for a
+  // symlink or move away mid-write, the bytes are written to a private (0600,
+  // exclusive) staging file directly under the workdir root — a parent that content
+  // inside the workdir cannot relocate — and only then published to the target with
+  // `link` (atomic; EEXIST keeps the `wx` semantics; never overwrites). After the
+  // publish the target is anchored: the entry of that name inside the re-resolved
+  // real parent must be our inode and that parent must still be inside workdir. If
+  // the parent was swapped in the tiny link→check interval, the published entry is
+  // unlinked (only if it is still our inode) and the content is zeroed through the
+  // handle. No private byte is ever written through a swappable path.
+  const wdReal = await fs.realpath(workdir);
+  const stagingAbs = path.join(wdReal, `.${path.basename(abs)}.${randomUUID()}.staging`);
+  const handle = await fs.open(stagingAbs, 'wx', 0o600);
+  let published = false;
+  const escape = () => new Error(`path escapes workdir via symlink: ${sub}`);
+  const isOurs = async (candidate: string): Promise<boolean> => {
+    const [own, current] = await Promise.all([handle.stat().catch(() => null), fs.lstat(candidate).catch(() => null)]);
+    return !!own && !!current && current.isFile() && current.ino === own.ino && current.dev === own.dev;
   };
   try {
-    await assertAnchored();
     await handle.writeFile(buf);
-    await assertAnchored();
-  } catch (err) {
-    // A partial write (ENOSPC, I/O error) or a failed anchor must not leave content
-    // behind: truncate through the handle first, then unlink only our own inode.
-    await handle.truncate(0).catch(() => undefined);
-    const ours = await handle.stat().catch(() => null);
-    await handle.close().catch(() => undefined);
-    const current = await fs.lstat(abs).catch(() => null);
-    if (ours && current && current.ino === ours.ino && current.dev === ours.dev) {
-      await fs.unlink(abs).catch(() => undefined);
+    // Publish: parent is re-validated right before, then link (never follows a final
+    // symlink at `abs`; an existing entry of any kind fails with EEXIST).
+    await assertRealParentInsideWorkdir(workdir, abs);
+    await fs.link(stagingAbs, abs);
+    published = true;
+    const parentReal = await fs.realpath(path.dirname(abs)).catch(() => null);
+    if (
+      !parentReal ||
+      (parentReal !== wdReal && !parentReal.startsWith(wdReal + path.sep)) ||
+      !(await isOurs(path.join(parentReal, path.basename(abs))))
+    ) {
+      throw escape();
     }
+  } catch (err) {
+    // Fail closed without leaving content anywhere: zero through the handle (follows
+    // the inode wherever a directory went), drop the published entry only if it is
+    // still ours, drop the staging file.
+    await handle.truncate(0).catch(() => undefined);
+    if (published && (await isOurs(abs))) await fs.unlink(abs).catch(() => undefined);
+    await fs.unlink(stagingAbs).catch(() => undefined);
+    await handle.close().catch(() => undefined);
     throw err;
   }
+  await fs.unlink(stagingAbs).catch(() => undefined);
   await handle.close();
   // lstat: the file was created exclusively as a regular file; never follow.
   const st = await fs.lstat(abs);
