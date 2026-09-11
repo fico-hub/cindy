@@ -9,7 +9,7 @@
 import type { XaiSubscriptionUsageSnapshot } from '../../shared/xaiSubscriptionUsage.js';
 import { scryptSync } from 'node:crypto';
 import { readSubscriptionAccountUsage, triggerSubscriptionAccountUsage, syncSubscriptionAccountUsage, setSubscriptionAccountUsageBroadcaster } from '../usage/subscriptionAccountUsage.js';
-import { broadcastSubscriptionAccountUsage } from '../usageBroadcaster.js';
+import { broadcastSubscriptionAccountUsage, clearXaiRateLimitSnapshot } from '../usageBroadcaster.js';
 import { subscriptionAccountKind } from '../maker-host/subscription-account-auth.js';
 import path from 'node:path';
 
@@ -329,7 +329,7 @@ export function registerMakerUsageIpc(maker: Maker): void {
     return service;
   }
 
-  setSubscriptionAccountUsageBroadcaster(broadcastSubscriptionAccountUsage);
+  setSubscriptionAccountUsageBroadcaster(broadcastSubscriptionAccountUsage, clearXaiRateLimitSnapshot);
   registerMakerUsageHandlers(createElectronIpcHandlerRegistry(), {
     readAgentTodayUsage,
     readCodexAccountUsageSnapshot: readCodexAccountUsageSnapshotWithWebRefresh,

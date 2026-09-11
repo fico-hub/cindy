@@ -963,11 +963,12 @@ export function TodaySpendChip({
   );
   // xAI 限流快照同为本机 main 抓的 —— SSH 远程仍抑制回落价值估算;device-link 远程
   // 走被控端镜像(订阅周用量 invoke + push,限流头 push-only,与本机同语义降级)。
-  // 本机侧按所选供应商账号取(多账号供应商,#4197)。
+  // 本机侧按所选供应商账号取(多账号供应商,#4197 / #4246:限流 hook 同样带 providerId)。
   const remoteXaiDeviceId =
     isDeviceLinkRemote && usesXaiQuotaForm ? (deviceLinkDeviceId ?? null) : null;
   const localXaiRateLimit = useXaiRateLimit(
-    usesXaiQuotaForm && !isAnyRemoteSession && (!providerId || providerId === 'xai'),
+    usesXaiQuotaForm && !isAnyRemoteSession,
+    providerId ?? 'xai',
   );
   const remoteXaiRateLimit = useRemoteXaiRateLimit(!providerId || providerId === 'xai' ? remoteXaiDeviceId : null);
   const xaiRateLimit = isDeviceLinkRemote ? remoteXaiRateLimit : localXaiRateLimit;

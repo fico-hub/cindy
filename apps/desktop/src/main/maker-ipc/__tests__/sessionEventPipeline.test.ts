@@ -430,35 +430,23 @@ describe('production Session event pipeline', () => {
     await h.dispose();
   });
 
-  it('records context after status delivery and preserves Pi runtime context windows', async () => {
-    const h = harness();
-    Object.defineProperty(h.session, 'agentKind', { value: 'pi' });
-    effects.fn('resolveVerifiedContextWindow').mockReturnValue(99999);
-    h.emit(
-      event(
-        'status',
-        { isRunning: false, status: 'Done', contextTokens: 50, contextWindow: 12345 },
-        { source: 'pi' },
-      ),
-    );
-    ordered('broadcast', 'recordSessionContextSnapshot');
-    expect(effects.fn('recordSessionContextSnapshot')).toHaveBeenCalledWith('task', 50, 12345);
-    await h.dispose();
-  });
-
-  it('prefers the verified context window for a non-Pi session', async () => {
-    const h = harness();
-    effects.fn('resolveVerifiedContextWindow').mockReturnValue(99999);
-    h.emit(
-      event(
-        'status',
-        { isRunning: false, status: 'Done', contextTokens: 50, contextWindow: 12345 },
-        { source: 'claude-code' },
-      ),
-    );
-    expect(effects.fn('recordSessionContextSnapshot')).toHaveBeenCalledWith('task', 50, 99999);
-    await h.dispose();
-  });
+  it.each(['pi', 'claude-code', 'codex'] as const)(
+    'records the applied %s context after status delivery without catalog substitution',
+    async (agentKind) => {
+      const h = harness();
+      Object.defineProperty(h.session, 'agentKind', { value: agentKind });
+      effects.fn('resolveVerifiedContextWindow').mockReturnValue(1_050_000);
+      for (const contextWindow of [1_000, 32_000, 500_000]) {
+        h.emit(event('status', {
+          isRunning: false, status: 'Done', contextTokens: 6_000, contextWindow,
+        }, { source: agentKind }));
+        ordered('broadcast', 'recordSessionContextSnapshot');
+        expect(effects.fn('recordSessionContextSnapshot'))
+          .toHaveBeenLastCalledWith('task', 6_000, contextWindow);
+      }
+      await h.dispose();
+    },
+  );
 
   it('keeps a retryable error running without resetting persistence', async () => {
     const h = harness();
@@ -1179,6 +1167,24 @@ describe('usage through the production event pipeline', () => {
 
 
 describe('Bot adapters in the shared event pipeline', () => {
+  it.each(['a long but incomplete answer', ''])('settles output-limit with its available result (%j) before the paired done', async (result) => {
+    const h = harness();
+    h.emit(event('error', {
+      reason: 'output-limit', message: 'Pi reached the model output limit.',
+      isTerminal: true, result,
+    }, { source: 'pi', sessionTurnGeneration: 4 }));
+    await microtasks();
+    expect(h.deps.botDelegationServiceHolder.settleSession).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      childSessionId: 'task', outcome: 'error', resultText: result,
+      error: 'Pi reached the model output limit.',
+    }));
+    h.deps.autoResumeBookkeeping.consumeFailedTurnCompletionTail.mockReturnValue(true);
+    h.emit(event('done', { status: 'failed', result }, { source: 'pi', sessionTurnGeneration: 4 }));
+    await microtasks();
+    expect(h.deps.botDelegationServiceHolder.settleSession).toHaveBeenCalledOnce();
+    await h.dispose();
+  });
+
   it('preserves private input provenance in persistence and broadcast before done clears the active input', () => {
     const h = harness();
     h.deps.agentInputCoordinatorHolder.getActiveInputClientId.mockReturnValue('bot-dm:thread:delivery');
