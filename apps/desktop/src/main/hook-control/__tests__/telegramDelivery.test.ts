@@ -1,4 +1,4 @@
-import type { MessageOpResultPayload } from '@cindy/slack-hook-protocol';
+import { makeMessageOpResult, parseHookMessage, serializeHookMessage, type MessageOpResultPayload } from '@cindy/slack-hook-protocol';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -16,7 +16,7 @@ const directories: string[] = [];
 afterEach(() => { for (const p of directories.splice(0)) fs.rmSync(p, { recursive: true, force: true }); });
 function sent(opId: string, messageId = '123'): MessageOpResultPayload {
   return { opId, ok: true, deliveryState: 'sent', messageId,
-    sentMessage: { chatId: target.principalId, text: '新版日报测试 📮', entities: [{ type: 'bold', offset: 0, length: 10 }], tier: 'html' } };
+    sentMessage: { chatId: target.principalId, text: '新版日报测试 📮', entities: [{ type: 'bold', offset: 0, length: '新版日报测试 📮'.length }], tier: 'html' } };
 }
 function harness() {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-telegram-delivery-'));
@@ -63,7 +63,7 @@ describe('official Telegram delivery', () => {
     expect((await bridge.send(input)).state).toBe('unknown');
     expect(send).toHaveBeenCalledTimes(1);
   });
-  it('excludes a concurrent process while the first send is still in flight', async () => {
+  it('excludes a concurrent bridge instance while the first send is still in flight', async () => {
     const h = harness();
     let finish!: (v: MessageOpResultPayload) => void;
     let opId = '';
@@ -113,6 +113,34 @@ describe('official Telegram delivery', () => {
     const another = harness();
     another.send.mockImplementation(async p => ({ opId: p.opId, ok: true, messageId: '123' }));
     expect((await another.bridge.send(input)).state).toBe('unknown');
+  });
+  it('reconciles a wire-validated UTF-16 receipt after restart and never downgrades sent', async () => {
+    const h = harness();
+    const send = vi.fn(async () => null);
+    const original = createTelegramDeliveryBridge({ ...h, send });
+    const row = await original.send(input);
+    const restarted = createTelegramDeliveryBridge({ ...h, send });
+    const text = '📮 新版日报测试';
+    const result: MessageOpResultPayload = { ...sent(row.opId),
+      sentMessage: { chatId: target.principalId, text, tier: 'html',
+        entities: [{ type: 'bold', offset: 3, length: 6 }] } };
+    const parsed = parseHookMessage(serializeHookMessage(makeMessageOpResult(result)));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok || parsed.message.type !== 'msg.op.result') throw new Error('invalid fixture');
+    restarted.onResult(parsed.message.payload);
+    // A stale timeout/rejection must not erase proof of a successful delivery.
+    restarted.onResult({ opId: row.opId, ok: false, deliveryState: 'not_sent' });
+    expect(await restarted.send(input)).toMatchObject({ state: 'sent', result });
+    expect(send).toHaveBeenCalledOnce();
+  });
+  it('preserves a receipt that arrives while the original send is settling', async () => {
+    const h = harness();
+    const bridge = createTelegramDeliveryBridge({ ...h, send: async payload => {
+      h.bridge.onResult(sent(payload.opId));
+      return null;
+    } });
+    expect(await bridge.send(input)).toMatchObject({ state: 'sent', result: { messageId: '123' } });
+    expect(bridge.receipt(input.idempotencyKey)?.state).toBe('sent');
   });
   it('does not send after a torn journal write' , async () => {
     const h = harness();
