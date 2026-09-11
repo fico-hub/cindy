@@ -56,6 +56,8 @@ export const USAGE_TODAY_TOKENS_CHANGED = 'usage:today-tokens-changed';
 export const USAGE_CODEX_ACCOUNT_CHANGED = 'usage:codex-account-changed';
 /** IPC channel: main → renderer 推 xAI(SuperGrok bridge)上游限流快照变化。 */
 export const USAGE_XAI_RATE_LIMIT_CHANGED = 'usage:xai-rate-limit-changed';
+/** 独立 xAI 账号(providerId ≠ 'xai')的限流头推送:{ providerId, snapshot },与本机 hook 同形。 */
+export const USAGE_XAI_PROVIDER_RATE_LIMIT_CHANGED = 'usage:xai-provider-rate-limit-changed';
 /** IPC channel: main → renderer 推 Claude 订阅账号余量变化 (端点刷新 / headers 旁路)。 */
 export const USAGE_CLAUDE_SUBSCRIPTION_CHANGED = 'usage:claude-subscription-changed';
 /** IPC channel: main → renderer 推 SuperGrok 账号周用量快照。 */
@@ -792,11 +794,13 @@ export function recordXaiRateLimitSnapshot(info: Omit<XaiRateLimitSnapshot, 'upd
   for (const win of BrowserWindow.getAllWindows()) {
     if (isTrustedAppRendererWindow(win)) {
       if (providerId === 'xai') win.webContents.send(USAGE_XAI_RATE_LIMIT_CHANGED, snapshot);
-      else win.webContents.send('usage:xai-provider-rate-limit-changed', { providerId, snapshot });
+      else win.webContents.send(USAGE_XAI_PROVIDER_RATE_LIMIT_CHANGED, { providerId, snapshot });
     }
   }
   // device-link:tooltip 尽力显示被控端限流头(bridge 每成功请求至多一帧,低频)。
-  tapWindowBroadcast(USAGE_XAI_RATE_LIMIT_CHANGED, snapshot);
+  // 与 broadcastCodexAccountUsage 同口径按账号分路:独立账号绝不写进内置远程缓存。
+  if (providerId === 'xai') tapWindowBroadcast(USAGE_XAI_RATE_LIMIT_CHANGED, snapshot);
+  else tapWindowBroadcast(USAGE_XAI_PROVIDER_RATE_LIMIT_CHANGED, { providerId, snapshot });
 }
 
 /**
@@ -807,11 +811,13 @@ export function clearXaiRateLimitSnapshot(providerId = 'xai'): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (isTrustedAppRendererWindow(win)) {
       if (providerId === 'xai') win.webContents.send(USAGE_XAI_RATE_LIMIT_CHANGED, null);
-      else win.webContents.send('usage:xai-provider-rate-limit-changed', { providerId, snapshot: null });
+      else win.webContents.send(USAGE_XAI_PROVIDER_RATE_LIMIT_CHANGED, { providerId, snapshot: null });
     }
   }
-  // device-link:登出 / 换号清除同步给控制端(远程 tooltip 不得挂旧账号余量)。
-  tapWindowBroadcast(USAGE_XAI_RATE_LIMIT_CHANGED, null);
+  // device-link:登出 / 换号清除同步给控制端(远程 tooltip 不得挂旧账号余量);
+  // 独立账号的清除只清它自己的镜像,不得清空仍登录的内置账号。
+  if (providerId === 'xai') tapWindowBroadcast(USAGE_XAI_RATE_LIMIT_CHANGED, null);
+  else tapWindowBroadcast(USAGE_XAI_PROVIDER_RATE_LIMIT_CHANGED, { providerId, snapshot: null });
 }
 
 

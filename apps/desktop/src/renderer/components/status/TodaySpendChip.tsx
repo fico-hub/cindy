@@ -970,7 +970,7 @@ export function TodaySpendChip({
     usesXaiQuotaForm && !isAnyRemoteSession,
     providerId ?? 'xai',
   );
-  const remoteXaiRateLimit = useRemoteXaiRateLimit(!providerId || providerId === 'xai' ? remoteXaiDeviceId : null);
+  const remoteXaiRateLimit = useRemoteXaiRateLimit(remoteXaiDeviceId, providerId ?? 'xai');
   const xaiRateLimit = isDeviceLinkRemote ? remoteXaiRateLimit : localXaiRateLimit;
   const localXaiSubscriptionUsage = useXaiSubscriptionUsage(
     usesXaiQuotaForm && !isAnyRemoteSession,

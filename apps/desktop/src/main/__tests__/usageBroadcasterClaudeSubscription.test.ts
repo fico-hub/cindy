@@ -325,6 +325,28 @@ describe('claude subscription snapshot hydration race', () => {
     broadcaster.clearXaiRateLimitSnapshot();
     expect(mocks.tapWindowBroadcast).toHaveBeenCalledWith('usage:xai-rate-limit-changed', null);
   });
+
+  // MagicLizi P1 (#3789): independent xAI accounts must never write into or clear the builtin
+  // remote mirror; they forward on the provider-scoped channel like Codex named accounts.
+  it('keeps independent xAI account rate-limit record and clear off the builtin channel', async () => {
+    const broadcaster = await import('../usageBroadcaster');
+    mocks.tapWindowBroadcast.mockClear();
+
+    broadcaster.recordXaiRateLimitSnapshot({ source: 'cli-chat-proxy' } as never, 'xai-second');
+    expect(mocks.tapWindowBroadcast).not.toHaveBeenCalledWith('usage:xai-rate-limit-changed', expect.anything());
+    expect(mocks.tapWindowBroadcast).toHaveBeenCalledWith(
+      'usage:xai-provider-rate-limit-changed',
+      { providerId: 'xai-second', snapshot: expect.objectContaining({ updatedAt: expect.any(Number) }) },
+    );
+
+    mocks.tapWindowBroadcast.mockClear();
+    broadcaster.clearXaiRateLimitSnapshot('xai-second');
+    expect(mocks.tapWindowBroadcast).not.toHaveBeenCalledWith('usage:xai-rate-limit-changed', expect.anything());
+    expect(mocks.tapWindowBroadcast).toHaveBeenCalledWith(
+      'usage:xai-provider-rate-limit-changed',
+      { providerId: 'xai-second', snapshot: null },
+    );
+  });
 });
 
 

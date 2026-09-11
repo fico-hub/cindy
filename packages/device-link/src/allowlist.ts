@@ -652,6 +652,8 @@ export const PUSH_FORWARD_ALLOWLIST: ReadonlySet<string> = new Set([
   // xAI 限流头快照(账号级,纯内存瞬时值):tooltip 尽力显示;bridge 每成功请求
   // 至多一帧,xai/ 会话低频。
   'usage:xai-rate-limit-changed',
+  // 独立 xAI 账号的限流头({ providerId, snapshot }):与 codex-provider 同口径按账号分路。
+  'usage:xai-provider-rate-limit-changed',
   // cc 默认路由会话路由观察值变化(payload 顶层 sessionId → session:<id> topic,
   // 打开该会话的控制端可见;每会话生命周期通常仅一次)。
   'maker:claude-session-route-changed',

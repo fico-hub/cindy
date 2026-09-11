@@ -12,7 +12,8 @@
  *     'claude-code'),push 'usage:claude-account-changed'。
  *   - xAI 订阅周用量:invoke 'maker:usage:xai-subscription'(被控端 dispatch 拦截
  *     执行),push 'usage:xai-subscription-changed'。
- *   - xAI 限流头:push-only('usage:xai-rate-limit-changed')—— 被控端无拉取端点,
+ *   - xAI 限流头:push-only('usage:xai-rate-limit-changed';独立账号走
+ *     'usage:xai-provider-rate-limit-changed' { providerId, snapshot })—— 被控端无拉取端点,
  *     本机 renderer 同样只有推送缓存,远程与本机同语义降级。
  */
 
@@ -56,6 +57,8 @@ const xaiSubscriptionMirror = createRemoteDeviceUsageMirror<XaiSubscriptionUsage
 const xaiRateLimitMirror = createRemoteDeviceUsageMirror<XaiRateLimitSnapshot>({
   invokeChannel: null,
   pushChannel: 'usage:xai-rate-limit-changed',
+  defaultProviderId: 'xai',
+  providerPushChannel: 'usage:xai-provider-rate-limit-changed',
 });
 
 /** 被控端 Codex 账号组合 payload 镜像(远程 codex / chatgpt-bridge 会话 chip 用)。 */
@@ -89,9 +92,12 @@ export function requestRemoteXaiSubscriptionRefresh(deviceId: string, providerId
   xaiSubscriptionMirror.request(deviceId, providerId);
 }
 
-/** 被控端 xAI 限流头镜像(push-only,tooltip 尽力显示)。 */
-export function useRemoteXaiRateLimit(deviceId: string | null): XaiRateLimitSnapshot | null {
-  return xaiRateLimitMirror.useMirror(deviceId);
+/** 被控端 xAI 限流头镜像(push-only,tooltip 尽力显示;独立账号订阅各自的 provider 镜像)。 */
+export function useRemoteXaiRateLimit(
+  deviceId: string | null,
+  providerId?: string,
+): XaiRateLimitSnapshot | null {
+  return xaiRateLimitMirror.useMirror(deviceId, providerId);
 }
 
 /**

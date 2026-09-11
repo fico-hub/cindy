@@ -196,6 +196,7 @@ const ACCOUNT_CHANNELS: ReadonlySet<string> = new Set([
   'usage:claude-account-changed',
   'usage:xai-subscription-changed',
   'usage:xai-rate-limit-changed',
+  'usage:xai-provider-rate-limit-changed',
 ]);
 
 /** 从 unknown payload 安全读一个字符串字段。 */

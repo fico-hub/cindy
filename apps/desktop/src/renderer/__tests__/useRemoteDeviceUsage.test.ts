@@ -19,6 +19,7 @@ import { createRemoteDeviceUsageMirror } from '../hooks/remoteDeviceUsageMirror'
 import {
   selectRemoteCodexAccountUsage,
   useRemoteCodexAccountUsage,
+  useRemoteXaiRateLimit,
   resetRemoteDeviceUsageMirrorsForTest,
 } from '../hooks/useRemoteDeviceUsage';
 import {
@@ -209,6 +210,27 @@ describe('remote account parity', () => {
     act(() => emitPush({ deviceId: 'device-1', channel: 'usage:codex-provider-account-changed',
       payload: { providerId: 'account-2', snapshot: null } }));
     expect(named.result.current).toBeNull();
+  });
+
+  // MagicLizi P1 (#3789): xAI rate-limit mirrors are account-scoped too. An independent
+  // account's record must not land in the builtin mirror and its clear must not empty it.
+  it('keeps builtin and independent xAI rate-limit mirrors separate on one device', () => {
+    const builtin = renderHook(() => useRemoteXaiRateLimit('device-1'));
+    const named = renderHook(() => useRemoteXaiRateLimit('device-1', 'xai-second'));
+    expect(mocks.invoke).not.toHaveBeenCalled();
+    act(() => emitPush({ deviceId: 'device-1', channel: 'usage:xai-rate-limit-changed',
+      payload: { updatedAt: 1, remainingRequests: 5 } }));
+    expect(builtin.result.current?.remainingRequests).toBe(5);
+    expect(named.result.current).toBeNull();
+    act(() => emitPush({ deviceId: 'device-1', channel: 'usage:xai-provider-rate-limit-changed',
+      payload: { providerId: 'xai-second', snapshot: { updatedAt: 2, remainingRequests: 9 } } }));
+    expect(named.result.current?.remainingRequests).toBe(9);
+    expect(builtin.result.current?.remainingRequests).toBe(5);
+    // Independent account clear leaves the still-logged-in builtin account untouched.
+    act(() => emitPush({ deviceId: 'device-1', channel: 'usage:xai-provider-rate-limit-changed',
+      payload: { providerId: 'xai-second', snapshot: null } }));
+    expect(named.result.current).toBeNull();
+    expect(builtin.result.current?.remainingRequests).toBe(5);
   });
 
   it('rejects a legacy host builtin response when a named account was requested', async () => {

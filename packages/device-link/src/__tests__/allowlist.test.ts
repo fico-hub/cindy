@@ -397,6 +397,7 @@ describe('PUSH_FORWARD_ALLOWLIST', () => {
       'usage:claude-account-changed',
       'usage:xai-subscription-changed',
       'usage:xai-rate-limit-changed',
+      'usage:xai-provider-rate-limit-changed',
       'maker:claude-session-route-changed',
       'local-db:messages:created',
       'local-db:messages:deleted',
