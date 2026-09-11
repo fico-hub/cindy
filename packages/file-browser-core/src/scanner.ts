@@ -559,6 +559,31 @@ export interface NewFileIdentity {
   ino: number;
 }
 
+/**
+ * Make a directory entry change (link / mkdir) durable: fsync the directory itself.
+ * Byte durability of a file (`handle.sync()`) says nothing about whether its name survives
+ * a crash; that needs the parent directory synced. Platforms that cannot fsync a directory
+ * handle (Windows) report EPERM/EINVAL/EISDIR/ENOTSUP/EBADF and are skipped; a real I/O
+ * error (EIO etc.) propagates so the caller does not report a durable publish.
+ */
+async function syncDirectory(dirPath: string): Promise<void> {
+  let dir: FileHandle;
+  try {
+    dir = await fs.open(dirPath, 'r');
+  } catch (err) {
+    if (DIR_SYNC_UNSUPPORTED.has((err as NodeJS.ErrnoException)?.code ?? '')) return;
+    throw err;
+  }
+  try {
+    await dir.sync();
+  } catch (err) {
+    if (!DIR_SYNC_UNSUPPORTED.has((err as NodeJS.ErrnoException)?.code ?? '')) throw err;
+  } finally {
+    await dir.close().catch(() => undefined);
+  }
+}
+const DIR_SYNC_UNSUPPORTED = new Set(['EPERM', 'EINVAL', 'EISDIR', 'ENOTSUP', 'EOPNOTSUPP', 'EBADF', 'EACCES']);
+
 export async function writeNewFile(
   workdir: string,
   relPath: string,
@@ -610,6 +635,10 @@ export async function writeNewFile(
     ) {
       throw escape();
     }
+    // Name durability: the link above is a directory-entry change; without syncing the
+    // parent directory a crash right after "success" could bring the host back with the
+    // bytes durable but the advertised path gone.
+    await syncDirectory(parentReal);
   } catch (err) {
     // Fail closed without leaving content anywhere: zero through the handle (follows
     // the inode wherever a directory went), drop the published entry only if it is
@@ -718,6 +747,8 @@ export async function createFolder(
   await assertRealParentInsideWorkdir(workdir, abs);
   // recursive:false — fail if parent missing or target exists.
   await fs.mkdir(abs, { recursive: false });
+  // The new entry must survive a crash as well (writeNewFile's parent may be this folder).
+  await syncDirectory(await fs.realpath(path.dirname(abs)));
   const st = await fs.stat(abs);
   return { relPath: sub, type: 'directory', size: 0, mtimeMs: st.mtimeMs };
 }

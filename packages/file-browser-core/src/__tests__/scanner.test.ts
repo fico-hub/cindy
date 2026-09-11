@@ -457,7 +457,8 @@ describe('writeNewFile', () => {
     });
     try {
       const result = await writeNewFile(root, 'out.json', '{"ok":true}');
-      expect(order).toEqual(['sync', 'link']);
+      // bytes fsync → link → parent-directory fsync (name durability, round 11)
+      expect(order).toEqual(['sync', 'link', 'sync']);
       const st = await fsp.lstat(path.join(root, 'out.json'));
       expect(result).toMatchObject({ size: 11, dev: st.dev, ino: st.ino });
     } finally {
@@ -588,6 +589,36 @@ describe('verifyNewFile / unlinkIfSame', () => {
       expect(await unlinkIfSame(root, 'spill.json', again.dev, again.ino)).toEqual({ removed: true });
       await expect(fsReadFile(path.join(root, 'spill.json'))).rejects.toThrow(/ENOENT/);
     } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  // Codex P1 (round 11): publication is a directory-entry change, so the parent directory
+  // is fsynced after `link` (and after `mkdir` in createFolder) before success is reported.
+  it('writeNewFile and createFolder fsync the parent directory after publishing the entry', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-dir-sync-'));
+    const realRoot = await fsp.realpath(root);
+    const events: string[] = [];
+    const realOpen = fsp.open.bind(fsp);
+    const spy = vi.spyOn(fsp, 'open').mockImplementation(async (...args: Parameters<typeof fsp.open>) => {
+      const handle = await realOpen(...args);
+      const st = await handle.stat();
+      if (st.isDirectory()) {
+        const dirPath = String(args[0]);
+        const origSync = handle.sync.bind(handle);
+        handle.sync = async () => { events.push(`sync:${dirPath}`); await origSync(); };
+      }
+      return handle;
+    });
+    try {
+      await createFolder(root, 'out');
+      events.push('mkdir-done');
+      const written = await writeNewFile(root, 'out/spill.json', '{"a":1}');
+      events.push('link-done');
+      expect(written.size).toBe(7);
+      expect(events).toEqual([`sync:${realRoot}`, 'mkdir-done', `sync:${path.join(realRoot, 'out')}`, 'link-done']);
+    } finally {
+      spy.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   // Codex P1 (round 10): erasure is bound to the inode, not the pathname. A spill renamed
