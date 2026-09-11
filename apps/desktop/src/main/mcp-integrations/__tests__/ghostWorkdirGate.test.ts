@@ -2892,16 +2892,23 @@ describe('oversized ghost result Host storage', () => {
         const st = await fs.promises.lstat(input.path, { bigint: true });
         return { identity: { dev: st.dev.toString(), ino: st.ino.toString() } };
       });
+      let moved = false;
       ledgerAddRefMock.mockImplementation(async () => {
         // The output directory leaves the workdir while the ledger call is in flight.
-        await fs.promises.rename(path.join(root, 'tool-results'), path.join(outside, 'tool-results'));
+        // Windows refuses to move a directory holding an open handle (the retained hold):
+        // then no race exists and the file stays put; the erase must still go through.
+        moved = await fs.promises.rename(path.join(root, 'tool-results'), path.join(outside, 'tool-results')).then(() => true, () => false);
         throw new Error('FOREIGN KEY constraint failed');
       });
       await expect(deps.saveLargeGhostResult!(JSON.stringify({ image: `cindy-media://blobs/${'f'.repeat(64)}.png` }))).rejects.toThrow('media references unavailable');
       const written = writeDocsOutputMock.mock.calls[0]![0].path;
-      const moved = path.join(outside, 'tool-results', path.basename(written));
-      expect((await fs.promises.stat(moved)).size).toBe(0);
-      await expect(fs.promises.access(written)).rejects.toThrow();
+      if (moved) {
+        expect((await fs.promises.stat(path.join(outside, 'tool-results', path.basename(written)))).size).toBe(0);
+        await expect(fs.promises.access(written)).rejects.toThrow();
+      } else {
+        expect(process.platform).toBe('win32');
+        expect((await fs.promises.stat(written)).size).toBe(0);
+      }
     } finally {
       ledgerAddRefMock.mockImplementation(async (params: TestLedgerRef) => {
         const id = params.id ?? `ref-${++ledgerRefSeq}`;
