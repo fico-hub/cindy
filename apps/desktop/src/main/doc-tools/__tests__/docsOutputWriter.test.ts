@@ -142,10 +142,11 @@ describe('writeDocsOutput beforeCommit boundary', () => {
   // abort must not run beforeCommit or hand the bytes over.
   it('never sends the bytes when ready arrives after the abort has started', async () => {
     DOCS_OUTPUT_WRITER_TIMEOUT.ms = 20;
-    DOCS_OUTPUT_WRITER_ABORT_GRACE.ms = 80;
+    DOCS_OUTPUT_WRITER_ABORT_GRACE.ms = 600;
     forkMock.mockImplementation(() => {
-      // Child becomes ready only after the watchdog fired (during the grace window).
-      setTimeout(() => child.emit('message', { type: 'ready' }), 40);
+      // Child becomes ready only after the watchdog fired (well inside the grace window,
+      // with margin for a loaded CI runner).
+      setTimeout(() => child.emit('message', { type: 'ready' }), 200);
       return child;
     });
     try {

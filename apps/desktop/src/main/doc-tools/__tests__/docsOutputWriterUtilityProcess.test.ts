@@ -83,6 +83,15 @@ async function missingParentRequest(
   };
 }
 
+/** Poll a condition instead of sleeping a fixed time: the full desktop suite runs under load. */
+async function waitFor(cond: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const started = Date.now();
+  while (!cond()) {
+    if (Date.now() - started > timeoutMs) throw new Error('waitFor timed out');
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
 describe('docs output cwd-bound writer', () => {
   it('derives output parents from the lexical session root before realpath canonicalization', () => {
     const lexicalRoot = path.join(root, 'session-root-alias');
@@ -357,8 +366,7 @@ process.stdout.write(JSON.stringify({ code, outsideExists, movedValue }));
     });
     try {
       const pending = runDocsOutputWriteForTest(await request('report.bin', 'private', false), root).catch(() => 'rejected');
-      await new Promise((r) => setTimeout(r, 30));
-      expect(stagingPath).not.toBe('');
+      await waitFor(() => stagingPath !== '');
       expect(await abortInFlightWrite()).toEqual({ cleaned: true });
       await expect(fs.promises.access(stagingPath)).rejects.toThrow();
       await expect(fs.promises.access(path.join(root, 'report.bin'))).rejects.toThrow();
@@ -380,8 +388,10 @@ process.stdout.write(JSON.stringify({ code, outsideExists, movedValue }));
       return handle;
     });
     try {
-      void runDocsOutputWriteForTest(await request('report.bin', 'private', false), root).catch(() => undefined);
-      await new Promise((r) => setTimeout(r, 30));
+      let opened = false;
+      const req = await request('report.bin', 'private', false);
+      void runDocsOutputWriteForTest(req, root, () => { opened = true; }).catch(() => undefined);
+      await waitFor(() => opened);
       expect(await abortInFlightWrite()).toEqual({ cleaned: false });
     } finally {
       openSpy.mockRestore();
@@ -460,20 +470,22 @@ process.stdout.write(JSON.stringify({ code, outsideExists, movedValue }));
     const realLstat = fs.promises.lstat.bind(fs.promises);
     let gateOpen: () => void = () => {};
     let gated = false;
-    let rootLstats = 0;
+    let stagedSeen = false;
     const gate = new Promise<void>((r) => { gateOpen = r; });
     const realRoot = await fs.promises.realpath(root);
+    // Build the request before installing the spy: on Linux realpath(root) === root, so the
+    // helper's own lstat calls would otherwise be counted as verifyParent calls.
+    const pendingRequest = await request('report.bin', 'new', true);
     const lstatSpy = vi.spyOn(fs.promises, 'lstat').mockImplementation((async (...args: Parameters<typeof fs.promises.lstat>) => {
-      // ensureParent verifies once before staging; the second root lstat is the verifyParent
-      // that runs after the bytes are written — hold it so the abort lands there.
-      if (String(args[0]) === realRoot && ++rootLstats === 2) { gated = true; await gate; }
+      // The first root lstat *after* the staged notice is the verifyParent that runs once
+      // the bytes are written — hold it so the abort lands there (platform-independent).
+      if (stagedSeen && !gated && String(args[0]) === realRoot) { gated = true; await gate; }
       return realLstat(...args);
     }) as typeof fs.promises.lstat);
     const renameSpy = vi.spyOn(fs.promises, 'rename');
     try {
-      const pending = runDocsOutputWriteForTest(await request('report.bin', 'new', true), root).then(() => 'resolved', (e: Error) => e.message);
-      await new Promise((r) => setTimeout(r, 40));
-      expect(gated).toBe(true);
+      const pending = runDocsOutputWriteForTest(pendingRequest, root, () => { stagedSeen = true; }).then(() => 'resolved', (e: Error) => e.message);
+      await waitFor(() => gated);
       expect(await abortInFlightWrite()).toEqual({ cleaned: true });
       gateOpen();
       expect(await pending).toMatch(/中止/);
@@ -492,13 +504,15 @@ process.stdout.write(JSON.stringify({ code, outsideExists, movedValue }));
     const realRename = fs.promises.rename.bind(fs.promises);
     let releaseRename: () => void = () => {};
     const gate = new Promise<void>((r) => { releaseRename = r; });
+    let renameStarted = false;
     const renameSpy = vi.spyOn(fs.promises, 'rename').mockImplementation(async (from, to) => {
+      renameStarted = true;
       await gate; // rename outcome unknown until released
       return realRename(from, to);
     });
     try {
       const pending = runDocsOutputWriteForTest(await request('report.bin', 'new', true), root);
-      await new Promise((r) => setTimeout(r, 30));
+      await waitFor(() => renameStarted);
       const abort = abortInFlightWrite(); // arrives while the rename is in flight
       await new Promise((r) => setTimeout(r, 10));
       releaseRename();
