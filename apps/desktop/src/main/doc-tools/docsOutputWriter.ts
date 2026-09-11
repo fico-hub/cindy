@@ -295,13 +295,17 @@ export const writeDocsOutput: WriteDocsOutputFn = async (input) => {
         (message as { type?: unknown }).type === 'ready'
       ) {
         ready = true;
+        // Single terminal arbitration: once an abort has started (watchdog fired before
+        // the child was even ready), a late `ready` must not hand the private bytes over —
+        // the abort chain owns the outcome from here on.
+        if (aborting) return;
         // Last async boundary before the side effect: the caller may re-check live
         // authorization here. A rejection means the child never receives the bytes.
         void (input.beforeCommit ? input.beforeCommit() : Promise.resolve()).then(
           () => {
-            if (!settled) child.postMessage({ type: 'write', request });
+            if (!settled && !aborting) child.postMessage({ type: 'write', request });
           },
-          (error: unknown) => finish(error),
+          (error: unknown) => { if (!aborting) finish(error); },
         );
         return;
       }

@@ -138,6 +138,28 @@ describe('writeDocsOutput beforeCommit boundary', () => {
     }
   });
 
+  // Codex P1 (round 24): a `ready` that arrives after the watchdog already started the
+  // abort must not run beforeCommit or hand the bytes over.
+  it('never sends the bytes when ready arrives after the abort has started', async () => {
+    DOCS_OUTPUT_WRITER_TIMEOUT.ms = 20;
+    DOCS_OUTPUT_WRITER_ABORT_GRACE.ms = 80;
+    forkMock.mockImplementation(() => {
+      // Child becomes ready only after the watchdog fired (during the grace window).
+      setTimeout(() => child.emit('message', { type: 'ready' }), 40);
+      return child;
+    });
+    try {
+      const beforeCommit = vi.fn(async () => {});
+      const outcome = await writeDocsOutput({ root, path: path.join(root, 'out.txt'), data: new Uint8Array([1]), overwrite: false, beforeCommit }).then(() => 'resolved', (e: Error) => e.message);
+      expect(outcome).toBe('文档落盘隔离进程超时');
+      expect(beforeCommit).not.toHaveBeenCalled();
+      expect(child.posted.filter((m) => (m as { type?: string }).type === 'write')).toEqual([]);
+      expect(child.killed).toBe(true);
+    } finally {
+      DOCS_OUTPUT_WRITER_TIMEOUT.ms = 60_000;
+    }
+  });
+
   // Codex P1 (round 19): a success that races in after the abort started must not win;
   // the abort chain owns the terminal state and reclaims the inode.
   it('ignores a late success result once the abort has started', async () => {

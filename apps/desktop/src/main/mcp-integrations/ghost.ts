@@ -490,7 +490,15 @@ async function writeLargeResultToRemote(
   await revalidate();
   const bytes = Buffer.from(text, 'utf8');
   try {
-    const written = await remote.request(remoteHostId, 'writeNewFile', { workdir, relPath, content: text });
+    // `beforeSend` runs after the manager has connected / probed / installed / handshaken
+    // the host — i.e. at the real frame boundary — so an instance that ended or lost its
+    // grant while the client was being built never has its private bytes sent.
+    const written = await remote.request(
+      remoteHostId,
+      'writeNewFile',
+      { workdir, relPath, content: text },
+      { beforeSend: revalidate },
+    );
     return { dev: written.dev, ino: written.ino };
   } catch (err) {
     if (isRemoteResultUnknown(err)) {

@@ -125,7 +125,7 @@ const ledgerRemoveRefByIdMock = vi.fn(async (id: string) => {
   ledgerRefs.splice(index, 1);
   return 1;
 });
-const remoteFsRequestMock = vi.fn<(hostId: string, method: string, params: Record<string, unknown>) => Promise<unknown>>(async () => ({}));
+const remoteFsRequestMock = vi.fn<(hostId: string, method: string, params: Record<string, unknown>, options?: { beforeSend?: () => Promise<void> }) => Promise<unknown>>(async () => ({}));
 const callCindyMediaMock = vi.fn();
 const dirDepositMock = vi.fn(() => ({ ok: true, receipt: { token: 'dir-ticket' } }));
 const saveDepositMock = vi.fn(() => ({ ok: true, receipt: { token: 'save-ticket' } }));
@@ -2775,7 +2775,7 @@ describe('oversized ghost result Host storage', () => {
     ]);
     expect(remoteFsRequestMock).toHaveBeenCalledWith('host-1', 'createFolder', { workdir: '/srv/work', relPath: 'tool-results' });
     // Exclusive create+write in one RPC: no createFile → writeFile window for a symlink swap.
-    expect(remoteFsRequestMock).toHaveBeenCalledWith('host-1', 'writeNewFile', { workdir: '/srv/work', relPath: saved, content: text });
+    expect(remoteFsRequestMock).toHaveBeenCalledWith('host-1', 'writeNewFile', { workdir: '/srv/work', relPath: saved, content: text }, { beforeSend: expect.any(Function) });
     expect(remoteFsRequestMock.mock.calls.map(call => call[1])).not.toContain('writeFile');
     expect(remoteFsRequestMock.mock.invocationCallOrder.at(-1)).toBeLessThan(ledgerAddRefMock.mock.invocationCallOrder[0]!);
     expect(ledgerRefs).toContainEqual(expect.objectContaining({ hash, refKind: 'ghost-tool-result', refId: saved, originKind: 'tool' }));
@@ -2892,6 +2892,28 @@ describe('oversized ghost result Host storage', () => {
     sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
     liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => true, reviewAction: reviewAllow });
   };
+
+  // Codex P1 (round 24): the remote write re-checks the live grant at the manager's send
+  // boundary (after connect/probe/install/handshake), not only before calling the manager.
+  it('passes revalidation as beforeSend and withholds the remote write when the instance ended while connecting', async () => {
+    const deps = makeDeps('codex');
+    sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
+    let current = true;
+    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => current, reviewAction: reviewAllow });
+    let bytesSent = false;
+    remoteFsRequestMock.mockImplementation(async (_host, method, _params, options) => {
+      if (method === 'writeNewFile') {
+        current = false; // instance ended while the client was being built
+        await options?.beforeSend?.();
+        bytesSent = true;
+        return remoteIdentity;
+      }
+      return {};
+    });
+    await expect(deps.saveLargeGhostResult!('result')).rejects.toThrow();
+    expect(bytesSent).toBe(false);
+    expect(ledgerAddRefMock).not.toHaveBeenCalled();
+  });
 
   it('waits for an in-progress remote write after a timeout and accepts it once the daemon verifies the content', async () => {
     const deps = makeDeps('codex'); remoteSession();
