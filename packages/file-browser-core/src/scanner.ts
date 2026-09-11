@@ -15,7 +15,7 @@
 
 import { promises as fs, type Stats, type Dirent } from 'node:fs';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import { scopedLogger } from './logging.js';
 import { loadIgnoreMatcher, type Matcher } from './ignore.js';
@@ -550,11 +550,19 @@ export async function createFile(
  * createFile → writeFile pair leaves open). Parent dir must already exist and
  * must resolve inside workdir. Refuses content >MAX_FILE_BYTES like writeFile.
  */
+export interface NewFileIdentity {
+  size: number;
+  mtimeMs: number;
+  /** Inode identity of the published file; lets the caller verify or delete only this file. */
+  dev: number;
+  ino: number;
+}
+
 export async function writeNewFile(
   workdir: string,
   relPath: string,
   content: string,
-): Promise<{ size: number; mtimeMs: number }> {
+): Promise<NewFileIdentity> {
   const sub = assertInsideWorkdir(workdir, relPath);
   if (sub === '') throw new Error('cannot write workdir root');
   const abs = path.join(workdir, sub);
@@ -585,6 +593,9 @@ export async function writeNewFile(
   };
   try {
     await handle.writeFile(buf);
+    // Durability before publication: a host that loses power right after the RPC
+    // succeeded must not come back with an empty or partial published file.
+    await handle.sync();
     // Publish: parent is re-validated right before, then link (never follows a final
     // symlink at `abs`; an existing entry of any kind fails with EEXIST).
     await assertRealParentInsideWorkdir(workdir, abs);
@@ -609,10 +620,64 @@ export async function writeNewFile(
     throw err;
   }
   await fs.unlink(stagingAbs).catch(() => undefined);
+  const st = await handle.stat();
   await handle.close();
-  // lstat: the file was created exclusively as a regular file; never follow.
-  const st = await fs.lstat(abs);
-  return { size: st.size, mtimeMs: st.mtimeMs };
+  return { size: st.size, mtimeMs: st.mtimeMs, dev: st.dev, ino: st.ino };
+}
+
+/**
+ * Prove that the entry at `relPath` is the regular file this host wrote: not a symlink,
+ * parent still inside workdir, exact size and SHA-256 of the content. Used after a lost
+ * `writeNewFile` response, where size/mtime alone can be spoofed by a workdir-level
+ * process. Returns the inode identity so a later cleanup can target only this file.
+ */
+export async function verifyNewFile(
+  workdir: string,
+  relPath: string,
+  expectedSha256: string,
+  expectedSize: number,
+): Promise<NewFileIdentity> {
+  const sub = assertInsideWorkdir(workdir, relPath);
+  if (sub === '') throw new Error('cannot verify workdir root');
+  const abs = path.join(workdir, sub);
+  await assertRealParentInsideWorkdir(workdir, abs);
+  const entry = await fs.lstat(abs);
+  if (!entry.isFile()) throw new Error(`not a regular file: ${sub}`);
+  if (entry.size !== expectedSize) throw new Error(`size mismatch: ${sub}`);
+  const handle = await fs.open(abs, 'r');
+  try {
+    const opened = await handle.stat();
+    // The opened inode must be the very entry lstat saw (no swap in between).
+    if (opened.dev !== entry.dev || opened.ino !== entry.ino) throw new Error(`identity mismatch: ${sub}`);
+    const buf = await handle.readFile();
+    if (buf.length !== expectedSize) throw new Error(`size mismatch: ${sub}`);
+    const actual = createHash('sha256').update(buf).digest('hex');
+    if (actual !== expectedSha256) throw new Error(`content mismatch: ${sub}`);
+    return { size: opened.size, mtimeMs: opened.mtimeMs, dev: opened.dev, ino: opened.ino };
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * Delete `relPath` only if it is still the regular file with the given inode identity.
+ * `unlink` never follows a final symlink, and a swapped entry simply does not match, so
+ * cleanup of a spill can never remove unrelated user data. Returns whether it removed it.
+ */
+export async function unlinkIfSame(
+  workdir: string,
+  relPath: string,
+  dev: number,
+  ino: number,
+): Promise<{ removed: boolean }> {
+  const sub = assertInsideWorkdir(workdir, relPath);
+  if (sub === '') throw new Error('cannot delete workdir root');
+  const abs = path.join(workdir, sub);
+  await assertRealParentInsideWorkdir(workdir, abs);
+  const entry = await fs.lstat(abs).catch(() => null);
+  if (!entry || !entry.isFile() || entry.dev !== dev || entry.ino !== ino) return { removed: false };
+  await fs.unlink(abs);
+  return { removed: true };
 }
 
 /**

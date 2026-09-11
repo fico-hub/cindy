@@ -5,6 +5,7 @@
  * 错误映射)与生产完全一致。
  */
 
+import { createHash } from 'node:crypto';
 import { PassThrough } from 'node:stream';
 import { mkdtemp, mkdir, rm, writeFile as fsWriteFile, readFile as fsReadFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -141,6 +142,24 @@ describe('remote-file-service RPC end-to-end', () => {
     await expect(
       client.request('writeNewFile', { workdir, relPath: 'tool-results/y.json', content: 42 as unknown as string }),
     ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+    expect(typeof r.dev).toBe('number');
+    expect(typeof r.ino).toBe('number');
+  });
+
+  it('verifyNewFile proves content identity and unlinkIfSame deletes only that inode', async () => {
+    await mkdir(path.join(workdir, 'tool-results'));
+    const written = await client.request('writeNewFile', { workdir, relPath: 'tool-results/v.json', content: '{"v":1}' });
+    const sha256 = createHash('sha256').update('{"v":1}').digest('hex');
+    const verified = await client.request('verifyNewFile', { workdir, relPath: 'tool-results/v.json', sha256, size: 7 });
+    expect(verified).toMatchObject({ dev: written.dev, ino: written.ino, size: 7 });
+    await expect(
+      client.request('verifyNewFile', { workdir, relPath: 'tool-results/v.json', sha256: 'f'.repeat(64), size: 7 }),
+    ).rejects.toMatchObject({ code: 'OPERATION_FAILED' });
+    await expect(
+      client.request('verifyNewFile', { workdir, relPath: 'tool-results/v.json', sha256, size: -1 as number }),
+    ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+    expect(await client.request('unlinkIfSame', { workdir, relPath: 'tool-results/v.json', dev: written.dev, ino: written.ino + 1 })).toEqual({ removed: false });
+    expect(await client.request('unlinkIfSame', { workdir, relPath: 'tool-results/v.json', dev: written.dev, ino: written.ino })).toEqual({ removed: true });
   });
 
   it('unknown method → UNKNOWN_METHOD; bad params → BAD_REQUEST', async () => {

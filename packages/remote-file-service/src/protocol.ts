@@ -33,10 +33,10 @@ import type {
 } from '@cindy/file-browser-core';
 
 /** 协议兼容版本:client 与 daemon 严格相等才可用。改动任何请求/响应形状时 +1。 */
-export const FILE_SERVICE_SCHEMA_VERSION = 3;
+export const FILE_SERVICE_SCHEMA_VERSION = 4;
 
 /** 人读 bundle 版本(probe / 日志用),行为变化时手动 bump。 */
-export const FILE_SERVICE_BUNDLE_VERSION = '0.2.5';
+export const FILE_SERVICE_BUNDLE_VERSION = '0.2.6';
 
 /* ============================== 帧 ============================== */
 
@@ -175,7 +175,20 @@ export interface FsRpcMethods {
    */
   writeNewFile: {
     params: { workdir: string; relPath: string; content: string };
-    result: { size: number; mtimeMs: number };
+    result: { size: number; mtimeMs: number; dev: number; ino: number };
+  };
+  /**
+   * 核验 relPath 是本机写下的那份普通文件(非 symlink、父目录仍在 workdir 内、大小与
+   * 内容 SHA-256 一致),用于 writeNewFile 响应丢失后的消歧;返回 inode 身份。
+   */
+  verifyNewFile: {
+    params: { workdir: string; relPath: string; sha256: string; size: number };
+    result: { size: number; mtimeMs: number; dev: number; ino: number };
+  };
+  /** 仅当 relPath 仍是给定 inode 身份的普通文件时删除它;unlink 不跟随最终 symlink。 */
+  unlinkIfSame: {
+    params: { workdir: string; relPath: string; dev: number; ino: number };
+    result: { removed: boolean };
   };
   createFolder: {
     params: { workdir: string; relPath: string };

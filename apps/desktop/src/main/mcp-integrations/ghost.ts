@@ -459,7 +459,7 @@ async function writeLargeResultToRemote(
   relPath: string,
   text: string,
   revalidate: () => Promise<void>,
-): Promise<void> {
+): Promise<SpillIdentity | null> {
   const remote = getRemoteFileBrowser();
   const dir = path.posix.dirname(relPath);
   try {
@@ -476,12 +476,13 @@ async function writeLargeResultToRemote(
   // The directory RPC (and its reconcile window) is an async boundary: the exact
   // instance and its write grant must still hold right before the private bytes go out.
   await revalidate();
+  const bytes = Buffer.from(text, 'utf8');
   try {
-    await remote.request(remoteHostId, 'writeNewFile', { workdir, relPath, content: text });
+    const written = await remote.request(remoteHostId, 'writeNewFile', { workdir, relPath, content: text });
+    return { dev: written.dev, ino: written.ino };
   } catch (err) {
     if (isRemoteResultUnknown(err)) {
-      await reconcileUnknownRemoteWrite(remote, remoteHostId, workdir, relPath, Buffer.byteLength(text, 'utf8'), err);
-      return;
+      return reconcileUnknownRemoteWrite(remote, remoteHostId, workdir, relPath, bytes, err);
     }
     // A definite failure (EEXIST, size limit, path rejection) wrote nothing.
     throw err;
@@ -521,41 +522,39 @@ async function pollRemoteStat(
 
 /**
  * 断链/超时后 daemon 可能仍在写:客户端超时只是把请求移出 pending 表,服务端写入继续,
- * 而协议没有完成令牌,任何「长度不再增长」都不能证明写入已终止。因此这里**绝不删除**:
- * 轮询 stat,字节数达标即成功;文件暂时缺失也不短路(daemon 的 open 本身可能阻塞过了
- * 客户端超时,稍后才创建并写完),在窗口内继续等;窗口耗尽仍不达标则保留现场并按失败
- * 上报——宁可留下一个可人工回收的部分文件,也不丢不可重放的完整结果。
+ * 而协议没有完成令牌,长度/mtime 也证明不了「是本机写的」——workdir 内的进程可以放一个
+ * 同长度文件或 symlink 冒充。因此按**内容身份**消歧:轮询 daemon 的 verifyNewFile
+ * (非 symlink、父目录仍在 workdir 内、大小与 SHA-256 与本次内容完全一致),通过即拿到
+ * inode 身份视为本次写入已发布;文件暂时缺失/未写完都继续等(远端 open 本身可能阻塞过
+ * 客户端超时);窗口耗尽仍未核实则保留现场、按失败上报,不做任何删除。
  */
 async function reconcileUnknownRemoteWrite(
   remote: ReturnType<typeof getRemoteFileBrowser>,
   remoteHostId: string,
   workdir: string,
   relPath: string,
-  expectedBytes: number,
+  bytes: Buffer,
   cause: unknown,
-): Promise<void> {
-  let lastSeen: { type: string; size: number | null } | null = null;
-  // Published state, not just length: the daemon writes to a root staging file and publishes
-  // with link, so a target entry of the full length can only be a fully written file. The one
-  // post-publish mutation is the daemon's own anchor-failure compensation (unlink/zero within
-  // the same call). Requiring the same full length and the same mtime on two consecutive
-  // probes separated by an interval rules that out; a server-side completion token would need
-  // a protocol change (see the PR note).
-  let previous: { size: number; mtimeMs: number | null } | null = null;
-  const complete = await pollRemoteStat(remote, remoteHostId, workdir, relPath, {
-    attempts: REMOTE_WRITE_RECONCILE.maxAttempts,
-    done: (stat) => {
-      if (stat) lastSeen = { type: stat.type, size: stat.type === 'file' ? (stat.size ?? null) : null };
-      if (stat?.type !== 'file' || stat.size !== expectedBytes) { previous = null; return false; }
-      const current = { size: stat.size, mtimeMs: stat.mtimeMs ?? null };
-      const confirmed = previous !== null && previous.size === current.size && previous.mtimeMs === current.mtimeMs;
-      previous = current;
-      return confirmed;
-    },
-  });
-  if (complete) return;
+): Promise<SpillIdentity> {
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  const size = bytes.length;
+  const deadline = Date.now() + REMOTE_WRITE_RECONCILE.windowMs;
+  let lastError: string | null = null;
+  for (let attempt = 0; attempt < REMOTE_WRITE_RECONCILE.maxAttempts; attempt += 1) {
+    try {
+      const verified = await remote.request(remoteHostId, 'verifyNewFile', { workdir, relPath, sha256, size });
+      return { dev: verified.dev, ino: verified.ino };
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+    }
+    if (attempt + 1 >= REMOTE_WRITE_RECONCILE.maxAttempts) break;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    await new Promise<void>((resolve) => setTimeout(resolve, Math.min(REMOTE_WRITE_RECONCILE.intervalMs, remaining)));
+    if (Date.now() >= deadline) break;
+  }
   log.warn('ghost large result: remote write unverified after reconcile window; leaving the path untouched', {
-    remoteHostId, relPath, lastSeen, expectedBytes,
+    remoteHostId, relPath, size, lastError,
   });
   throw cause;
 }
@@ -569,8 +568,9 @@ function isRemoteResultUnknown(err: unknown): boolean {
   return code === 'CHANNEL_CLOSED' || code === 'CHANNEL_ERROR' || code === 'TIMEOUT';
 }
 
-/** 本地外置文件写入后立刻记录的 inode 身份,供清理时锚定(不能凭路径删)。 */
-interface LocalSpillAnchor { dev: number; ino: number }
+/** 外置文件写入后记录的 inode 身份(本地 lstat / 远端 writeNewFile 或 verifyNewFile 返回),供清理时锚定。 */
+interface SpillIdentity { dev: number; ino: number }
+type LocalSpillAnchor = SpillIdentity;
 
 /**
  * 写入后按真实父目录锚定并记录 inode:父目录 realpath 必须仍在 workdir realpath 内,
@@ -588,7 +588,7 @@ async function anchorLocalSpill(workdir: string, relPath: string): Promise<Local
 }
 
 /**
- * 清理刚写的外置文件。本地不做裸路径 unlink:父目录可能已被换成指向别处的 symlink,并在
+ * 清理刚写的外置文件。本地与远端都只按 inode 身份删:父目录可能已被换成指向别处的 symlink,并在
  * 那里放一个同名文件诱导删除。只有父目录 realpath 仍在 workdir 内、且同名条目的 dev/ino
  * 与写入时记录的一致,才删那一个条目;否则放弃(宁可留下自己的文件,不删别人的)。
  */
@@ -598,11 +598,15 @@ async function discardLargeResultFile(
   anchor: LocalSpillAnchor | null,
 ): Promise<void> {
   try {
+    if (!anchor) return;
     if (target.remoteHostId) {
-      await getRemoteFileBrowser().request(target.remoteHostId, 'deleteEntry', { workdir: target.workingDir, relPath });
+      // Identity-checked deletion on the daemon: never follows a swapped symlink, never
+      // removes anything but the inode this call created/verified.
+      await getRemoteFileBrowser().request(target.remoteHostId, 'unlinkIfSame', {
+        workdir: target.workingDir, relPath, dev: anchor.dev, ino: anchor.ino,
+      });
       return;
     }
-    if (!anchor) return;
     const abs = path.join(target.workingDir, relPath);
     const [wdReal, parentReal] = await Promise.all([fs.promises.realpath(target.workingDir), fs.promises.realpath(path.dirname(abs))]);
     if (parentReal !== wdReal && !parentReal.startsWith(wdReal + path.sep)) return;
@@ -1714,7 +1718,7 @@ export function getCindyGhostsMcpDeps(
       );
       let anchor: LocalSpillAnchor | null = null;
       if (target.remoteHostId) {
-        await writeLargeResultToRemote(target.remoteHostId, target.workingDir, relativePath, text, () => target.revalidate());
+        anchor = await writeLargeResultToRemote(target.remoteHostId, target.workingDir, relativePath, text, () => target.revalidate());
       } else {
         // Reuse the root-anchored, no-overwrite writer, including its symlink/race
         // checks. No plugin-controlled filename or raw fs write enters this path.

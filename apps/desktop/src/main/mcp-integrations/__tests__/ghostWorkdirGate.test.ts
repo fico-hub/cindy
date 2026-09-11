@@ -2738,194 +2738,85 @@ describe('oversized ghost result Host storage', () => {
     } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
   });
 
-  // Codex P1 (round 5): after a client TIMEOUT the daemon may still be writing — a short file
-  // observed once is not a partial file. Poll until the size matches or stops growing.
-  it('waits for an in-progress remote write after a timeout instead of deleting it', async () => {
-    const deps = makeDeps('codex');
-    sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
-    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => true, reviewAction: reviewAllow });
-    const text = JSON.stringify({ ok: true, result: 'x'.repeat(100) });
-    const full = Buffer.byteLength(text, 'utf8');
-    const sizes = [3, 40, 80, full];
-    let statCalls = 0;
+  // Codex P1 (rounds 5–9): after a client TIMEOUT the daemon may still be writing; the only
+  // acceptable proof of *this* write is the daemon's content-identity check (verifyNewFile).
+  const remoteIdentity = { size: 0, mtimeMs: 0, dev: 7, ino: 9 };
+  const timeoutThenVerify = (verify: (call: number) => unknown) => {
+    let verifyCalls = 0;
     remoteFsRequestMock.mockImplementation(async (_host, method) => {
       if (method === 'writeNewFile') throw Object.assign(new Error('writeNewFile TIMEOUT'), { code: 'TIMEOUT' });
-      if (method === 'stat') return { relPath: 'x', mtimeMs: 0, type: 'file', size: sizes[Math.min(statCalls++, sizes.length - 1)] };
+      if (method === 'verifyNewFile') return verify(++verifyCalls);
       return {};
     });
+    return () => verifyCalls;
+  };
+  const remoteSession = () => {
+    sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
+    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => true, reviewAction: reviewAllow });
+  };
+
+  it('waits for an in-progress remote write after a timeout and accepts it once the daemon verifies the content', async () => {
+    const deps = makeDeps('codex'); remoteSession();
+    const text = JSON.stringify({ ok: true, result: 'x'.repeat(100) });
+    const calls = timeoutThenVerify(call => { if (call < 4) throw new Error('OPERATION_FAILED: size mismatch'); return remoteIdentity; });
     await expect(deps.saveLargeGhostResult!(text)).resolves.toMatch(/^tool-results\//);
-    // Published state is confirmed on two consecutive full-length probes (same mtime), not one.
-    expect(statCalls).toBe(5);
-    expect(remoteFsRequestMock.mock.calls.map(call => call[1])).not.toContain('deleteEntry');
+    expect(calls()).toBe(4);
+    const methods = remoteFsRequestMock.mock.calls.map(call => call[1]);
+    expect(methods).not.toContain('deleteEntry');
+    expect(methods).not.toContain('unlinkIfSame');
+    expect(methods).not.toContain('stat');
+    // The verification carries this write's exact content identity, not just a length.
+    const verifyParams = remoteFsRequestMock.mock.calls.find(call => call[1] === 'verifyNewFile')![2] as { sha256: string; size: number };
+    expect(verifyParams.size).toBe(Buffer.byteLength(text, 'utf8'));
+    expect(verifyParams.sha256).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  it('keeps a remote file that stops growing short of the content and reports the timeout instead of deleting it', async () => {
-    const deps = makeDeps('codex');
-    sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
-    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => true, reviewAction: reviewAllow });
+  it('keeps an unverifiable remote path untouched and reports the timeout instead of deleting anything', async () => {
+    const deps = makeDeps('codex'); remoteSession();
     const text = JSON.stringify({ ok: true, result: 'x'.repeat(100) });
-    const sizes = [3, 40, 40, 40];
-    let statCalls = 0;
-    remoteFsRequestMock.mockImplementation(async (_host, method) => {
-      if (method === 'writeNewFile') throw Object.assign(new Error('writeNewFile TIMEOUT'), { code: 'TIMEOUT' });
-      if (method === 'stat') return { relPath: 'x', mtimeMs: 0, type: 'file', size: sizes[Math.min(statCalls++, sizes.length - 1)] };
-      return {};
-    });
+    const calls = timeoutThenVerify(() => { throw new Error('OPERATION_FAILED: content mismatch'); });
     await expect(deps.saveLargeGhostResult!(text)).rejects.toThrow('writeNewFile TIMEOUT');
-    // The whole window is used (no stability shortcut) and nothing is deleted: a paused
-    // remote filesystem cannot be told apart from a finished partial write.
-    expect(statCalls).toBe(REMOTE_WRITE_RECONCILE.maxAttempts);
-    expect(remoteFsRequestMock.mock.calls.map(call => call[1])).not.toContain('deleteEntry');
+    expect(calls()).toBe(REMOTE_WRITE_RECONCILE.maxAttempts);
+    const methods = remoteFsRequestMock.mock.calls.map(call => call[1]);
+    expect(methods).not.toContain('deleteEntry');
+    expect(methods).not.toContain('unlinkIfSame');
     expect(ledgerAddRefMock).not.toHaveBeenCalled();
   });
 
-  it('waits for a file that only appears after the timeout and returns it once complete', async () => {
-    const deps = makeDeps('codex');
-    sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
-    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => true, reviewAction: reviewAllow });
+  it('waits through a temporarily missing file after the timeout (remote open may have blocked past the deadline)', async () => {
+    const deps = makeDeps('codex'); remoteSession();
     const text = JSON.stringify({ ok: true, result: 'x'.repeat(100) });
-    let statCalls = 0;
-    remoteFsRequestMock.mockImplementation(async (_host, method) => {
-      if (method === 'writeNewFile') throw Object.assign(new Error('writeNewFile TIMEOUT'), { code: 'TIMEOUT' });
-      if (method === 'stat') {
-        statCalls += 1;
-        if (statCalls < 3) throw new Error('OPERATION_FAILED: ENOENT');
-        return { relPath: 'x', mtimeMs: 0, type: 'file', size: Buffer.byteLength(text, 'utf8') };
-      }
-      return {};
-    });
+    const calls = timeoutThenVerify(call => { if (call < 3) throw new Error('OPERATION_FAILED: ENOENT'); return remoteIdentity; });
     await expect(deps.saveLargeGhostResult!(text)).resolves.toMatch(/^tool-results\//);
-    expect(statCalls).toBe(4);
-  });
-
-  // Codex P1 (round 7): the directory RPC is an async boundary; re-check the instance before the private bytes go out.
-  it('does not send the remote write when the instance ends during the directory step', async () => {
-    const deps = makeDeps('codex');
-    sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
-    let calls = 0;
-    liveGrantStateMock.mockImplementation(() => (++calls <= 3 ? { permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => true, reviewAction: reviewAllow } : null));
-    const text = JSON.stringify({ ok: true, result: 'x'.repeat(100) });
-    await expect(deps.saveLargeGhostResult!(text)).rejects.toThrow('live session');
-    const methods = remoteFsRequestMock.mock.calls.map(call => call[1]);
-    expect(methods).toContain('createFolder');
-    expect(methods).not.toContain('writeNewFile');
-    expect(calls).toBe(4);
+    expect(calls()).toBe(3);
   });
 
   // Codex P1 (round 8): each probe may itself wait on the client deadline; the whole
   // reconciliation is bounded by wall-clock, not by probe count.
   it('stops reconciling once the wall-clock window is spent even if probes are slow', async () => {
-    const deps = makeDeps('codex');
-    sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
-    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => true, reviewAction: reviewAllow });
+    const deps = makeDeps('codex'); remoteSession();
     REMOTE_WRITE_RECONCILE.maxAttempts = 40;
     REMOTE_WRITE_RECONCILE.windowMs = 60;
     const text = JSON.stringify({ ok: true, result: 'x'.repeat(100) });
-    let statCalls = 0;
-    remoteFsRequestMock.mockImplementation(async (_host, method) => {
-      if (method === 'writeNewFile') throw Object.assign(new Error('writeNewFile TIMEOUT'), { code: 'TIMEOUT' });
-      if (method === 'stat') {
-        statCalls += 1;
-        await new Promise(resolve => setTimeout(resolve, 40)); // a slow probe
-        throw Object.assign(new Error('stat TIMEOUT'), { code: 'TIMEOUT' });
-      }
-      return {};
-    });
+    const calls = timeoutThenVerify(async () => { await new Promise(resolve => setTimeout(resolve, 40)); throw Object.assign(new Error('verify TIMEOUT'), { code: 'TIMEOUT' }); });
     const started = Date.now();
     await expect(deps.saveLargeGhostResult!(text)).rejects.toThrow('writeNewFile TIMEOUT');
-    expect(statCalls).toBeLessThanOrEqual(3);
+    expect(calls()).toBeLessThanOrEqual(3);
     expect(Date.now() - started).toBeLessThan(1_000);
   });
 
-  // Codex P1 (round 8): a full-length probe followed by the daemon's own compensation must not count.
-  it('does not declare success on a single full-length probe that is gone on the next one', async () => {
+  // Codex P1 (round 9): remote cleanup is identity-checked on the daemon and never path-based.
+  it('cleans up a remote spill only through unlinkIfSame with the identity returned by writeNewFile', async () => {
     const deps = makeDeps('codex');
     sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
-    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => true, reviewAction: reviewAllow });
-    const text = JSON.stringify({ ok: true, result: 'x'.repeat(100) });
-    const full = Buffer.byteLength(text, 'utf8');
-    let statCalls = 0;
-    remoteFsRequestMock.mockImplementation(async (_host, method) => {
-      if (method === 'writeNewFile') throw Object.assign(new Error('writeNewFile TIMEOUT'), { code: 'TIMEOUT' });
-      if (method === 'stat') {
-        statCalls += 1;
-        if (statCalls === 1) return { relPath: 'x', mtimeMs: 1, type: 'file', size: full };
-        if (statCalls === 2) return { relPath: 'x', mtimeMs: 2, type: 'file', size: 0 }; // zeroed by the daemon
-        throw new Error('OPERATION_FAILED: ENOENT');
-      }
-      return {};
-    });
-    await expect(deps.saveLargeGhostResult!(text)).rejects.toThrow('writeNewFile TIMEOUT');
-    expect(ledgerAddRefMock).not.toHaveBeenCalled();
-  });
-
-  // Codex P1 (round 8): local cleanup must never follow a swapped parent to someone else's file.
-  it('does not delete an unrelated outside file when the local parent is swapped before cleanup', async () => {
-    const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ghost-spill-cleanup-swap-'));
-    const workdir = path.join(root, 'workdir');
-    const outside = path.join(root, 'outside');
-    await fs.promises.mkdir(workdir, { recursive: true });
-    await fs.promises.mkdir(outside, { recursive: true });
-    try {
-      const deps = makeDeps('codex');
-      sessionSnapshotMock.mockResolvedValue({ workingDir: workdir, remoteHostId: null, permissionMode: 'auto', planModeEnabled: false });
-      let calls = 0;
-      let swapped = false;
-      liveGrantStateMock.mockImplementation(() => {
-        calls += 1;
-        if (calls <= 3) return { permissionMode: 'auto', remoteHostId: null, isCurrent: () => true, reviewAction: reviewAllow };
-        // Post-write revalidation fails; before cleanup runs, swap the parent for a link to
-        // an outside directory holding an unrelated file under the very same UUID name.
-        if (!swapped) {
-          const written = writeDocsOutputMock.mock.calls[0]![0].path as string;
-          fs.writeFileSync(path.join(outside, path.basename(written)), 'unrelated');
-          fs.renameSync(path.join(workdir, 'tool-results'), path.join(root, 'moved'));
-          try { fs.symlinkSync(outside, path.join(workdir, 'tool-results'), 'dir'); swapped = true; } catch { /* no symlinks */ }
-        }
-        return null;
-      });
-      writeDocsOutputMock.mockImplementation(async input => {
-        await fs.promises.mkdir(path.dirname(input.path), { recursive: true });
-        await fs.promises.writeFile(input.path, input.data);
-      });
-      await expect(deps.saveLargeGhostResult!('result')).rejects.toThrow('live session');
-      if (!swapped) return;
-      const written = writeDocsOutputMock.mock.calls[0]![0].path as string;
-      await expect(fs.promises.readFile(path.join(outside, path.basename(written)), 'utf8')).resolves.toBe('unrelated');
-    } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
-  });
-
-  // Codex P2: an insert whose row landed but whose response was lost must still roll back.
-  it('rolls back a ref whose insert committed but whose response was lost', async () => {
-    const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ghost-spill-lost-insert-'));
-    try {
-      const deps = makeDeps('codex');
-      sessionSnapshotMock.mockResolvedValue({ workingDir: root, remoteHostId: null, permissionMode: 'auto', planModeEnabled: false });
-      writeDocsOutputMock.mockImplementation(async input => {
-        await fs.promises.mkdir(path.dirname(input.path), { recursive: true });
-        await fs.promises.writeFile(input.path, input.data);
-      });
-      const lost = 'a'.repeat(64);
-      ledgerAddRefMock.mockImplementation(async (params: TestLedgerRef) => {
-        const id = params.id ?? `ref-${++ledgerRefSeq}`;
-        ledgerRefs.push({ ...params, id });
-        if (params.hash === lost) throw new Error('worker exited before the response');
-        return id;
-      });
-      await expect(deps.saveLargeGhostResult!(JSON.stringify({ image: `cindy-media://blobs/${lost}.png` }))).rejects.toThrow('media references unavailable');
-      const reservedId = (ledgerAddRefMock.mock.calls[0]![0] as TestLedgerRef).id;
-      expect(reservedId).toBeTruthy();
-      expect(ledgerRemoveRefByIdMock).toHaveBeenCalledWith(reservedId);
-      expect(ledgerRefs).not.toContainEqual(expect.objectContaining({ hash: lost }));
-      await expect(fs.promises.access(writeDocsOutputMock.mock.calls[0]![0].path)).rejects.toThrow();
-    } finally {
-      ledgerAddRefMock.mockImplementation(async (params: TestLedgerRef) => {
-        const id = params.id ?? `ref-${++ledgerRefSeq}`;
-        ledgerRefs.push({ ...params, id });
-        return id;
-      });
-      await fs.promises.rm(root, { recursive: true, force: true });
-    }
+    let calls = 0;
+    // resolve(2) → pre-write(3) → after directory step(4) → post-write(5): the 5th read ends the instance.
+    liveGrantStateMock.mockImplementation(() => (++calls <= 4 ? { permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => true, reviewAction: reviewAllow } : null));
+    remoteFsRequestMock.mockImplementation(async (_host, method) => (method === 'writeNewFile' ? { size: 5, mtimeMs: 1, dev: 7, ino: 9 } : {}));
+    await expect(deps.saveLargeGhostResult!('result')).rejects.toThrow('live session');
+    const methods = remoteFsRequestMock.mock.calls.map(call => call[1]);
+    expect(methods).not.toContain('deleteEntry');
+    expect(remoteFsRequestMock).toHaveBeenCalledWith('host-1', 'unlinkIfSame', { workdir: '/srv/work', relPath: expect.stringMatching(/^tool-results\//), dev: 7, ino: 9 });
   });
 
   // Codex P1 (round 6): createFolder can time out while the daemon is still running mkdir.
@@ -2960,36 +2851,29 @@ describe('oversized ghost result Host storage', () => {
     }
   });
 
-  // Codex P1 (round 3): a lost RPC response is not a failed write; verify before deleting.
+  // Codex P1 (round 3, refined in round 9): a lost RPC response is not a failed write. The
+  // daemon's verifyNewFile decides; nothing is ever deleted on ambiguity.
   it.each([
-    { name: 'keeps a fully written file after a lost response', code: 'CHANNEL_CLOSED', statResult: { type: 'file', size: null as number | null }, expectOk: true },
-    // Codex P1 (round 5): no completion token exists, so a short file is never deleted — it is kept and reported as unsaved.
-    { name: 'keeps a short file untouched after a lost response and reports failure', code: 'CHANNEL_CLOSED', statResult: { type: 'file', size: 3 }, expectOk: false },
-    // Codex P1 (round 7): a missing file is not proof either — the remote open may have blocked past the timeout.
-    { name: 'keeps waiting through the window when the file is missing after a lost response, then reports failure', code: 'CHANNEL_CLOSED', statResult: null, expectOk: false },
-    // Codex P1 (round 4): a client-side TIMEOUT is equally ambiguous — the daemon may have finished.
-    { name: 'keeps a fully written file after a client timeout', code: 'TIMEOUT', statResult: { type: 'file', size: null as number | null }, expectOk: true },
-    { name: 'keeps a short file untouched after a client timeout and reports failure', code: 'TIMEOUT', statResult: { type: 'file', size: 3 }, expectOk: false },
-  ])('$name', async ({ code, statResult, expectOk }) => {
-    const deps = makeDeps('codex');
-    sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
-    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => true, reviewAction: reviewAllow });
+    { name: 'accepts a verified complete file after a lost response', code: 'CHANNEL_CLOSED', verified: true },
+    { name: 'keeps an unverified path untouched after a lost response and reports failure', code: 'CHANNEL_CLOSED', verified: false },
+    { name: 'accepts a verified complete file after a client timeout', code: 'TIMEOUT', verified: true },
+    { name: 'keeps an unverified path untouched after a client timeout and reports failure', code: 'TIMEOUT', verified: false },
+  ])('$name', async ({ code, verified }) => {
+    const deps = makeDeps('codex'); remoteSession();
     const text = JSON.stringify({ ok: true, result: 'x'.repeat(100) });
     remoteFsRequestMock.mockImplementation(async (_host, method) => {
       if (method === 'writeNewFile') throw Object.assign(new Error(`writeNewFile ${code}`), { code });
-      if (method === 'stat') {
-        if (!statResult) throw new Error('OPERATION_FAILED: ENOENT');
-        return { relPath: 'x', mtimeMs: 0, type: statResult.type, size: statResult.size ?? Buffer.byteLength(text, 'utf8') };
-      }
+      if (method === 'verifyNewFile') { if (verified) return remoteIdentity; throw new Error('OPERATION_FAILED: not a regular file'); }
       return {};
     });
     const outcome = deps.saveLargeGhostResult!(text);
-    if (expectOk) await expect(outcome).resolves.toMatch(/^tool-results\//);
+    if (verified) await expect(outcome).resolves.toMatch(/^tool-results\//);
     else await expect(outcome).rejects.toThrow(`writeNewFile ${code}`);
     const methods = remoteFsRequestMock.mock.calls.map(call => call[1]);
     expect(methods).not.toContain('deleteEntry');
-    expect(methods.slice(0, 3)).toEqual(['createFolder', 'writeNewFile', 'stat']);
-    if (!expectOk) expect(methods.filter(m => m === 'stat')).toHaveLength(REMOTE_WRITE_RECONCILE.maxAttempts);
+    expect(methods).not.toContain('unlinkIfSame');
+    expect(methods.slice(0, 3)).toEqual(['createFolder', 'writeNewFile', 'verifyNewFile']);
+    if (!verified) expect(methods.filter(m => m === 'verifyNewFile')).toHaveLength(REMOTE_WRITE_RECONCILE.maxAttempts);
   });
 
   it('does not spill a remote session result when the live instance disagrees about the host', async () => {

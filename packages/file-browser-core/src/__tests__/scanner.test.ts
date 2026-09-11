@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { promises as fsp } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
@@ -14,6 +15,8 @@ import {
   statEntry,
   writeFile,
   writeNewFile,
+  verifyNewFile,
+  unlinkIfSame,
 } from '../scanner';
 
 async function makeSymlinkFixture(): Promise<
@@ -433,6 +436,37 @@ describe('writeNewFile', () => {
     }
   });
 
+  it('syncs the staged bytes before publishing and returns the inode identity', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-write-new-sync-'));
+    const realOpen = fsp.open.bind(fsp);
+    const order: string[] = [];
+    const linkSpy = vi.spyOn(fsp, 'link').mockImplementation(async (from, to) => { order.push('link'); return fsp.link.getMockImplementation ? (await (Object.getPrototypeOf(fsp).link ?? fsp.link)) && undefined : undefined; });
+    linkSpy.mockRestore();
+    const realLink = fsp.link.bind(fsp);
+    const linkSpy2 = vi.spyOn(fsp, 'link').mockImplementation(async (from, to) => { order.push('link'); return realLink(from, to); });
+    const openSpy = vi.spyOn(fsp, 'open').mockImplementation(async (...args: Parameters<typeof fsp.open>) => {
+      const handle = await realOpen(...args);
+      const realSync = handle.sync.bind(handle);
+      return Object.assign(Object.create(handle), {
+        sync: async () => { order.push('sync'); return realSync(); },
+        writeFile: (...w: Parameters<typeof handle.writeFile>) => handle.writeFile(...w),
+        stat: () => handle.stat(),
+        truncate: (len?: number) => handle.truncate(len),
+        close: () => handle.close(),
+      }) as typeof handle;
+    });
+    try {
+      const result = await writeNewFile(root, 'out.json', '{"ok":true}');
+      expect(order).toEqual(['sync', 'link']);
+      const st = await fsp.lstat(path.join(root, 'out.json'));
+      expect(result).toMatchObject({ size: 11, dev: st.dev, ino: st.ino });
+    } finally {
+      openSpy.mockRestore();
+      linkSpy2.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('removes the exclusively created file when the write itself fails', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-write-new-fail-'));
     const realOpen = fsp.open.bind(fsp);
@@ -505,5 +539,54 @@ describe('writeNewFile', () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe('verifyNewFile / unlinkIfSame', () => {
+  const sha = (text: string) => createHash('sha256').update(text).digest('hex');
+
+  it('verifies only the exact regular file with matching size and content, and returns its identity', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-verify-new-'));
+    try {
+      const written = await writeNewFile(root, 'r.json', '{"a":1}');
+      const verified = await verifyNewFile(root, 'r.json', sha('{"a":1}'), 7);
+      expect(verified).toMatchObject({ dev: written.dev, ino: written.ino, size: 7 });
+      await expect(verifyNewFile(root, 'r.json', sha('{"a":2}'), 7)).rejects.toThrow(/content mismatch/);
+      await expect(verifyNewFile(root, 'r.json', sha('{"a":1}'), 6)).rejects.toThrow(/size mismatch/);
+      await expect(verifyNewFile(root, 'missing.json', sha('x'), 1)).rejects.toThrow();
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it('refuses a symlink even when its referent has the expected content', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-verify-link-'));
+    try {
+      await fsWriteFile(path.join(root, 'real.json'), '{"a":1}');
+      try { await symlink(path.join(root, 'real.json'), path.join(root, 'alias.json'), 'file'); } catch { return; }
+      await expect(verifyNewFile(root, 'alias.json', sha('{"a":1}'), 7)).rejects.toThrow(/not a regular file/);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it('unlinkIfSame removes only the matching inode and never follows a swapped symlink', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-unlink-same-'));
+    try {
+      const written = await writeNewFile(root, 'spill.json', '{"a":1}');
+      await fsWriteFile(path.join(root, 'other.json'), 'keep me');
+      // Wrong identity: untouched.
+      expect(await unlinkIfSame(root, 'spill.json', written.dev, written.ino + 1)).toEqual({ removed: false });
+      expect(await fsReadFile(path.join(root, 'spill.json'), 'utf8')).toBe('{"a":1}');
+      // Swap the path for a symlink to unrelated data: not our inode, so nothing is removed.
+      await rm(path.join(root, 'spill.json'));
+      let linked = true;
+      try { await symlink(path.join(root, 'other.json'), path.join(root, 'spill.json'), 'file'); } catch { linked = false; }
+      if (linked) {
+        expect(await unlinkIfSame(root, 'spill.json', written.dev, written.ino)).toEqual({ removed: false });
+        expect(await fsReadFile(path.join(root, 'other.json'), 'utf8')).toBe('keep me');
+        await rm(path.join(root, 'spill.json'));
+      }
+      // Matching identity: removed.
+      const again = await writeNewFile(root, 'spill.json', '{"b":2}');
+      expect(await unlinkIfSame(root, 'spill.json', again.dev, again.ino)).toEqual({ removed: true });
+      await expect(fsReadFile(path.join(root, 'spill.json'))).rejects.toThrow(/ENOENT/);
+    } finally { await rm(root, { recursive: true, force: true }); }
   });
 });

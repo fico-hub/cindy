@@ -32,6 +32,8 @@ import {
   statEntry,
   writeFile,
   writeNewFile,
+  verifyNewFile,
+  unlinkIfSame,
   type CoreLogger,
   type SearchEvent,
 } from '@cindy/file-browser-core';
@@ -176,6 +178,20 @@ export function runFileService(
         requireString(p?.workdir, 'workdir'),
         requireString(p?.relPath, 'relPath'),
         typeof p?.content === 'string' ? p.content : bad('content must be a string'),
+      ),
+    verifyNewFile: (p) =>
+      verifyNewFile(
+        requireString(p?.workdir, 'workdir'),
+        requireString(p?.relPath, 'relPath'),
+        requireString(p?.sha256, 'sha256'),
+        typeof p?.size === 'number' && Number.isInteger(p.size) && p.size >= 0 ? p.size : bad('size must be a non-negative integer'),
+      ),
+    unlinkIfSame: (p) =>
+      unlinkIfSame(
+        requireString(p?.workdir, 'workdir'),
+        requireString(p?.relPath, 'relPath'),
+        typeof p?.dev === 'number' && Number.isFinite(p.dev) ? p.dev : bad('dev must be a number'),
+        typeof p?.ino === 'number' && Number.isFinite(p.ino) ? p.ino : bad('ino must be a number'),
       ),
     createFolder: (p) =>
       createFolder(requireString(p?.workdir, 'workdir'), requireString(p?.relPath, 'relPath')),
