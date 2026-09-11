@@ -104,8 +104,12 @@ const MAX_OVERLAY_HINT_LENGTH = 200;
 function sanitizeOverlayHint(payload: unknown): string {
   if (!payload || typeof payload !== 'object') return DEFAULT_OVERLAY_HINT;
   const hint = (payload as { overlayHint?: unknown }).overlayHint;
-  if (typeof hint !== 'string' || hint.trim() === '') return DEFAULT_OVERLAY_HINT;
-  return hint.slice(0, MAX_OVERLAY_HINT_LENGTH);
+  if (typeof hint !== 'string') return DEFAULT_OVERLAY_HINT;
+  // 先按长度截断再 trim/判空: 不信任 renderer 传来的超大字符串, 任何扫描都只在
+  // 有界片段上进行(与 palette 字段的先限长后校验一致, review P1)。
+  const bounded = hint.length > MAX_OVERLAY_HINT_LENGTH ? hint.slice(0, MAX_OVERLAY_HINT_LENGTH) : hint;
+  if (bounded.trim() === '') return DEFAULT_OVERLAY_HINT;
+  return bounded;
 }
 
 /** 覆盖层配色兜底(renderer 未传/字段非法时) — 与主题 token 的 dark 默认值一致。 */

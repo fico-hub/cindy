@@ -67,6 +67,33 @@ describe('registerScreenCaptureIpc', () => {
     expect(mocks.clipboardWriteImage).toHaveBeenCalledTimes(1);
   });
 
+  // 覆盖层提示文案: 先限长再 trim —— 被攻陷的 renderer 传来的超大字符串只能被
+  // 扫描前 200 字符, 不能让 main 在 trim 上做全量分配(review P1)。
+  it('bounds an oversized overlay hint before trimming it', async () => {
+    mocks.overlayCapture.mockResolvedValue({ cancelled: true });
+    const handler = registerAndGetHandler('win32');
+    const trimSpy = vi.spyOn(String.prototype, 'trim');
+    try {
+      await handler({}, { overlayHint: ' '.repeat(4 * 1024 * 1024) });
+      expect(mocks.overlayCapture).toHaveBeenLastCalledWith(
+        expect.any(Number),
+        'Drag to select the region to capture, press Esc to cancel',
+        expect.any(Object),
+      );
+      await handler({}, { overlayHint: `${'x'.repeat(300)}${' '.repeat(4 * 1024 * 1024)}` });
+      expect(mocks.overlayCapture).toHaveBeenLastCalledWith(
+        expect.any(Number),
+        'x'.repeat(200),
+        expect.any(Object),
+      );
+      const scanned = trimSpy.mock.contexts.map((ctx) => String(ctx).length);
+      expect(scanned.length).toBeGreaterThan(0);
+      expect(Math.max(...scanned)).toBeLessThanOrEqual(200);
+    } finally {
+      trimSpy.mockRestore();
+    }
+  });
+
   // 覆盖层配色: 合法主题色值透传; 非法值(CSS 注入/var 引用)逐字段回退默认 ——
   // 配色会拼进覆盖层 <style>, sanitize 是防样式注入的唯一闸口(review P1)。
   it('passes validated palette colors through and falls back on unsafe values', async () => {
