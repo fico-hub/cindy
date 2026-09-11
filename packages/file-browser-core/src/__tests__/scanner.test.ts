@@ -2,7 +2,8 @@ import { mkdir, mkdtemp, readFile as fsReadFile, rm, symlink, writeFile as fsWri
 import os from 'node:os';
 import path from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { promises as fsp } from 'node:fs';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   createFile,
@@ -307,6 +308,25 @@ describe('readFile binary detection', () => {
 });
 
 describe('writeNewFile', () => {
+  it('removes the exclusively created file when the write itself fails', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-write-new-fail-'));
+    const realOpen = fsp.open.bind(fsp);
+    const spy = vi.spyOn(fsp, 'open').mockImplementation(async (...args: Parameters<typeof fsp.open>) => {
+      const handle = await realOpen(...args);
+      return Object.assign(Object.create(handle), {
+        writeFile: async () => { throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' }); },
+        close: () => handle.close(),
+      }) as typeof handle;
+    });
+    try {
+      await expect(writeNewFile(root, 'partial.json', '{"x":1}')).rejects.toThrow(/ENOSPC/);
+      await expect(fsReadFile(path.join(root, 'partial.json'))).rejects.toThrow(/ENOENT/);
+    } finally {
+      spy.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('creates and writes a new file exclusively in one step', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-file-browser-new-'));
     try {

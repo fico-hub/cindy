@@ -565,9 +565,14 @@ export async function writeNewFile(
   const handle = await fs.open(abs, 'wx');
   try {
     await handle.writeFile(buf);
-  } finally {
-    await handle.close();
+  } catch (err) {
+    // A partial write (ENOSPC, I/O error) must not leave a truncated file at the
+    // final visible name: the caller treats a definite failure as "nothing written".
+    await handle.close().catch(() => undefined);
+    await fs.unlink(abs).catch(() => undefined);
+    throw err;
   }
+  await handle.close();
   // lstat: the file was created exclusively as a regular file; never follow.
   const st = await fs.lstat(abs);
   return { size: st.size, mtimeMs: st.mtimeMs };

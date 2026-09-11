@@ -470,7 +470,7 @@ async function writeLargeResultToRemote(
   try {
     await remote.request(remoteHostId, 'writeNewFile', { workdir, relPath, content: text });
   } catch (err) {
-    if (isRemoteTransportLoss(err)) {
+    if (isRemoteResultUnknown(err)) {
       const stat = await remote.request(remoteHostId, 'stat', { workdir, relPath }).catch(() => null);
       if (stat?.type === 'file' && stat.size === Buffer.byteLength(text, 'utf8')) return;
       if (!stat) throw err;
@@ -481,9 +481,13 @@ async function writeLargeResultToRemote(
   }
 }
 
-function isRemoteTransportLoss(err: unknown): boolean {
+/**
+ * 变更类 RPC 的结果未知:断链(CHANNEL_CLOSED / CHANNEL_ERROR)与客户端超时(TIMEOUT,
+ * daemon 可能已写完只是响应晚到)都不能当作「没写」,必须回读 stat 核对。
+ */
+function isRemoteResultUnknown(err: unknown): boolean {
   const code = (err as { code?: unknown } | null)?.code;
-  return code === 'CHANNEL_CLOSED' || code === 'CHANNEL_ERROR';
+  return code === 'CHANNEL_CLOSED' || code === 'CHANNEL_ERROR' || code === 'TIMEOUT';
 }
 
 async function discardLargeResultFile(target: LargeResultSpillTarget, relPath: string): Promise<void> {
@@ -499,12 +503,15 @@ async function discardLargeResultFile(target: LargeResultSpillTarget, relPath: s
 }
 
 /**
- * 只在字节落盘成功后才给完整结果里的媒体挂 session-attachment 引用。逐 URL 隔离
- * (与 commitChatImageUrls 同口径:pin → 已有引用则跳过 → addRef),并记住**本次调用
- * 实际插入的引用 id**;任一 URL 挂账失败时只按这些 id 回滚(并发的另一次外置即使
- * 引用同一 blob 也不受影响),再删掉刚写的文件,不留没有结果文件的孤立引用。
+ * 只在字节落盘成功后才给完整结果里的媒体挂引用。引用身份是**外置结果文件本身**
+ * (refKind ghost-tool-result / refId = 文件相对路径 / originSessionId = 会话),不与消息
+ * 生命周期的 session-attachment 行共用:消息回退清理只看 live messages,共享行会被删掉
+ * 而回收器随即回收 saved_to 仍引用的字节。会话删除时按 originSessionId 连坐清理。
+ * 逐 URL 隔离(pin → 本文件已有引用则跳过 → addRef),并记住**本次调用实际插入的引用
+ * id**;任一 URL 挂账失败时只按这些 id 回滚(并发的另一次外置不受影响),再删掉刚写的
+ * 文件,不留没有结果文件的孤立引用。成功时把插入的 id 交给调用方,供后续复验失败回滚。
  */
-async function commitLargeResultMediaRefs(target: LargeResultSpillTarget, relPath: string, text: string): Promise<void> {
+async function commitLargeResultMediaRefs(target: LargeResultSpillTarget, relPath: string, text: string): Promise<string[]> {
   const inserted: string[] = [];
   let failed = 0;
   for (const url of collectChatMediaUrls(text)) {
@@ -512,11 +519,11 @@ async function commitLargeResultMediaRefs(target: LargeResultSpillTarget, relPat
     if (!parsed) continue;
     try {
       await ledger.pinBlob(parsed.hash);
-      if (await ledger.hasRef({ hash: parsed.hash, refKind: 'session-attachment', refId: target.sessionId })) continue;
+      if (await ledger.hasRef({ hash: parsed.hash, refKind: 'ghost-tool-result', refId: relPath })) continue;
       inserted.push(await ledger.addRef({
         hash: parsed.hash,
-        refKind: 'session-attachment',
-        refId: target.sessionId,
+        refKind: 'ghost-tool-result',
+        refId: relPath,
         originSessionId: target.sessionId,
         originKind: 'tool',
       }));
@@ -529,7 +536,7 @@ async function commitLargeResultMediaRefs(target: LargeResultSpillTarget, relPat
       });
     }
   }
-  if (failed === 0) return;
+  if (failed === 0) return inserted;
   for (const id of inserted) await ledger.removeRefById(id).catch(() => 0);
   await discardLargeResultFile(target, relPath);
   throw new Error('Tool result media references unavailable');
@@ -1603,7 +1610,16 @@ export function getCindyGhostsMcpDeps(
       }
       // Keep media referenced by the full response alive even when the SDK only
       // receives its bounded projection; refs are committed after the bytes are durable.
-      await commitLargeResultMediaRefs(target, relativePath, text);
+      const insertedRefs = await commitLargeResultMediaRefs(target, relativePath, text);
+      // The ledger mutations above are further async boundaries: an instance that
+      // ended or lost its grant meanwhile must not keep refs or a private file in its name.
+      try {
+        await target.revalidate();
+      } catch (err) {
+        for (const id of insertedRefs) await ledger.removeRefById(id).catch(() => 0);
+        await discardLargeResultFile(target, relativePath);
+        throw err;
+      }
       return relativePath;
     }),
     connectAccount: async (target) => {
