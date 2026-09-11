@@ -463,6 +463,43 @@ process.stdout.write(JSON.stringify({ code, outsideExists, movedValue }));
     }
   });
 
+  // Codex P1 (round 25): an abort that lands while the exclusive open of the staging file
+  // is still pending must wait for it, then clean the (still empty) inode; no byte is written.
+  it('abortInFlightWrite waits for a pending staging open and cleans it before any byte is written', async () => {
+    const realOpen = fs.promises.open.bind(fs.promises);
+    let releaseOpen: () => void = () => {};
+    let openStarted = false;
+    let stagingPath = '';
+    let bytesWritten = false;
+    const gate = new Promise<void>((r) => { releaseOpen = r; });
+    const openSpy = vi.spyOn(fs.promises, 'open').mockImplementation(async (...args: Parameters<typeof fs.promises.open>) => {
+      if (String(args[0]).includes('.cindy-docs-staging-')) {
+        stagingPath = String(args[0]);
+        openStarted = true;
+        await gate; // open outcome unknown until released
+        const handle = await realOpen(...args);
+        const origWrite = handle.writeFile.bind(handle);
+        handle.writeFile = (async (...w: Parameters<typeof origWrite>) => { bytesWritten = true; return origWrite(...w); }) as typeof handle.writeFile;
+        return handle;
+      }
+      return realOpen(...args);
+    });
+    try {
+      const pending = runDocsOutputWriteForTest(await request('report.bin', 'private-result', false), root).then(() => 'resolved', (e: Error) => e.message);
+      await waitFor(() => openStarted);
+      const abort = abortInFlightWrite(); // lands while the open is pending
+      await new Promise((r) => setTimeout(r, 10));
+      releaseOpen();
+      expect(await abort).toEqual({ cleaned: true });
+      expect(await pending).toMatch(/中止/);
+      expect(bytesWritten).toBe(false);
+      await expect(fs.promises.access(stagingPath)).rejects.toThrow();
+      await expect(fs.promises.access(path.join(root, 'report.bin'))).rejects.toThrow();
+    } finally {
+      openSpy.mockRestore();
+    }
+  });
+
   // Codex P1 (round 23): an abort that lands during the verifyParent await (before the commit
   // is started) has already zeroed the staging inode; the rename must not start afterwards.
   it('does not start the overwrite rename when an abort landed during the pre-commit verification', async () => {

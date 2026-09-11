@@ -233,7 +233,12 @@ async function unlinkIfOurs(target: string, handle: fs.promises.FileHandle): Pro
       return hasCode(error, 'ENOENT');
     }
     if (current.isFile() && !current.isSymbolicLink() && current.dev === own.dev && current.ino === own.ino) {
-      await fs.promises.unlink(target);
+      try {
+        await fs.promises.unlink(target);
+      } catch (error) {
+        if (!hasCode(error, 'ENOENT')) throw error; // gone meanwhile (our other cleanup path)
+        return true;
+      }
       // Same post-unlink link-count check as removeOwnName: a swap in the gap means our
       // link is still out there, so the name is not known to be clear.
       const after = await handle.stat({ bigint: true });
@@ -318,12 +323,25 @@ let inFlight: {
   committedOverwrite: () => boolean;
   /** Settles when an in-progress overwrite rename has a known outcome (either way). */
   commitPending: () => Promise<void> | null;
+  /**
+   * Fail-closed cleanup of this write (zero the inode, drop our names), memoized so the
+   * writer's own failure path and a cooperative abort share one run instead of racing each
+   * other over the same handle and names.
+   */
+  cleanup: () => Promise<boolean>;
 } | null = null;
 let abortRequested = false;
+/** Settles (either way) once the staging open in progress has finished; null when none. */
+let stagingOpenPending: Promise<void> | null = null;
 
 /** Cooperative abort: zero the private inode and drop our names, through capabilities bound to it. */
 export async function abortInFlightWrite(): Promise<{ cleaned: boolean }> {
   abortRequested = true;
+  // A staging open may be in progress: its outcome decides whether there is an inode to
+  // clean. Wait for it to settle instead of answering "nothing to clean" while a private
+  // staging file is about to appear. After the open, the writer checks abortRequested
+  // before writing any byte, so the file it created stays empty and is removed here.
+  if (stagingOpenPending) await stagingOpenPending;
   const current = inFlight;
   if (!current) return { cleaned: false };
   // An overwrite rename may be in flight: its outcome decides whether this inode is now the
@@ -333,22 +351,16 @@ export async function abortInFlightWrite(): Promise<{ cleaned: boolean }> {
   if (pending) await pending;
   if (current.committedOverwrite()) return { cleaned: false }; // the replacement is the user's file
   // Only a confirmed erasure + name removal counts; any I/O failure reports false so the
-  // parent runs its own reclaim instead of trusting a partial cleanup.
-  let cleaned = true;
-  try {
-    await current.handle.truncate(0);
-  } catch {
-    cleaned = false;
-  }
-  if (current.published()) cleaned = (await unlinkIfOurs(current.target, current.handle)) && cleaned;
-  cleaned = (await unlinkIfOurs(current.staging, current.handle)) && cleaned;
-  return { cleaned };
+  // parent runs its own reclaim instead of trusting a partial cleanup. The run is shared
+  // with the writer's own fail-closed path (it observes abortRequested at its next checkpoint).
+  return { cleaned: await current.cleanup() };
 }
 
 /** Test hook: clear abort state between runs. */
 export function resetAbortStateForTest(): void {
   abortRequested = false;
   inFlight = null;
+  stagingOpenPending = null;
 }
 
 async function writeWithinVerifiedParent(
@@ -362,6 +374,7 @@ async function writeWithinVerifiedParent(
   const staging = outputPath(stagingName);
   let handle: fs.promises.FileHandle | undefined;
   let published = false;
+  let inFlightCleanup: (() => Promise<boolean>) | null = null;
   // overwrite: once the rename over the old target has happened, the old inode is gone
   // for good; the replacement is the user's only copy and must never be withdrawn.
   let committedOverwrite = false;
@@ -369,8 +382,33 @@ async function writeWithinVerifiedParent(
     if (abortRequested) throw new OutputWriteError('INTERNAL', '文档落盘已被父进程中止');
   };
   try {
-    handle = await openExclusive(staging);
+    let openSettled: () => void = () => {};
+    stagingOpenPending = new Promise<void>((resolve) => { openSettled = resolve; });
+    try {
+      handle = await openExclusive(staging);
+    } finally {
+      // inFlight is published below in the same synchronous segment as this resolve, so an
+      // abort awaiting the open observes the handle.
+      queueMicrotask(openSettled);
+      stagingOpenPending = null;
+    }
     let commitPending: Promise<void> | null = null;
+    const ownHandle = handle;
+    let cleanupRun: Promise<boolean> | null = null;
+    const cleanup = (): Promise<boolean> => {
+      cleanupRun ??= (async () => {
+        let cleaned = true;
+        try {
+          await ownHandle.truncate(0);
+        } catch {
+          cleaned = false;
+        }
+        if (published) cleaned = (await unlinkIfOurs(target, ownHandle)) && cleaned;
+        cleaned = (await unlinkIfOurs(staging, ownHandle)) && cleaned;
+        return cleaned;
+      })();
+      return cleanupRun;
+    };
     inFlight = {
       handle,
       staging,
@@ -378,12 +416,17 @@ async function writeWithinVerifiedParent(
       published: () => published,
       committedOverwrite: () => committedOverwrite,
       commitPending: () => commitPending,
+      cleanup,
     };
+    inFlightCleanup = cleanup;
     // Announce the inode *before* the first private byte is written: if writeFile/sync
     // hang past the parent's watchdog and this process is killed, the parent can still
     // reclaim exactly this inode.
     const staged = await handle.stat({ bigint: true });
     onStaged?.({ type: 'staged', identity: { dev: staged.dev, ino: staged.ino }, stagingName });
+    // An abort that landed while the exclusive open was pending: no private byte may be
+    // written; the empty staging inode is cleaned in the catch / finally below.
+    assertNotAborted();
     await handle.writeFile(request.data);
     await handle.sync();
     assertNotAborted();
@@ -444,8 +487,8 @@ async function writeWithinVerifiedParent(
     // Fail closed: no private content may remain, least of all outside the session
     // root. Zero it through the inode-bound handle (follows the file wherever its
     // directory went) and withdraw the published name only if it is still ours.
-    await handle?.truncate(0).catch(() => undefined);
-    if (published && handle) await unlinkIfOurs(target, handle);
+    if (inFlightCleanup) await inFlightCleanup();
+    else await handle?.truncate(0).catch(() => undefined);
     throw error;
   } finally {
     inFlight = null;

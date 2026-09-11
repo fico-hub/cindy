@@ -2773,7 +2773,7 @@ describe('oversized ghost result Host storage', () => {
     expect(remoteFsRequestMock.mock.calls.map(call => call.slice(0, 2))).toEqual([
       ['host-1', 'createFolder'], ['host-1', 'writeNewFile'],
     ]);
-    expect(remoteFsRequestMock).toHaveBeenCalledWith('host-1', 'createFolder', { workdir: '/srv/work', relPath: 'tool-results' });
+    expect(remoteFsRequestMock).toHaveBeenCalledWith('host-1', 'createFolder', { workdir: '/srv/work', relPath: 'tool-results' }, { beforeSend: expect.any(Function) });
     // Exclusive create+write in one RPC: no createFile → writeFile window for a symlink swap.
     expect(remoteFsRequestMock).toHaveBeenCalledWith('host-1', 'writeNewFile', { workdir: '/srv/work', relPath: saved, content: text }, { beforeSend: expect.any(Function) });
     expect(remoteFsRequestMock.mock.calls.map(call => call[1])).not.toContain('writeFile');
@@ -2892,6 +2892,24 @@ describe('oversized ghost result Host storage', () => {
     sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
     liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => true, reviewAction: reviewAllow });
   };
+
+  // Codex P1 (round 25): the directory mutation before the write is inside the same
+  // frame boundary — a stale approval must not create tool-results either.
+  it('withholds the remote createFolder when the instance ended while the host was connecting', async () => {
+    const deps = makeDeps('codex');
+    sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
+    let current = true;
+    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => current, reviewAction: reviewAllow });
+    const sent: string[] = [];
+    remoteFsRequestMock.mockImplementation(async (_host, method, _params, options) => {
+      if (method === 'createFolder') { current = false; await options?.beforeSend?.(); }
+      sent.push(method);
+      return {};
+    });
+    await expect(deps.saveLargeGhostResult!('result')).rejects.toThrow();
+    expect(sent).toEqual([]);
+    expect(ledgerAddRefMock).not.toHaveBeenCalled();
+  });
 
   // Codex P1 (round 24): the remote write re-checks the live grant at the manager's send
   // boundary (after connect/probe/install/handshake), not only before calling the manager.

@@ -474,9 +474,23 @@ async function writeLargeResultToRemote(
 ): Promise<SpillIdentity | null> {
   const remote = getRemoteFileBrowser();
   const dir = path.posix.dirname(relPath);
+  // Same frame-boundary revalidation as the write below: connecting / installing /
+  // handshaking the host can take long, and a stale approval must not execute even this
+  // directory mutation in the workdir. An authorization failure here is final — it is not
+  // an ambiguous filesystem outcome and must not enter the "did the mkdir land?" poll.
+  let authorizationRevoked = false;
+  const beforeSend = async (): Promise<void> => {
+    try {
+      await revalidate();
+    } catch (err) {
+      authorizationRevoked = true;
+      throw err;
+    }
+  };
   try {
-    await remote.request(remoteHostId, 'createFolder', { workdir, relPath: dir });
+    await remote.request(remoteHostId, 'createFolder', { workdir, relPath: dir }, { beforeSend });
   } catch (err) {
+    if (authorizationRevoked) throw err;
     // 超时/断链时 daemon 可能仍在 mkdir:按结果未知轮询等目录出现;明确失败(EEXIST 等)
     // 只 stat 一次确认目录已在。目录仍不可见就放弃,不能把唯一文件写进不存在的目录。
     const ready = await pollRemoteStat(remote, remoteHostId, workdir, dir, {
