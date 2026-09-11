@@ -17,6 +17,7 @@ import {
   resetAbortStateForTest,
   runDocsOutputWriteForTest,
   sameRelativePath,
+  chooseStagingLocation,
 } from '../docsOutputWriterUtilityProcess.js';
 
 let root: string;
@@ -343,7 +344,7 @@ process.stdout.write(JSON.stringify({ code, outsideExists, movedValue }));
       expect(order).toEqual(['staged', 'write:1']);
       const st = await fs.promises.lstat(path.join(root, 'report.bin'), { bigint: true });
       expect(identity).toEqual({ dev: st.dev, ino: st.ino });
-      expect(notices).toEqual([{ type: 'staged', identity: { dev: st.dev, ino: st.ino }, stagingName: expect.stringMatching(/^\.cindy-docs-staging-.*-report\.bin$/) }]);
+      expect(notices).toEqual([{ type: 'staged', identity: { dev: st.dev, ino: st.ino }, stagingName: expect.stringMatching(/^\.cindy-docs-staging-.*-report\.bin$/), stagingIn: 'root' }]);
       // Parent directory synced exactly when no staging entry remained.
       expect(dirSyncs).toEqual(['0']);
     } finally {
@@ -623,6 +624,14 @@ process.stdout.write(JSON.stringify({ code, outsideExists, movedValue }));
 
   // Codex P1 (round 28): the staging inode is created at the session root (not inside the
   // output directory) so the parent can still reach it if the output directory is moved out.
+  // Codex P1 (round 29): a hard link / rename cannot cross filesystems. A nested mount as
+  // output directory would make the root-anchored staging fail with EXDEV; the writer then
+  // stages on the target's own filesystem and tells the parent where the name lives.
+  it('stages at the root only when the output directory shares the root filesystem', () => {
+    expect(chooseStagingLocation(1n, 1n)).toBe('root');
+    expect(chooseStagingLocation(1n, 2n)).toBe('parent');
+  });
+
   it('stages at the session root even for a nested output directory', async () => {
     const realOpen = fs.promises.open.bind(fs.promises);
     let stagingPath = '';

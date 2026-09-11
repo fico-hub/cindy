@@ -57,6 +57,7 @@ function parseStagedNotice(value: unknown): DocsOutputStagedNotice | null {
     notice.type !== 'staged' ||
     typeof notice.stagingName !== 'string' ||
     notice.stagingName !== path.basename(notice.stagingName) ||
+    (notice.stagingIn !== 'root' && notice.stagingIn !== 'parent') ||
     !notice.identity ||
     typeof notice.identity.dev !== 'bigint' ||
     typeof notice.identity.ino !== 'bigint'
@@ -242,10 +243,13 @@ export const writeDocsOutput: WriteDocsOutputFn = async (input) => {
       if (!notice) return Promise.resolve();
       // The staging name is anchored at the session root (which workdir content cannot
       // relocate), so it stays reachable even after the output directory was moved out;
-      // zeroing the inode there also empties the published target, which shares it.
+      // zeroing the inode there also empties the published target, which shares it. For a
+      // cross-device output directory the writer had to stage inside that directory (a link
+      // cannot cross mounts): the reclaim then goes through the lexical output path.
       // overwrite: after the rename the announced inode *is* the user's replaced file, so
       // only the staging name may be reclaimed; the target name is never touched.
-      const candidates = [path.join(realRoot, notice.stagingName)];
+      const stagingDir = notice.stagingIn === 'root' ? realRoot : path.join(realRoot, parentRelativePath);
+      const candidates = [path.join(stagingDir, notice.stagingName)];
       if (!request.overwrite) candidates.push(path.join(realRoot, parentRelativePath, request.targetName));
       return reclaimStagedInode(candidates, notice.identity);
     };

@@ -95,7 +95,7 @@ describe('writeDocsOutput beforeCommit boundary', () => {
       child.result = null; // never answers
       child.postMessage = function (this: FakeChild, message: unknown) {
         this.posted.push(message);
-        queueMicrotask(() => this.emit('message', { type: 'staged', identity: { dev: st.dev, ino: st.ino }, stagingName: '.cindy-docs-staging-u-out.txt' }));
+        queueMicrotask(() => this.emit('message', { type: 'staged', identity: { dev: st.dev, ino: st.ino }, stagingName: '.cindy-docs-staging-u-out.txt', stagingIn: 'root' }));
       };
       const settled = writeDocsOutput({ root, path: target, data: new Uint8Array([1]), overwrite: false }).then(() => 'resolved', (e: Error) => e.message);
       expect(await settled).toBe('文档落盘隔离进程超时');
@@ -124,7 +124,7 @@ describe('writeDocsOutput beforeCommit boundary', () => {
       child.postMessage = function (this: FakeChild, message: unknown) {
         const type = (message as { type?: string }).type ?? '';
         seen.push(type);
-        if (type === 'write') queueMicrotask(() => this.emit('message', { type: 'staged', identity: { dev: st.dev, ino: st.ino }, stagingName: '.cindy-docs-staging-u-out.txt' }));
+        if (type === 'write') queueMicrotask(() => this.emit('message', { type: 'staged', identity: { dev: st.dev, ino: st.ino }, stagingName: '.cindy-docs-staging-u-out.txt', stagingIn: 'root' }));
         if (type === 'abort') queueMicrotask(() => this.emit('message', { type: 'aborted', cleaned: true }));
       };
       const outcome = await writeDocsOutput({ root, path: target, data: new Uint8Array([1]), overwrite: false }).then(() => 'resolved', (e: Error) => e.message);
@@ -175,7 +175,7 @@ describe('writeDocsOutput beforeCommit boundary', () => {
       child.result = null;
       child.postMessage = function (this: FakeChild, message: unknown) {
         const type = (message as { type?: string }).type ?? '';
-        if (type === 'write') queueMicrotask(() => this.emit('message', { type: 'staged', identity: { dev: st.dev, ino: st.ino }, stagingName: '.cindy-docs-staging-u-out.txt' }));
+        if (type === 'write') queueMicrotask(() => this.emit('message', { type: 'staged', identity: { dev: st.dev, ino: st.ino }, stagingName: '.cindy-docs-staging-u-out.txt', stagingIn: 'root' }));
         // On abort the child answers with a *success* instead of `aborted`, then stays silent.
         if (type === 'abort') queueMicrotask(() => this.emit('message', { ok: true, identity: { dev: st.dev, ino: st.ino } }));
       };
@@ -203,7 +203,7 @@ describe('writeDocsOutput beforeCommit boundary', () => {
       child.postMessage = function (this: FakeChild, message: unknown) {
         this.posted.push(message);
         queueMicrotask(() => {
-          this.emit('message', { type: 'staged', identity: { dev: st.dev, ino: st.ino }, stagingName: '.cindy-docs-staging-u-out.txt' });
+          this.emit('message', { type: 'staged', identity: { dev: st.dev, ino: st.ino }, stagingName: '.cindy-docs-staging-u-out.txt', stagingIn: 'root' });
           // A workdir process moves the output directory out, then the child dies.
           void fs.promises.rename(path.join(root, 'out'), path.join(outside, 'out')).then(() => this.emit('exit', 137));
         });
@@ -218,6 +218,48 @@ describe('writeDocsOutput beforeCommit boundary', () => {
     }
   });
 
+  // Codex P1 (round 29): for a cross-device output directory the writer stages inside that
+  // directory (link/rename cannot cross mounts) and says so; the reclaim follows that name.
+  it('reclaims through the output-directory staging name when the writer staged on the target filesystem', async () => {
+    await fs.promises.mkdir(path.join(root, 'out'));
+    const staging = path.join(root, 'out', '.cindy-docs-staging-u-out.txt');
+    const target = path.join(root, 'out', 'out.txt');
+    await fs.promises.writeFile(staging, 'private bytes', { mode: 0o600 });
+    await fs.promises.link(staging, target);
+    const st = await fs.promises.lstat(staging, { bigint: true });
+    child.result = null;
+    child.postMessage = function (this: FakeChild, message: unknown) {
+      this.posted.push(message);
+      queueMicrotask(() => {
+        this.emit('message', { type: 'staged', identity: { dev: st.dev, ino: st.ino }, stagingName: '.cindy-docs-staging-u-out.txt', stagingIn: 'parent' });
+        queueMicrotask(() => this.emit('exit', 137));
+      });
+    };
+    const outcome = await writeDocsOutput({ root, path: target, data: new Uint8Array([1]), overwrite: false }).then(() => 'resolved', (e: Error) => e.message);
+    expect(outcome).toMatch(/异常退出\(137\)/);
+    expect((await fs.promises.stat(staging)).size).toBe(0);
+    expect((await fs.promises.stat(target)).size).toBe(0);
+  });
+
+  it('ignores a staged notice that does not say where the staging name lives', async () => {
+    const staging = path.join(root, '.cindy-docs-staging-u-out.txt');
+    const target = path.join(root, 'out.txt');
+    await fs.promises.writeFile(staging, 'private bytes', { mode: 0o600 });
+    await fs.promises.link(staging, target);
+    const st = await fs.promises.lstat(staging, { bigint: true });
+    child.result = null;
+    child.postMessage = function (this: FakeChild, message: unknown) {
+      this.posted.push(message);
+      queueMicrotask(() => {
+        this.emit('message', { type: 'staged', identity: { dev: st.dev, ino: st.ino }, stagingName: '.cindy-docs-staging-u-out.txt' });
+        queueMicrotask(() => this.emit('exit', 137));
+      });
+    };
+    await expect(writeDocsOutput({ root, path: target, data: new Uint8Array([1]), overwrite: false })).rejects.toThrow(/异常退出\(137\)/);
+    // Malformed notice: no reclaim happened (the child's own cleanup is the only path).
+    expect(await fs.promises.readFile(staging, 'utf8')).toBe('private bytes');
+  });
+
   // Codex P1 (round 17b): a crash / external kill after the staged notice must reclaim the
   // inode exactly like the watchdog does, not just reject.
   it.each(['exit', 'error'])('reclaims the staged inode when the writer terminates abnormally (%s)', async (kind) => {
@@ -230,7 +272,7 @@ describe('writeDocsOutput beforeCommit boundary', () => {
     child.postMessage = function (this: FakeChild, message: unknown) {
       this.posted.push(message);
       queueMicrotask(() => {
-        this.emit('message', { type: 'staged', identity: { dev: st.dev, ino: st.ino }, stagingName: '.cindy-docs-staging-u-out.txt' });
+        this.emit('message', { type: 'staged', identity: { dev: st.dev, ino: st.ino }, stagingName: '.cindy-docs-staging-u-out.txt', stagingIn: 'root' });
         queueMicrotask(() => (kind === 'exit' ? this.emit('exit', 137) : this.emit('error', new Error('spawn lost'))));
       });
     };
@@ -251,7 +293,7 @@ describe('writeDocsOutput beforeCommit boundary', () => {
       child.result = null;
       child.postMessage = function (this: FakeChild, message: unknown) {
         this.posted.push(message);
-        queueMicrotask(() => this.emit('message', { type: 'staged', identity: { dev: st.dev, ino: st.ino }, stagingName: '.cindy-docs-staging-u-out.txt' }));
+        queueMicrotask(() => this.emit('message', { type: 'staged', identity: { dev: st.dev, ino: st.ino }, stagingName: '.cindy-docs-staging-u-out.txt', stagingIn: 'root' }));
       };
       const pending = writeDocsOutput({ root, path: target, data: new Uint8Array([1]), overwrite: true }).catch((e: Error) => e.message);
       expect(await pending).toBe('文档落盘隔离进程超时');
@@ -269,7 +311,7 @@ describe('writeDocsOutput beforeCommit boundary', () => {
       child.result = null;
       child.postMessage = function (this: FakeChild, message: unknown) {
         this.posted.push(message);
-        queueMicrotask(() => this.emit('message', { type: 'staged', identity: { dev: 1n, ino: 2n }, stagingName: '.cindy-docs-staging-u-out.txt' }));
+        queueMicrotask(() => this.emit('message', { type: 'staged', identity: { dev: 1n, ino: 2n }, stagingName: '.cindy-docs-staging-u-out.txt', stagingIn: 'root' }));
       };
       const pending = writeDocsOutput({ root, path: target, data: new Uint8Array([1]), overwrite: false }).catch((e: Error) => e.message);
       expect(await pending).toBe('文档落盘隔离进程超时');

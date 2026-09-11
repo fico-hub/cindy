@@ -33,10 +33,10 @@ import type {
 } from '@cindy/file-browser-core';
 
 /** 协议兼容版本:client 与 daemon 严格相等才可用。改动任何请求/响应形状时 +1。 */
-export const FILE_SERVICE_SCHEMA_VERSION = 6;
+export const FILE_SERVICE_SCHEMA_VERSION = 7;
 
 /** 人读 bundle 版本(probe / 日志用),行为变化时手动 bump。 */
-export const FILE_SERVICE_BUNDLE_VERSION = '0.2.17';
+export const FILE_SERVICE_BUNDLE_VERSION = '0.2.18';
 
 /* ============================== 帧 ============================== */
 
@@ -175,19 +175,35 @@ export interface FsRpcMethods {
    */
   writeNewFile: {
     params: { workdir: string; relPath: string; content: string };
-    result: { size: number; mtimeMs: number; dev: string; ino: string };
+    /**
+     * 两阶段发布:成功后仍保留一个 `.pending` 硬链接标记(pendingName,workdir 相对 posix
+     * 路径)作为调用方后续登记期间的 inode 级清理能力;登记完成后须调 finalizeNewFile 收尾。
+     */
+    result: { size: number; mtimeMs: number; dev: string; ino: string; pendingName: string };
   };
   /**
    * 核验 relPath 是本机写下的那份普通文件(非 symlink、父目录仍在 workdir 内、大小与
    * 内容 SHA-256 一致),用于 writeNewFile 响应丢失后的消歧;返回 inode 身份。
+   * 尚未 finalize 的发布会带回 pendingName;`.staging` 仍在(写入进行中)则拒绝。
    */
   verifyNewFile: {
     params: { workdir: string; relPath: string; sha256: string; size: number };
-    result: { size: number; mtimeMs: number; dev: string; ino: string };
+    result: { size: number; mtimeMs: number; dev: string; ino: string; pendingName?: string };
   };
-  /** 仅当 relPath 仍是给定 inode 身份的普通文件时经 fd 清零其内容;不删路径名(路径名删除有 TOCTOU)。 */
+  /**
+   * writeNewFile 的第二阶段:目标仍锚定在 workdir 内且 `.pending` 标记仍是该 inode 时移除标记,
+   * 之后目标必须是该 inode 唯一的名字;否则拒绝且不动任何东西(调用方转 eraseIfSame 撤回)。
+   */
+  finalizeNewFile: {
+    params: { workdir: string; relPath: string; pendingName: string; dev: string; ino: string };
+    result: { finalized: boolean };
+  };
+  /**
+   * 仅当 relPath 仍是给定 inode 身份的普通文件时经 fd 清零其内容;不删路径名(路径名删除有 TOCTOU)。
+   * relPath 已不指向该 inode(目录被移出)时,可经 pendingName 标记(同 inode 的第二个名字)清零。
+   */
   eraseIfSame: {
-    params: { workdir: string; relPath: string; dev: string; ino: string };
+    params: { workdir: string; relPath: string; dev: string; ino: string; pendingName?: string };
     result: { erased: boolean };
   };
   createFolder: {

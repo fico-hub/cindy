@@ -490,7 +490,7 @@ async function writeLargeResultToRemote(
   relPath: string,
   text: string,
   revalidate: () => Promise<void>,
-): Promise<SpillIdentity | null> {
+): Promise<SpillAnchor | null> {
   const remote = getRemoteFileBrowser();
   const dir = path.posix.dirname(relPath);
   // Same frame-boundary revalidation as the write below: connecting / installing /
@@ -532,7 +532,7 @@ async function writeLargeResultToRemote(
       { workdir, relPath, content: text },
       { beforeSend: revalidate },
     );
-    return { dev: written.dev, ino: written.ino };
+    return { dev: written.dev, ino: written.ino, ...(typeof written.pendingName === 'string' ? { pendingName: written.pendingName } : {}) };
   } catch (err) {
     if (isRemoteResultUnknown(err)) {
       return reconcileUnknownRemoteWrite(remote, remoteHostId, workdir, relPath, bytes, err);
@@ -598,7 +598,7 @@ async function reconcileUnknownRemoteWrite(
   relPath: string,
   bytes: Buffer,
   cause: unknown,
-): Promise<SpillIdentity> {
+): Promise<SpillAnchor> {
   const sha256 = createHash('sha256').update(bytes).digest('hex');
   const size = bytes.length;
   const deadline = Date.now() + REMOTE_WRITE_RECONCILE.windowMs;
@@ -615,7 +615,7 @@ async function reconcileUnknownRemoteWrite(
         remote.request(remoteHostId, 'verifyNewFile', { workdir, relPath, sha256, size }),
         budget,
       );
-      return { dev: verified.dev, ino: verified.ino };
+      return { dev: verified.dev, ino: verified.ino, ...(typeof verified.pendingName === 'string' ? { pendingName: verified.pendingName } : {}) };
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
     }
@@ -646,7 +646,35 @@ function isRemoteResultUnknown(err: unknown): boolean {
 /** 外置文件写入后记录的 inode 身份(本地 lstat / 远端 writeNewFile 或 verifyNewFile 返回),供清理时锚定。 */
 /** dev/ino 以十进制字符串承载:Windows 文件 ID 为 64 位,JS number 会丢低位。 */
 interface SpillIdentity { dev: string; ino: string }
-type LocalSpillAnchor = SpillIdentity;
+/**
+ * 清理锚:inode 身份,远端还带两阶段发布留下的 `.pending` 标记路径(workdir 相对 posix),
+ * 目录被移出 workdir 后仍可经该标记触达同一 inode。
+ */
+interface SpillAnchor extends SpillIdentity { pendingName?: string }
+type LocalSpillAnchor = SpillAnchor;
+
+/**
+ * 本地外置文件写成后立刻按 inode 身份把它打开并**持有**(O_NOFOLLOW,fstat 必须等于写入器经
+ * 自己句柄读到的身份):随后的权限复验与媒体账本登记都是异步边界,期间 workdir 进程可能把
+ * 输出目录整个移出 workdir,按路径的清理就再也找不到那份内容;经这个句柄清零与路径无关。
+ * 打开失败或身份不符(写入器关句柄到这里之间已被移走)时不持有,退回按身份的路径清理。
+ */
+async function bindLocalSpill(abs: string, identity: SpillIdentity): Promise<fs.promises.FileHandle | null> {
+  let handle: fs.promises.FileHandle;
+  try {
+    handle = await fs.promises.open(abs, fs.constants.O_RDWR | ((fs.constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0));
+  } catch {
+    return null;
+  }
+  try {
+    const st = await handle.stat({ bigint: true });
+    if (st.isFile() && st.dev.toString() === identity.dev && st.ino.toString() === identity.ino) return handle;
+  } catch {
+    /* fall through: not bindable */
+  }
+  await handle.close().catch(() => undefined);
+  return null;
+}
 
 /**
  * 本地按 inode 身份擦除:以 O_NOFOLLOW 打开并 fstat 核对,通过后经该 fd 把私密内容清零
@@ -674,16 +702,27 @@ async function discardLargeResultFile(
   target: LargeResultSpillTarget,
   relPath: string,
   anchor: LocalSpillAnchor | null,
+  hold: fs.promises.FileHandle | null = null,
 ): Promise<void> {
   try {
     if (!anchor) return;
     if (target.remoteHostId) {
       // Identity-checked deletion on the daemon: never follows a swapped symlink, never
-      // removes anything but the inode this call created/verified.
+      // removes anything but the inode this call created/verified. The `.pending` marker
+      // of the two-phase publish is the fallback name when the output directory was moved.
       await getRemoteFileBrowser().request(target.remoteHostId, 'eraseIfSame', {
         workdir: target.workingDir, relPath, dev: anchor.dev, ino: anchor.ino,
+        ...(anchor.pendingName !== undefined ? { pendingName: anchor.pendingName } : {}),
       });
       return;
+    }
+    if (hold) {
+      // Inode-bound: the retained handle follows the file wherever its directory went.
+      const st = await hold.stat({ bigint: true });
+      if (st.isFile() && st.dev.toString() === anchor.dev && st.ino.toString() === anchor.ino) {
+        await hold.truncate(0);
+        return;
+      }
     }
     const abs = path.join(target.workingDir, relPath);
     const [wdReal, parentReal] = await Promise.all([fs.promises.realpath(target.workingDir), fs.promises.realpath(path.dirname(abs))]);
@@ -703,7 +742,7 @@ async function discardLargeResultFile(
  * id**;任一 URL 挂账失败时只按这些 id 回滚(并发的另一次外置不受影响),再删掉刚写的
  * 文件,不留没有结果文件的孤立引用。成功时把插入的 id 交给调用方,供后续复验失败回滚。
  */
-async function commitLargeResultMediaRefs(target: LargeResultSpillTarget, relPath: string, text: string, anchor: LocalSpillAnchor | null): Promise<string[]> {
+async function commitLargeResultMediaRefs(target: LargeResultSpillTarget, relPath: string, text: string, anchor: LocalSpillAnchor | null, hold: fs.promises.FileHandle | null): Promise<string[]> {
   // Reserve every ref id *before* the insert RPC: a DB worker that commits the row but
   // loses its response would otherwise leave an id we never learned and cannot roll back.
   // Rollback removes all attempted ids (removeRefById is idempotent for rows never written).
@@ -736,7 +775,7 @@ async function commitLargeResultMediaRefs(target: LargeResultSpillTarget, relPat
   }
   if (failed === 0) return inserted;
   for (const id of inserted) await ledger.removeRefById(id).catch(() => 0);
-  await discardLargeResultFile(target, relPath, anchor);
+  await discardLargeResultFile(target, relPath, anchor, hold);
   throw new Error('Tool result media references unavailable');
 }
 
@@ -1792,6 +1831,7 @@ export function getCindyGhostsMcpDeps(
           : path.join(target.workingDir, relativePath),
       );
       let anchor: LocalSpillAnchor | null = null;
+      let hold: fs.promises.FileHandle | null = null;
       if (target.remoteHostId) {
         anchor = await writeLargeResultToRemote(target.remoteHostId, target.workingDir, relativePath, text, () => target.revalidate());
       } else {
@@ -1811,28 +1851,44 @@ export function getCindyGhostsMcpDeps(
         // never a separate path query, which a workdir process could have re-pointed at an
         // unrelated file. Without an attested identity, cleanup is skipped.
         anchor = outcome?.identity ?? null;
+        // Retain an inode-bound capability across the bookkeeping below (round 29): a
+        // path-only cleanup cannot follow the output directory once a workdir process moves
+        // it out of the workdir between the writer's success and the ledger commit.
+        if (anchor) hold = await bindLocalSpill(path.join(target.workingDir, relativePath), anchor);
       }
-      // The write is another async boundary: an instance that ended or lost its
-      // automatic-write grant meanwhile must not have refs booked in its name.
       try {
-        await target.revalidate();
-      } catch (err) {
-        await discardLargeResultFile(target, relativePath, anchor);
-        throw err;
+        // The write is another async boundary: an instance that ended or lost its
+        // automatic-write grant meanwhile must not have refs booked in its name.
+        try {
+          await target.revalidate();
+        } catch (err) {
+          await discardLargeResultFile(target, relativePath, anchor, hold);
+          throw err;
+        }
+        // Keep media referenced by the full response alive even when the SDK only
+        // receives its bounded projection; refs are committed after the bytes are durable.
+        const insertedRefs = await commitLargeResultMediaRefs(target, relativePath, text, anchor, hold);
+        // The ledger mutations above are further async boundaries: an instance that
+        // ended or lost its grant meanwhile must not keep refs or a private file in its name.
+        try {
+          await target.revalidate();
+          // Remote two-phase publish: only now is the daemon's `.pending` marker dropped. A
+          // refusal (target no longer anchored in the workdir, marker replaced, extra link)
+          // withdraws the whole spill; the marker itself is the name the erase reaches.
+          if (target.remoteHostId && anchor?.pendingName !== undefined) {
+            await getRemoteFileBrowser().request(target.remoteHostId, 'finalizeNewFile', {
+              workdir: target.workingDir, relPath: relativePath, pendingName: anchor.pendingName, dev: anchor.dev, ino: anchor.ino,
+            });
+          }
+        } catch (err) {
+          for (const id of insertedRefs) await ledger.removeRefById(id).catch(() => 0);
+          await discardLargeResultFile(target, relativePath, anchor, hold);
+          throw err;
+        }
+        return relativePath;
+      } finally {
+        await hold?.close().catch(() => undefined);
       }
-      // Keep media referenced by the full response alive even when the SDK only
-      // receives its bounded projection; refs are committed after the bytes are durable.
-      const insertedRefs = await commitLargeResultMediaRefs(target, relativePath, text, anchor);
-      // The ledger mutations above are further async boundaries: an instance that
-      // ended or lost its grant meanwhile must not keep refs or a private file in its name.
-      try {
-        await target.revalidate();
-      } catch (err) {
-        for (const id of insertedRefs) await ledger.removeRefById(id).catch(() => 0);
-        await discardLargeResultFile(target, relativePath, anchor);
-        throw err;
-      }
-      return relativePath;
     }),
     connectAccount: async (target) => {
       if (target.kind === 'plugin' && !isGhostAllowedByFrozenProfile(target.id))

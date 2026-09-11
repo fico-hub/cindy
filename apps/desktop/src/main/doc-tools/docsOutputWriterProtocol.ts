@@ -53,6 +53,12 @@ export interface DocsOutputStagedNotice {
   type: 'staged';
   identity: DocsOutputWrittenIdentity;
   stagingName: string;
+  /**
+   * Where the staging name lives: the session root (same filesystem as the output
+   * directory) or the output directory itself (cross-device target; link/rename cannot
+   * cross mounts, so the root-anchored reclaim degrades to the target's directory).
+   */
+  stagingIn: 'root' | 'parent';
 }
 
 export type DocsOutputWriteResult =

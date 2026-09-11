@@ -34,6 +34,7 @@ import {
   writeNewFile,
   verifyNewFile,
   eraseIfSame,
+  finalizeNewFile,
   type CoreLogger,
   type SearchEvent,
 } from '@cindy/file-browser-core';
@@ -186,12 +187,21 @@ export function runFileService(
         requireString(p?.sha256, 'sha256'),
         typeof p?.size === 'number' && Number.isInteger(p.size) && p.size >= 0 ? p.size : bad('size must be a non-negative integer'),
       ),
+    finalizeNewFile: (p) =>
+      finalizeNewFile(
+        requireString(p?.workdir, 'workdir'),
+        requireString(p?.relPath, 'relPath'),
+        requireString(p?.pendingName, 'pendingName'),
+        requireString(p?.dev, 'dev'),
+        requireString(p?.ino, 'ino'),
+      ),
     eraseIfSame: (p) =>
       eraseIfSame(
         requireString(p?.workdir, 'workdir'),
         requireString(p?.relPath, 'relPath'),
         requireString(p?.dev, 'dev'),
         requireString(p?.ino, 'ino'),
+        p?.pendingName === undefined ? undefined : requireString(p.pendingName, 'pendingName'),
       ),
     createFolder: (p) =>
       createFolder(requireString(p?.workdir, 'workdir'), requireString(p?.relPath, 'relPath')),

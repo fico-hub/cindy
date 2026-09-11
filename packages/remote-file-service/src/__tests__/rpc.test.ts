@@ -163,6 +163,33 @@ describe('remote-file-service RPC end-to-end', () => {
     expect(await client.request('eraseIfSame', { workdir, relPath: 'tool-results/v.json', dev: written.dev, ino: written.ino })).toEqual({ erased: true });
   });
 
+  // Codex P1 (round 29): two-phase publish over the wire — the marker survives until
+  // finalize, verify reports it, erase reaches the inode through it, finalize validates params.
+  it('writeNewFile leaves a pending marker that finalizeNewFile removes and eraseIfSame can use', async () => {
+    await mkdir(path.join(workdir, 'tool-results'));
+    const written = await client.request('writeNewFile', { workdir, relPath: 'tool-results/p.json', content: '{"p":1}' });
+    expect(written.pendingName).toMatch(/^\.p\.json\.[0-9a-f-]{36}\.pending$/);
+    const sha256 = createHash('sha256').update('{"p":1}').digest('hex');
+    const verified = await client.request('verifyNewFile', { workdir, relPath: 'tool-results/p.json', sha256, size: 7 });
+    expect(verified).toMatchObject({ ino: written.ino, pendingName: written.pendingName });
+    await expect(
+      client.request('finalizeNewFile', { workdir, relPath: 'tool-results/p.json', dev: written.dev, ino: written.ino } as never),
+    ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+    await expect(
+      client.request('finalizeNewFile', { workdir, relPath: 'tool-results/p.json', pendingName: 'tool-results/p.json', dev: written.dev, ino: written.ino }),
+    ).rejects.toMatchObject({ code: 'OPERATION_FAILED' });
+    expect(await client.request('finalizeNewFile', { workdir, relPath: 'tool-results/p.json', pendingName: written.pendingName, dev: written.dev, ino: written.ino })).toEqual({ finalized: true });
+    const final = await client.request('verifyNewFile', { workdir, relPath: 'tool-results/p.json', sha256, size: 7 });
+    expect(final.pendingName).toBeUndefined();
+
+    const second = await client.request('writeNewFile', { workdir, relPath: 'tool-results/q.json', content: '{"q":1}' });
+    await expect(
+      client.request('eraseIfSame', { workdir, relPath: 'tool-results/q.json', dev: second.dev, ino: second.ino, pendingName: 5 as unknown as string }),
+    ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+    expect(await client.request('eraseIfSame', { workdir, relPath: 'tool-results/q.json', dev: second.dev, ino: second.ino, pendingName: second.pendingName })).toEqual({ erased: true });
+    expect(await fsReadFile(path.join(workdir, second.pendingName), 'utf8')).toBe('');
+  });
+
   it('unknown method → UNKNOWN_METHOD; bad params → BAD_REQUEST', async () => {
     await client.connect();
     await expect(

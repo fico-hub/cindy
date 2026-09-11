@@ -28,6 +28,8 @@ export {
   writeNewFile,
   verifyNewFile,
   eraseIfSame,
+  finalizeNewFile,
+  chooseStagingDir,
   type NewFileIdentity,
   createFile,
   createFolder,

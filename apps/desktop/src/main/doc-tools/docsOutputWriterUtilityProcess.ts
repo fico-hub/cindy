@@ -375,7 +375,13 @@ async function writeWithinVerifiedParent(
   // inside the workdir cannot relocate the root, so the root-anchored staging name stays
   // reachable to the parent (timeout / crash reclaim) even when the output directory has
   // been moved out — the published target shares the inode, so zeroing it there suffices.
-  const staging = path.join(request.expectedRoot.realPath, stagingName);
+  // Exception (round 29): a hard link / rename cannot cross filesystems. When the verified
+  // output directory is a nested mount (its device differs from the root's), the staging
+  // inode is placed inside that directory instead, and the parent is told so; the reclaim
+  // capability then degrades to the target's own filesystem (documented limitation).
+  const parentDevice = (await fs.promises.lstat(workingDir, { bigint: true })).dev;
+  const stagingIn = chooseStagingLocation(request.expectedRoot.dev, parentDevice);
+  const staging = stagingIn === 'root' ? path.join(request.expectedRoot.realPath, stagingName) : outputPath(stagingName);
   let handle: fs.promises.FileHandle | undefined;
   let published = false;
   let inFlightCleanup: (() => Promise<boolean>) | null = null;
@@ -427,7 +433,7 @@ async function writeWithinVerifiedParent(
     // hang past the parent's watchdog and this process is killed, the parent can still
     // reclaim exactly this inode.
     const staged = await handle.stat({ bigint: true });
-    onStaged?.({ type: 'staged', identity: { dev: staged.dev, ino: staged.ino }, stagingName });
+    onStaged?.({ type: 'staged', identity: { dev: staged.dev, ino: staged.ino }, stagingName, stagingIn });
     // An abort that landed while the exclusive open was pending: no private byte may be
     // written; the empty staging inode is cleaned in the catch / finally below.
     assertNotAborted();
@@ -503,6 +509,11 @@ async function writeWithinVerifiedParent(
     if (handle) await removeOwnName(staging, handle).catch(() => undefined);
     await handle?.close().catch(() => undefined);
   }
+}
+
+/** Root-anchored staging whenever the output directory shares the root's filesystem. */
+export function chooseStagingLocation(rootDev: bigint, parentDev: bigint): 'root' | 'parent' {
+  return rootDev === parentDev ? 'root' : 'parent';
 }
 
 function assertValidRequest(request: DocsOutputWriteRequest): void {
