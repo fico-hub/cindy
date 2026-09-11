@@ -77,7 +77,7 @@ describe("ghost_call oversized result boundary", () => {
     const projected = JSON.parse(response.content[0].text);
     expect(projected).toMatchObject({ ok: false, errorCode: "INTERNAL", saved_to: "thrown.json", truncated: true, complete_result_saved: true });
     expect(save).toHaveBeenCalledOnce();
-    expect(JSON.parse(save.mock.calls[0]![0] as string).message).toBe(message);
+    expect(JSON.parse((save.mock.calls[0] as unknown as [string])[0]).message).toBe(message);
   });
 
   it("keeps a small thrown error byte for byte", async () => {
