@@ -457,8 +457,8 @@ describe('writeNewFile', () => {
     });
     try {
       const result = await writeNewFile(root, 'out.json', '{"ok":true}');
-      // bytes fsync → link → parent-directory fsync (name durability, round 11)
-      expect(order).toEqual(['sync', 'link', 'sync']);
+      // bytes fsync → link → parent-directory fsync (round 11) → root fsync after staging unlink (round 12)
+      expect(order).toEqual(['sync', 'link', 'sync', 'sync']);
       const st = await fsp.lstat(path.join(root, 'out.json'));
       expect(result).toMatchObject({ size: 11, dev: st.dev, ino: st.ino });
     } finally {
@@ -614,7 +614,96 @@ describe('verifyNewFile / unlinkIfSame', () => {
       const written = await writeNewFile(root, 'out/spill.json', '{"a":1}');
       events.push('link-done');
       expect(written.size).toBe(7);
-      expect(events).toEqual([`sync:${realRoot}`, 'mkdir-done', `sync:${path.join(realRoot, 'out')}`, 'link-done']);
+      // mkdir → root sync; link → parent sync; staging unlink at root → root sync (round 12)
+      expect(events).toEqual([`sync:${realRoot}`, 'mkdir-done', `sync:${path.join(realRoot, 'out')}`, `sync:${realRoot}`, 'link-done']);
+    } finally {
+      spy.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  // Codex P1 (round 12): the staging hard link is a full private copy; its removal is
+  // required for success, and a failure zeroes the content and withdraws the publish.
+  it('writeNewFile fails closed when the staging hard link cannot be removed', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-staging-unlink-'));
+    const realUnlink = fsp.unlink.bind(fsp);
+    let stagingPath = '';
+    const spy = vi.spyOn(fsp, 'unlink').mockImplementation(async (target) => {
+      const p = String(target);
+      if (p.includes('.staging') && !stagingPath) {
+        stagingPath = p;
+        const err = Object.assign(new Error('EBUSY: resource busy'), { code: 'EBUSY' });
+        throw err;
+      }
+      return realUnlink(target);
+    });
+    try {
+      await expect(writeNewFile(root, 'spill.json', '{"secret":1}')).rejects.toThrow(/EBUSY/);
+      expect(stagingPath).not.toBe('');
+      await expect(fsStat(path.join(root, 'spill.json'))).rejects.toThrow(/ENOENT/);
+      // Whatever remains of the staging entry holds no content.
+      const leftover = await fsStat(stagingPath).catch(() => null);
+      if (leftover) expect(leftover.size).toBe(0);
+    } finally {
+      spy.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  // Codex P1 (round 12): the parent may be moved out while the directory sync is awaited;
+  // the publish is re-anchored afterwards and withdrawn (content zeroed) on mismatch.
+  it('writeNewFile re-anchors after the directory sync and zeroes a file whose parent moved out', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-resync-anchor-'));
+    const outside = await mkdtemp(path.join(os.tmpdir(), 'xdt-resync-outside-'));
+    const realOpen = fsp.open.bind(fsp);
+    let moved = false;
+    const spy = vi.spyOn(fsp, 'open').mockImplementation(async (...args: Parameters<typeof fsp.open>) => {
+      const handle = await realOpen(...args);
+      const st = await handle.stat();
+      if (st.isDirectory() && String(args[0]).endsWith(`${path.sep}out`) && !moved) {
+        const origSync = handle.sync.bind(handle);
+        handle.sync = async () => {
+          await origSync();
+          moved = true;
+          await fsp.rename(path.join(root, 'out'), path.join(outside, 'out'));
+        };
+      }
+      return handle;
+    });
+    try {
+      await mkdir(path.join(root, 'out'));
+      await expect(writeNewFile(root, 'out/spill.json', '{"secret":1}')).rejects.toThrow(/escapes workdir/);
+      expect(moved).toBe(true);
+      const escaped = await fsStat(path.join(outside, 'out', 'spill.json')).catch(() => null);
+      if (escaped) expect(escaped.size).toBe(0);
+      const leftovers = (await fsp.readdir(root)).filter(n => n.includes('.staging'));
+      expect(leftovers).toEqual([]);
+    } finally {
+      spy.mockRestore();
+      await rm(root, { recursive: true, force: true });
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  // Codex P1 (round 12): recovery must prove the pathname still names the hashed inode.
+  it('verifyNewFile rejects when the entry is renamed away while its content is being read', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-verify-rename-'));
+    const realOpen = fsp.open.bind(fsp);
+    const spy = vi.spyOn(fsp, 'open').mockImplementation(async (...args: Parameters<typeof fsp.open>) => {
+      const handle = await realOpen(...args);
+      const st = await handle.stat();
+      if (st.isFile()) {
+        const origRead = handle.readFile.bind(handle);
+        handle.readFile = (async (...readArgs: Parameters<typeof origRead>) => {
+          await fsp.rename(path.join(root, 'r.json'), path.join(root, 'renamed.json'));
+          return origRead(...readArgs);
+        }) as typeof handle.readFile;
+      }
+      return handle;
+    });
+    try {
+      await fsWriteFile(path.join(root, 'r.json'), '{"a":1}');
+      await expect(verifyNewFile(root, 'r.json', sha('{"a":1}'), 7)).rejects.toThrow(/identity mismatch after read/);
     } finally {
       spy.mockRestore();
       await rm(root, { recursive: true, force: true });

@@ -639,6 +639,21 @@ export async function writeNewFile(
     // parent directory a crash right after "success" could bring the host back with the
     // bytes durable but the advertised path gone.
     await syncDirectory(parentReal);
+    // The directory sync was another await: re-anchor after it. The parent must still
+    // resolve inside workdir and the entry of that name must still be our inode.
+    const parentAfterSync = await fs.realpath(path.dirname(abs)).catch(() => null);
+    if (
+      !parentAfterSync ||
+      (parentAfterSync !== wdReal && !parentAfterSync.startsWith(wdReal + path.sep)) ||
+      !(await isOurs(path.join(parentAfterSync, path.basename(abs))))
+    ) {
+      throw escape();
+    }
+    // The staging entry is a second hard link to the private content. Its removal is part
+    // of a successful publish (not best-effort), and the workdir root is synced so that
+    // removal survives a crash; otherwise a complete copy would linger with no lifecycle.
+    await fs.unlink(stagingAbs);
+    await syncDirectory(wdReal);
   } catch (err) {
     // Fail closed without leaving content anywhere: zero through the handle (follows
     // the inode wherever a directory went), drop the published entry only if it is
@@ -649,7 +664,6 @@ export async function writeNewFile(
     await handle.close().catch(() => undefined);
     throw err;
   }
-  await fs.unlink(stagingAbs).catch(() => undefined);
   const st = await handle.stat();
   await handle.close();
   return { size: st.size, mtimeMs: st.mtimeMs, dev: st.dev, ino: st.ino };
@@ -674,7 +688,9 @@ export async function verifyNewFile(
   const entry = await fs.lstat(abs);
   if (!entry.isFile()) throw new Error(`not a regular file: ${sub}`);
   if (entry.size !== expectedSize) throw new Error(`size mismatch: ${sub}`);
-  const handle = await fs.open(abs, 'r');
+  // Never follow a final symlink (a link to the renamed original must not pass).
+  const O_NOFOLLOW = (fsConstants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
+  const handle = await fs.open(abs, fsConstants.O_RDONLY | O_NOFOLLOW);
   try {
     const opened = await handle.stat();
     // The opened inode must be the very entry lstat saw (no swap in between).
@@ -683,6 +699,13 @@ export async function verifyNewFile(
     if (buf.length !== expectedSize) throw new Error(`size mismatch: ${sub}`);
     const actual = createHash('sha256').update(buf).digest('hex');
     if (actual !== expectedSha256) throw new Error(`content mismatch: ${sub}`);
+    // Reading was an await: the pathname must still name the inode whose content was
+    // hashed, and its parent must still be inside workdir, or the recovery is void.
+    await assertRealParentInsideWorkdir(workdir, abs);
+    const after = await fs.lstat(abs).catch(() => null);
+    if (!after || !after.isFile() || after.dev !== opened.dev || after.ino !== opened.ino) {
+      throw new Error(`identity mismatch after read: ${sub}`);
+    }
     return { size: opened.size, mtimeMs: opened.mtimeMs, dev: opened.dev, ino: opened.ino };
   } finally {
     await handle.close();
