@@ -17,6 +17,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import type { AttachmentGrantDeps } from '../../cindy-brain/attachmentGrant';
 import type {
   GhostSetupEnsureRequest,
   GhostSetupEnsureResult,
@@ -216,8 +217,8 @@ vi.mock('../../cindy-brain/ghostSetupCoordinator.js', () => ({
   }),
 }));
 // 以下依赖在本测试路径上不会被触达,但 import 副作用重,一律断开。
-vi.mock('../../cindy-brain/attachmentGrant.js', () => ({
-  GrantPolicyError: class extends Error {},
+vi.mock('../../cindy-brain/attachmentGrant.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../cindy-brain/attachmentGrant.js')>(),
   grantAttachmentsToGhost: grantAttachmentsMock,
   MAX_GRANT_ATTACHMENTS: 4,
   MAX_GRANT_ONLY_ATTACHMENTS: 32,
@@ -2164,6 +2165,141 @@ describe('Full Access 插件文件交接', () => {
 
 
 describe('Host Auto review', () => {
+  it.each(['bypassPermissions', 'auto', 'ask'].flatMap((permissionMode) =>
+    [false, true].map((grantOnly) => ({ permissionMode, grantOnly })),
+  ))('$permissionMode / grant_only=$grantOnly 在最终授权记账前再次复核', async ({ permissionMode, grantOnly }) => {
+    let current = true;
+    let granting = false;
+    const file = path.join(outsideDir, 'late-ledger.png');
+    fs.writeFileSync(file, 'late-ledger');
+    liveGrantStateMock.mockReturnValue({ permissionMode, remoteHostId: null,
+      isCurrent: () => current, reviewAction: async () => ({ verdict: 'allow' }),
+    });
+    ledgerHasRefMock.mockImplementation(async () => {
+      if (granting) current = false;
+      return false;
+    });
+    const actual = await vi.importActual<typeof import('../../cindy-brain/attachmentGrant')>('../../cindy-brain/attachmentGrant');
+    grantAttachmentsMock.mockImplementationOnce((deps: AttachmentGrantDeps, params) => {
+      granting = true;
+      return actual.grantAttachmentsToGhost({ ...deps,
+        writeBlob: async () => ({ hash: 'a'.repeat(64), ext: '.png', mimeType: 'image/png', bytes: 11 }),
+        recordBlob: async () => {},
+      }, params);
+    });
+    const result = await makeDeps().callGhostTool({ ghostId: 'art', tool: 'run', args: {}, attachments: [file], grantOnly });
+    expect(result).toMatchObject({ ok: false, message: expect.stringContaining('permissions changed') });
+    expect(ledgerAddRefMock).not.toHaveBeenCalled();
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+
+  it.each(['dir', 'saveDir'] as const)('%s 在 Full 返回与票据签发之间失效时拒绝', async (lane) => {
+    let current = true;
+    liveGrantStateMock.mockImplementation(() => {
+      queueMicrotask(() => { current = false; });
+      return { permissionMode: 'bypassPermissions', remoteHostId: null, isCurrent: () => current };
+    });
+    const result = await makeDeps().callGhostTool({ ghostId: 'art', tool: 'run', args: {}, [lane]: outsideDir });
+    expect(result).toMatchObject({ ok: false, message: expect.stringContaining('permissions changed') });
+    expect(dirDepositMock).not.toHaveBeenCalled();
+    expect(saveDepositMock).not.toHaveBeenCalled();
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+
+  it.each((['claude-code', 'codex', 'pi'] as const).flatMap((agentKind) =>
+    (['attachments', 'dir', 'saveDir'] as const).map((lane) => ({ agentKind, lane })),
+  ))('$agentKind 的 $lane 在派发前失效不能交给插件', async ({ agentKind, lane }) => {
+    let current = true;
+    const file = path.join(outsideDir, 'late-dispatch.png');
+    fs.writeFileSync(file, 'late-dispatch');
+    listMock.mockReturnValue([chipGhost('art', ['tool', 'session-context'])]);
+    liveGrantStateMock.mockReturnValue({ permissionMode: 'bypassPermissions', remoteHostId: null, isCurrent: () => current });
+    sessionSnapshotMock.mockImplementationOnce(async () => {
+      current = false;
+      return { workingDir: WORKDIR, permissionMode: 'auto', planModeEnabled: true, remoteHostId: null };
+    });
+    const result = await makeDeps(agentKind).callGhostTool({ ghostId: 'art', tool: 'run', args: {},
+      ...(lane === 'attachments' ? { attachments: [file] } : { [lane]: outsideDir }),
+    });
+    expect(result).toMatchObject({ ok: false, message: expect.stringContaining('permissions changed') });
+    expect(sessionSnapshotMock).toHaveBeenCalledOnce();
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+
+  it('后一个目录取得新授权，不能替换同一请求中已失效的先前授权', async () => {
+    let generation = 0;
+    liveGrantStateMock.mockImplementation(() => {
+      const captured = generation++;
+      return { permissionMode: 'bypassPermissions', remoteHostId: null, isCurrent: () => generation === captured + 1 };
+    });
+    const result = await makeDeps().callGhostTool({ ghostId: 'art', tool: 'run', args: {}, dir: outsideDir, saveDir: outsideDir });
+    expect(result).toMatchObject({ ok: false, message: expect.stringContaining('permissions changed') });
+    expect(dirDepositMock).toHaveBeenCalledOnce();
+    expect(saveDepositMock).not.toHaveBeenCalled();
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+
+  it.each(['bypassPermissions', 'auto', 'ask'] as const)('%s rejects media reveal and file handoff with unavailable Plan authority', async (permissionMode) => {
+    liveGrantStateMock.mockReturnValue({ permissionMode, remoteHostId: null, isCurrent: () => false });
+    const file = path.join(outsideDir, `plan-${permissionMode}.png`);
+    fs.writeFileSync(file, 'png');
+    const url = `cindy-media://blobs/${'a'.repeat(64)}.png`;
+    callCindyMediaMock.mockResolvedValue({ ok: true, url, local_path: file, mime_type: 'image/png' });
+    const deps = makeDeps('claude-code', `plan-${permissionMode}`);
+    expect(await deps.callMedia?.({ action: 'resolve_local_path', url })).toMatchObject({ ok: false, errorCode: 'LOCAL_PATH_REVEAL_DENIED' });
+    expect(await deps.callGhostTool({ ghostId: 'art', tool: 'run', args: {}, attachments: [file] })).toMatchObject({ ok: false });
+    expect(confirmRequestMock).not.toHaveBeenCalled();
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+
+  it.each(['auto', 'ask'] as const)('%s cannot return media or hand off files after captured authority changes during approval', async (permissionMode) => {
+    const file = path.join(outsideDir, `late-plan-${permissionMode}.png`);
+    fs.writeFileSync(file, 'png');
+    const url = `cindy-media://blobs/${'a'.repeat(64)}.png`;
+    callCindyMediaMock.mockResolvedValue({ ok: true, url, local_path: file, mime_type: 'image/png' });
+    for (const kind of ['media', 'handoff']) {
+      let current = true;
+      liveGrantStateMock.mockReturnValue({ permissionMode, remoteHostId: null, isCurrent: () => current,
+        reviewAction: async () => { current = false; return { verdict: 'allow' }; },
+      });
+      confirmRequestMock.mockImplementation(async () => { current = false; return { confirmed: true, allowDirs: false }; });
+      const deps = makeDeps('pi', `late-plan-${permissionMode}-${kind}`);
+      const result = kind === 'media'
+        ? await deps.callMedia?.({ action: 'resolve_local_path', url })
+        : await deps.callGhostTool({ ghostId: 'art', tool: 'run', args: {}, attachments: [file] });
+      expect(result).toMatchObject({ ok: false });
+      expect(result).not.toHaveProperty('local_path');
+    }
+    expect(dispatchMock).not.toHaveBeenCalled();
+  });
+
+  it('rechecks media authority at the final path return after the Full Access shortcut', async () => {
+    let current = true;
+    liveGrantStateMock.mockImplementation(() => {
+      queueMicrotask(() => { current = false; });
+      return { permissionMode: 'bypassPermissions', remoteHostId: null, isCurrent: () => current };
+    });
+    const url = `cindy-media://blobs/${'a'.repeat(64)}.png`;
+    callCindyMediaMock.mockResolvedValue({ ok: true, url, local_path: process.execPath, mime_type: 'image/png' });
+    expect(await makeDeps('codex', 'late-full-media').callMedia?.({ action: 'resolve_local_path', url })).toMatchObject({ ok: false, errorCode: 'LOCAL_PATH_REVEAL_DENIED' });
+    expect(confirmRequestMock).not.toHaveBeenCalled();
+  });
+
+  it.each(['claude-code', 'codex', 'pi'] as const)('%s media reveal follows Full access and a later switch to Ask', async (agentKind) => {
+    let permissionMode = 'bypassPermissions';
+    const reviewAction = vi.fn();
+    liveGrantStateMock.mockImplementation(() => ({ permissionMode, remoteHostId: null, reviewAction }));
+    const url = `cindy-media://blobs/${'a'.repeat(64)}.png`;
+    callCindyMediaMock.mockResolvedValue({ ok: true, url, local_path: process.execPath, mime_type: 'image/png' });
+    const deps = makeDeps(agentKind, 'full-media');
+    expect(await deps.callMedia?.({ action: 'resolve_local_path', url })).toMatchObject({ ok: true });
+    expect(confirmRequestMock).not.toHaveBeenCalled();
+    expect(reviewAction).not.toHaveBeenCalled();
+    permissionMode = 'ask';
+    await deps.callMedia?.({ action: 'resolve_local_path', url });
+    expect(confirmRequestMock).toHaveBeenCalledOnce();
+  });
+
   it.each(['lookup', 'review'] as const)('media %s failure falls back to real confirmation', async (failure) => {
     const reviewAction = vi.fn(async () => { throw new Error('review unavailable'); });
     liveGrantStateMock.mockImplementation(() => {
@@ -2240,6 +2376,50 @@ it.each([false, true])('only marks a teammate setup plan as reauthorization with
 });
 
 describe('oversized ghost result Host storage', () => {
+  // main 起 Auto 会话的 workdir 写入走会话统一审阅器:默认桩给一个放行的 reviewAction。
+  const reviewAllow = vi.fn(async () => ({ verdict: 'allow' as const }));
+  beforeEach(() => {
+    reviewAllow.mockClear();
+    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: null, isCurrent: () => true, reviewAction: reviewAllow });
+  });
+
+  it('asks the session reviewer for the exact workdir target before writing in Auto', async () => {
+    const deps = makeDeps('codex');
+    sessionSnapshotMock.mockResolvedValue({ workingDir: WORKDIR, remoteHostId: null, permissionMode: 'auto', planModeEnabled: false });
+    const rel = await deps.saveLargeGhostResult!('result');
+    expect(reviewAllow).toHaveBeenCalledOnce();
+    expect(reviewAllow).toHaveBeenCalledWith({
+      kind: 'file-write',
+      path: path.join(WORKDIR, rel),
+      resolvedPath: path.join(WORKDIR, rel),
+      resolvedWritableRoots: [WORKDIR],
+    });
+    expect(writeDocsOutputMock).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { name: 'reviewer blocks', reviewAction: async () => ({ verdict: 'block' as const, reason: 'nope' }) },
+    { name: 'reviewer asks', reviewAction: async () => ({ verdict: 'ask' as const }) },
+    { name: 'reviewer throws', reviewAction: async () => { throw new Error('boom'); } },
+    { name: 'reviewer missing', reviewAction: undefined },
+  ])('fails closed in Auto when the session reviewer does not allow the write (%s)', async ({ reviewAction }) => {
+    const deps = makeDeps('codex');
+    sessionSnapshotMock.mockResolvedValue({ workingDir: WORKDIR, remoteHostId: null, permissionMode: 'auto', planModeEnabled: false });
+    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: null, isCurrent: () => true, ...(reviewAction ? { reviewAction } : {}) });
+    await expect(deps.saveLargeGhostResult!('result')).rejects.toThrow();
+    expect(writeDocsOutputMock).not.toHaveBeenCalled();
+    expect(remoteFsRequestMock).not.toHaveBeenCalled();
+    expect(ledgerAddRefMock).not.toHaveBeenCalled();
+    expect(releaseMutationMock).toHaveBeenCalledOnce();
+  });
+
+  it('does not consult the reviewer for Full Access sessions', async () => {
+    const deps = makeDeps('codex');
+    sessionSnapshotMock.mockResolvedValue({ workingDir: WORKDIR, remoteHostId: null, permissionMode: 'bypassPermissions', planModeEnabled: false });
+    liveGrantStateMock.mockReturnValue({ permissionMode: 'bypassPermissions', remoteHostId: null, isCurrent: () => true, reviewAction: reviewAllow });
+    await expect(deps.saveLargeGhostResult!('result')).resolves.toMatch(/^tool-results/);
+    expect(reviewAllow).not.toHaveBeenCalled();
+  });
   it('roundtrips a production handler result through the safe filesystem writer', async () => {
     const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ghost-safe-spill-'));
     try {
@@ -2297,7 +2477,7 @@ describe('oversized ghost result Host storage', () => {
     { name: 'runtime switched to ask', live: { permissionMode: 'ask', remoteHostId: null } },
     { name: 'runtime switched to plan', live: { permissionMode: 'plan', remoteHostId: null } },
     { name: 'runtime permission unknown', live: { permissionMode: null, remoteHostId: null } },
-    { name: 'runtime plan mode on', live: { permissionMode: 'auto', remoteHostId: null, planModeEnabled: true } },
+    { name: 'runtime plan mode on (isCurrent false)', live: { permissionMode: 'auto', remoteHostId: null, isCurrent: () => false } },
     { name: 'runtime remote but row local', live: { permissionMode: 'auto', remoteHostId: 'remote' } },
   ])('does not spill on a persisted auto row when the live session says otherwise (%s)', async ({ live }) => {
     const deps = makeDeps('codex');
@@ -2314,7 +2494,7 @@ describe('oversized ghost result Host storage', () => {
   it('prefers the live plan-mode reading over a stale persisted row', async () => {
     const deps = makeDeps('codex');
     sessionSnapshotMock.mockResolvedValue({ workingDir: WORKDIR, remoteHostId: null, permissionMode: 'ask', planModeEnabled: true });
-    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: null, planModeEnabled: false });
+    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: null, isCurrent: () => true, reviewAction: reviewAllow });
     await expect(deps.saveLargeGhostResult!('result')).resolves.toMatch(/^tool-results/);
     expect(writeDocsOutputMock).toHaveBeenCalledOnce();
   });
@@ -2324,6 +2504,8 @@ describe('oversized ghost result Host storage', () => {
     { remoteHostId: null, permissionMode: 'auto', planModeEnabled: true },
   ])('does not spill when the persisted row disagrees with the live session (%j)', async state => {
     const deps = makeDeps('codex');
+    // 旧装配方没有 isCurrent:计划模式回退持久化行;远端归属不一致同样拒绝。
+    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: null, reviewAction: reviewAllow });
     sessionSnapshotMock.mockResolvedValue({ workingDir: WORKDIR, ...state });
     await expect(deps.saveLargeGhostResult!('result')).rejects.toThrow();
     expect(writeDocsOutputMock).not.toHaveBeenCalled();
@@ -2402,9 +2584,8 @@ describe('oversized ghost result Host storage', () => {
     const deps = makeDeps();
     const shared = 'a'.repeat(64);
     const broken = 'f'.repeat(64);
-    let hasRefCalls = 0;
     // Both calls observe "no ref yet" for the shared blob (the race window).
-    ledgerHasRefMock.mockImplementation(async () => (++hasRefCalls, false));
+    ledgerHasRefMock.mockImplementation(async () => false);
     ledgerAddRefMock.mockImplementation(async (params: TestLedgerRef) => {
       if (params.hash === broken) throw new Error('FOREIGN KEY constraint failed');
       const id = `ref-${++ledgerRefSeq}`;
@@ -2438,7 +2619,7 @@ describe('oversized ghost result Host storage', () => {
   it.each<TestAgentKind>(['codex', 'pi'])('spills a remote session result through remote-file-service for %s', async agentKind => {
     const deps = makeDeps(agentKind);
     sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
-    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1' });
+    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => true, reviewAction: reviewAllow });
     const hash = 'a'.repeat(64);
     const text = JSON.stringify({ ok: true, result: { data: 'x'.repeat(70000), image: `cindy-media://blobs/${hash}.png` } });
     const saved = await deps.saveLargeGhostResult!(text);
@@ -2459,7 +2640,7 @@ describe('oversized ghost result Host storage', () => {
   it('reuses an existing remote tool-results folder', async () => {
     const deps = makeDeps('codex');
     sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
-    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1' });
+    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => true, reviewAction: reviewAllow });
     remoteFsRequestMock.mockImplementation(async (_host, method) => {
       if (method === 'createFolder') throw new Error('EEXIST: file already exists');
       if (method === 'stat') return { relPath: 'tool-results', type: 'directory', size: 0, mtimeMs: 0 };
@@ -2472,7 +2653,7 @@ describe('oversized ghost result Host storage', () => {
   it('commits no refs and issues no delete when the remote exclusive write fails outright', async () => {
     const deps = makeDeps('codex');
     sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
-    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1' });
+    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => true, reviewAction: reviewAllow });
     remoteFsRequestMock.mockImplementation(async (_host, method) => {
       if (method === 'writeNewFile') throw new Error('content too large (>2097152 bytes)');
       return {};
@@ -2503,7 +2684,7 @@ describe('oversized ghost result Host storage', () => {
       const deps = makeDeps('codex');
       sessionSnapshotMock.mockResolvedValue({ workingDir: root, remoteHostId: null, permissionMode: 'auto', planModeEnabled: false });
       let calls = 0;
-      liveGrantStateMock.mockImplementation(() => (++calls <= 3 ? { permissionMode: 'auto', remoteHostId: null } : null));
+      liveGrantStateMock.mockImplementation(() => (++calls <= 3 ? { permissionMode: 'auto', remoteHostId: null, isCurrent: () => true, reviewAction: reviewAllow } : null));
       writeDocsOutputMock.mockImplementation(async input => {
         await fs.promises.mkdir(path.dirname(input.path), { recursive: true });
         await fs.promises.writeFile(input.path, input.data);
@@ -2525,7 +2706,7 @@ describe('oversized ghost result Host storage', () => {
   ])('$name', async ({ statResult, expectDelete, expectOk }) => {
     const deps = makeDeps('codex');
     sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
-    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1' });
+    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => true, reviewAction: reviewAllow });
     const text = JSON.stringify({ ok: true, result: 'x'.repeat(100) });
     remoteFsRequestMock.mockImplementation(async (_host, method) => {
       if (method === 'writeNewFile') throw Object.assign(new Error('channel closed'), { code: 'CHANNEL_CLOSED' });
