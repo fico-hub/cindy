@@ -8,6 +8,7 @@ import { DocsPathError, type WriteDocsOutputFn, type WriteDocsOutputOutcome } fr
 
 import {
   relativeOutputParentPath,
+  type DocsOutputStagedNotice,
   type DocsOutputWriteRequest,
   type DocsOutputWriteResult,
 } from './docsOutputWriterProtocol.js';
@@ -47,6 +48,49 @@ function forkDocsOutputWriter(rootDir: string): DocsOutputWriterChildLike {
     stdio: ['ignore', 'ignore', 'pipe'],
     serviceName: 'cindy-docs-output-writer',
   });
+}
+
+function parseStagedNotice(value: unknown): DocsOutputStagedNotice | null {
+  if (!value || typeof value !== 'object') return null;
+  const notice = value as Partial<DocsOutputStagedNotice>;
+  if (
+    notice.type !== 'staged' ||
+    typeof notice.stagingName !== 'string' ||
+    notice.stagingName !== path.basename(notice.stagingName) ||
+    !notice.identity ||
+    typeof notice.identity.dev !== 'bigint' ||
+    typeof notice.identity.ino !== 'bigint'
+  ) {
+    return null;
+  }
+  return notice as DocsOutputStagedNotice;
+}
+
+/**
+ * Timeout recovery: the writer was killed and could not run its own fail-closed path, but
+ * it already told us which inode holds the private bytes. Zero that inode through an
+ * O_NOFOLLOW handle and unlink each of its names only if the name still points at it.
+ */
+async function reclaimStagedInode(parentDir: string, names: string[], identity: { dev: bigint; ino: bigint }): Promise<void> {
+  for (const name of names) {
+    const candidate = path.join(parentDir, name);
+    try {
+      const handle = await fs.open(candidate, fs.constants.O_RDWR | ((fs.constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0));
+      try {
+        const st = await handle.stat({ bigint: true });
+        if (!st.isFile() || st.dev !== identity.dev || st.ino !== identity.ino) continue;
+        await handle.truncate(0);
+      } finally {
+        await handle.close().catch(() => undefined);
+      }
+      const again = await fs.lstat(candidate, { bigint: true });
+      if (again.isFile() && again.dev === identity.dev && again.ino === identity.ino) {
+        await fs.unlink(candidate);
+      }
+    } catch {
+      // Missing, replaced or not ours: nothing of ours to reclaim under this name.
+    }
+  }
 }
 
 function parseResult(value: unknown): DocsOutputWriteResult | null {
@@ -101,6 +145,9 @@ function throwResultError(
   }
   throw new Error(result.message);
 }
+
+/** Writer watchdog; tests shrink it. */
+export const DOCS_OUTPUT_WRITER_TIMEOUT = { ms: 60_000 };
 
 export const writeDocsOutput: WriteDocsOutputFn = async (input) => {
   const parentDir = path.dirname(input.path);
@@ -171,6 +218,7 @@ export const writeDocsOutput: WriteDocsOutputFn = async (input) => {
       if (stderr.length < 8_000) stderr += String(chunk).slice(0, 8_000 - stderr.length);
     });
     let outcome: WriteDocsOutputOutcome = {};
+    let staged: DocsOutputStagedNotice | null = null;
     const finish = (error?: unknown): void => {
       if (settled) return;
       settled = true;
@@ -183,7 +231,22 @@ export const writeDocsOutput: WriteDocsOutputFn = async (input) => {
       if (error) reject(error);
       else resolve(outcome);
     };
-    const timer = setTimeout(() => finish(new Error('文档落盘隔离进程超时')), 60_000);
+    const timer = setTimeout(() => {
+      // The child is killed without running its fail-closed path. If it already reported
+      // the staged inode, reclaim it (staging + target names) before surfacing the error,
+      // so no private bytes survive without an anchor or lifecycle.
+      try {
+        child.kill();
+      } catch {
+        // already gone
+      }
+      const notice = staged;
+      const parentDir = path.join(realRoot, parentRelativePath);
+      const reclaim = notice
+        ? reclaimStagedInode(parentDir, [notice.stagingName, request.targetName], notice.identity)
+        : Promise.resolve();
+      void reclaim.finally(() => finish(new Error('文档落盘隔离进程超时')));
+    }, DOCS_OUTPUT_WRITER_TIMEOUT.ms);
     timer.unref?.();
 
     child.on('message', (message) => {
@@ -202,6 +265,11 @@ export const writeDocsOutput: WriteDocsOutputFn = async (input) => {
           },
           (error: unknown) => finish(error),
         );
+        return;
+      }
+      const notice = parseStagedNotice(message);
+      if (notice) {
+        staged = notice;
         return;
       }
       const result = parseResult(message);

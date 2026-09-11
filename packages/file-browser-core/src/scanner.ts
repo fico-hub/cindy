@@ -662,10 +662,10 @@ export async function writeNewFile(
       throw escape();
     }
     // The staging entry is a second hard link to the private content. Its removal is part
-    // of a successful publish (not best-effort), and the workdir root is synced so that
-    // removal survives a crash; otherwise a complete copy would linger with no lifecycle.
+    // of a successful publish (not best-effort); it is also the server-side completion
+    // marker verifyNewFile keys on: while `.<name>.<uuid>.staging` exists at the workdir
+    // root, the write is still in flight and may yet be withdrawn.
     await fs.unlink(stagingAbs);
-    await syncDirectory(wdReal);
   } catch (err) {
     // Fail closed without leaving content anywhere: zero through the handle (follows
     // the inode wherever a directory went), drop the published entry only if it is
@@ -676,9 +676,25 @@ export async function writeNewFile(
     await handle.close().catch(() => undefined);
     throw err;
   }
+  // Past this point the publish is complete and is never withdrawn (a recovery caller may
+  // already have accepted it): make the staging removal durable, retrying once. A persistent
+  // fsync failure here leaves at worst a non-durable *removal* (after a crash the staging
+  // hard link may reappear inside the same workdir), never a lost or zeroed publish.
+  try {
+    await syncDirectory(wdReal);
+  } catch {
+    await syncDirectory(wdReal).catch(() => undefined);
+  }
   const st = await handle.stat({ bigint: true });
   await handle.close();
   return { size: Number(st.size), mtimeMs: Number(st.mtimeMs), ...identityOf(st) };
+}
+
+/** True while a writeNewFile staging link for `name` still exists at the workdir root. */
+async function hasStagingSibling(wdReal: string, name: string): Promise<boolean> {
+  const prefix = `.${name}.`;
+  const entries = await fs.readdir(wdReal).catch(() => [] as string[]);
+  return entries.some((entry) => entry.startsWith(prefix) && entry.endsWith('.staging'));
 }
 
 /**
@@ -711,6 +727,12 @@ export async function verifyNewFile(
     if (buf.length !== expectedSize) throw new Error(`size mismatch: ${sub}`);
     const actual = createHash('sha256').update(buf).digest('hex');
     if (actual !== expectedSha256) throw new Error(`content mismatch: ${sub}`);
+    // Server-side completion: a matching published file is not enough while its staging
+    // link still exists — the original writeNewFile may still withdraw the publish on a
+    // later failure. Only after the staging link is gone is the publish final.
+    if (await hasStagingSibling(await fs.realpath(workdir), path.basename(abs))) {
+      throw new Error(`write still in flight: ${sub}`);
+    }
     // Reading was an await: the pathname must still name the inode whose content was
     // hashed, and its parent must still be inside workdir, or the recovery is void.
     await assertRealParentInsideWorkdir(workdir, abs);

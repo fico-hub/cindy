@@ -299,6 +299,37 @@ process.stdout.write(JSON.stringify({ code, outsideExists, movedValue }));
     },
   );
 
+  // Codex P1 (round 16): names only survive a crash once the parent directory is synced,
+  // and the staged inode is announced before publication for timeout recovery.
+  it('announces the staged inode and syncs the parent directory after removing staging', async () => {
+    const realOpen = fs.promises.open.bind(fs.promises);
+    const dirSyncs: string[] = [];
+    const openSpy = vi.spyOn(fs.promises, 'open').mockImplementation(async (...args: Parameters<typeof fs.promises.open>) => {
+      const handle = await realOpen(...args);
+      const st = await handle.stat();
+      if (st.isDirectory()) {
+        const origSync = handle.sync.bind(handle);
+        handle.sync = async () => {
+          const leftovers = (await fs.promises.readdir(String(args[0]))).filter((n) => n.includes('staging'));
+          dirSyncs.push(`${leftovers.length}`);
+          await origSync();
+        };
+      }
+      return handle;
+    });
+    try {
+      const notices: unknown[] = [];
+      const identity = await runDocsOutputWriteForTest(await request('report.bin', 'payload', false), root, (n) => notices.push(n));
+      const st = await fs.promises.lstat(path.join(root, 'report.bin'), { bigint: true });
+      expect(identity).toEqual({ dev: st.dev, ino: st.ino });
+      expect(notices).toEqual([{ type: 'staged', identity: { dev: st.dev, ino: st.ino }, stagingName: expect.stringMatching(/^\.cindy-docs-staging-.*-report\.bin$/) }]);
+      // Parent directory synced exactly when no staging entry remained.
+      expect(dirSyncs).toEqual(['0']);
+    } finally {
+      openSpy.mockRestore();
+    }
+  });
+
   it('returns the identity of the inode it published, read through its own handle', async () => {
     const identity = await runDocsOutputWriteForTest(await request('report.bin', 'payload', false), root);
     const st = await fs.promises.lstat(path.join(root, 'report.bin'), { bigint: true });

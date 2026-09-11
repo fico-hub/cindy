@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const { forkMock } = vi.hoisted(() => ({ forkMock: vi.fn() }));
 vi.mock('electron', () => ({ utilityProcess: { fork: forkMock } }));
 
-import { writeDocsOutput } from '../docsOutputWriter.js';
+import { DOCS_OUTPUT_WRITER_TIMEOUT, writeDocsOutput } from '../docsOutputWriter.js';
 
 class FakeChild extends EventEmitter {
   readonly posted: unknown[] = [];
@@ -17,8 +17,8 @@ class FakeChild extends EventEmitter {
   result: unknown = { ok: true };
   postMessage(message: unknown): void {
     this.posted.push(message);
-    // Echo a success result the way the real one-shot writer does.
-    queueMicrotask(() => this.emit('message', this.result));
+    // Echo a success result the way the real one-shot writer does (null = never answers).
+    if (this.result !== null) queueMicrotask(() => this.emit('message', this.result));
   }
   kill(): boolean {
     this.killed = true;
@@ -79,6 +79,49 @@ describe('writeDocsOutput beforeCommit boundary', () => {
     child.result = { ok: true, identity: { dev: 1, ino: 2 } };
     const outcome = await writeDocsOutput({ root, path: path.join(root, 'out.txt'), data: new Uint8Array([1]), overwrite: false });
     expect(outcome).toEqual({});
+  });
+
+  // Codex P1 (round 16): a killed writer cannot run its fail-closed path; the parent
+  // reclaims the announced inode (staging + target names) before surfacing the timeout.
+  it('reclaims the staged inode when the writer times out after announcing it', async () => {
+    DOCS_OUTPUT_WRITER_TIMEOUT.ms = 30;
+    try {
+      const staging = path.join(root, '.cindy-docs-staging-u-out.txt');
+      const target = path.join(root, 'out.txt');
+      await fs.promises.writeFile(staging, 'private bytes', { mode: 0o600 });
+      await fs.promises.link(staging, target);
+      const st = await fs.promises.lstat(staging, { bigint: true });
+      child.result = null; // never answers
+      child.postMessage = function (this: FakeChild, message: unknown) {
+        this.posted.push(message);
+        queueMicrotask(() => this.emit('message', { type: 'staged', identity: { dev: st.dev, ino: st.ino }, stagingName: '.cindy-docs-staging-u-out.txt' }));
+      };
+      const settled = writeDocsOutput({ root, path: target, data: new Uint8Array([1]), overwrite: false }).then(() => 'resolved', (e: Error) => e.message);
+      expect(await settled).toBe('文档落盘隔离进程超时');
+      expect(child.killed).toBe(true);
+      await expect(fs.promises.access(staging)).rejects.toThrow();
+      await expect(fs.promises.access(target)).rejects.toThrow();
+    } finally {
+      DOCS_OUTPUT_WRITER_TIMEOUT.ms = 60_000;
+    }
+  });
+
+  it('leaves unrelated files alone on timeout when the announced inode does not match', async () => {
+    DOCS_OUTPUT_WRITER_TIMEOUT.ms = 30;
+    try {
+      const target = path.join(root, 'out.txt');
+      await fs.promises.writeFile(target, 'someone else');
+      child.result = null;
+      child.postMessage = function (this: FakeChild, message: unknown) {
+        this.posted.push(message);
+        queueMicrotask(() => this.emit('message', { type: 'staged', identity: { dev: 1n, ino: 2n }, stagingName: '.cindy-docs-staging-u-out.txt' }));
+      };
+      const pending = writeDocsOutput({ root, path: target, data: new Uint8Array([1]), overwrite: false }).catch((e: Error) => e.message);
+      expect(await pending).toBe('文档落盘隔离进程超时');
+      expect(await fs.promises.readFile(target, 'utf8')).toBe('someone else');
+    } finally {
+      DOCS_OUTPUT_WRITER_TIMEOUT.ms = 60_000;
+    }
   });
 
   it('keeps the plain path when no beforeCommit is supplied', async () => {

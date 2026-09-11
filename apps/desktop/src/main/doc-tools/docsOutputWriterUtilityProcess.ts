@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import type {
+  DocsOutputStagedNotice,
   DocsOutputWriteRequest,
   DocsOutputWriteResult,
   DocsOutputWrittenIdentity,
@@ -167,6 +168,30 @@ async function writeExclusive(target: string, data: Uint8Array): Promise<fs.prom
   }
 }
 
+const DIR_SYNC_UNSUPPORTED = new Set(['EPERM', 'EINVAL', 'EISDIR', 'ENOTSUP', 'EOPNOTSUPP', 'EBADF', 'EACCES']);
+
+/**
+ * Make directory-entry changes (link / unlink) durable by fsyncing the directory itself.
+ * Platforms that cannot fsync a directory handle (Windows) are skipped; a real I/O error
+ * propagates so success is never reported for a publish that may not survive a crash.
+ */
+async function syncDirectory(dirPath: string): Promise<void> {
+  let dir: fs.promises.FileHandle;
+  try {
+    dir = await fs.promises.open(dirPath, 'r');
+  } catch (error) {
+    if (DIR_SYNC_UNSUPPORTED.has((error as NodeJS.ErrnoException)?.code ?? '')) return;
+    throw error;
+  }
+  try {
+    await dir.sync();
+  } catch (error) {
+    if (!DIR_SYNC_UNSUPPORTED.has((error as NodeJS.ErrnoException)?.code ?? '')) throw error;
+  } finally {
+    await dir.close().catch(() => undefined);
+  }
+}
+
 /** Remove `target` only if it still names the inode behind `handle`. */
 async function unlinkIfOurs(target: string, handle: fs.promises.FileHandle): Promise<void> {
   try {
@@ -244,13 +269,19 @@ async function writeWithinVerifiedParent(
   request: DocsOutputWriteRequest,
   workingDir: string,
   outputPath: (name: string) => string,
+  onStaged?: (notice: DocsOutputStagedNotice) => void,
 ): Promise<DocsOutputWrittenIdentity> {
   const target = outputPath(request.targetName);
-  const staging = outputPath(`.cindy-docs-staging-${randomUUID()}-${request.targetName}`);
+  const stagingName = `.cindy-docs-staging-${randomUUID()}-${request.targetName}`;
+  const staging = outputPath(stagingName);
   let handle: fs.promises.FileHandle | undefined;
   let published = false;
   try {
     handle = await writeExclusive(staging, request.data);
+    // Tell the parent which inode now holds the private bytes: if this process is killed
+    // (timeout) before it can report, the parent can still clean up exactly that inode.
+    const staged = await handle.stat({ bigint: true });
+    onStaged?.({ type: 'staged', identity: { dev: staged.dev, ino: staged.ino }, stagingName });
     await verifyParent(request, workingDir);
     if (request.overwrite) {
       await replaceFile(request, workingDir, staging, target);
@@ -260,6 +291,13 @@ async function writeWithinVerifiedParent(
     published = true;
     await verifyParent(request, workingDir);
     const st = await handle.stat({ bigint: true });
+    // Durability of the directory entries (link + staging removal): the file bytes were
+    // fsynced in writeExclusive, but the names only survive a crash once the parent
+    // directory is synced. Do it before success is reported and the caller books refs.
+    if (!request.overwrite) {
+      await fs.promises.rm(staging, { force: true });
+    }
+    await syncDirectory(workingDir);
     return { dev: st.dev, ino: st.ino };
   } catch (error) {
     // Fail closed: no private content may remain, least of all outside the session
@@ -300,14 +338,18 @@ function assertValidRequest(request: DocsOutputWriteRequest): void {
 export async function runDocsOutputWriteForTest(
   request: DocsOutputWriteRequest,
   rootDir: string,
+  onStaged?: (notice: DocsOutputStagedNotice) => void,
 ): Promise<DocsOutputWrittenIdentity> {
   assertValidRequest(request);
   const workingDir = path.join(rootDir, request.parentRelativePath);
   await ensureParent(request, workingDir);
-  return writeWithinVerifiedParent(request, workingDir, (name) => path.join(workingDir, name));
+  return writeWithinVerifiedParent(request, workingDir, (name) => path.join(workingDir, name), onStaged);
 }
 
-export async function runDocsOutputWrite(request: DocsOutputWriteRequest): Promise<DocsOutputWrittenIdentity> {
+export async function runDocsOutputWrite(
+  request: DocsOutputWriteRequest,
+  onStaged?: (notice: DocsOutputStagedNotice) => void,
+): Promise<DocsOutputWrittenIdentity> {
   assertValidRequest(request);
   // Production starts with `.` bound to the session root. Resolve and verify
   // the parent from that capability, then chdir into the verified directory so
@@ -323,7 +365,7 @@ export async function runDocsOutputWrite(request: DocsOutputWriteRequest): Promi
     // instead of following the replacement symlink.
     process.chdir(anchoredWorkingDir);
     await verifyParent(request, '.');
-    return await writeWithinVerifiedParent(request, '.', (name) => name);
+    return await writeWithinVerifiedParent(request, '.', (name) => name, onStaged);
   } finally {
     try {
       process.chdir(previousCwd);
@@ -342,7 +384,7 @@ if (parentPort) {
     const message = event.data as { type?: unknown; request?: DocsOutputWriteRequest };
     if (handled || message?.type !== 'write' || !message.request) return;
     handled = true;
-    void runDocsOutputWrite(message.request)
+    void runDocsOutputWrite(message.request, (notice) => parentPort.postMessage(notice))
       .then<DocsOutputWriteResult, DocsOutputWriteResult>(
         (identity) => ({ ok: true, identity }),
         (error) => ({

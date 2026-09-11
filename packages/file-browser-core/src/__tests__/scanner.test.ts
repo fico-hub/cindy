@@ -635,6 +635,45 @@ describe('verifyNewFile / unlinkIfSame', () => {
     expect(identityOf({ dev: 1n, ino: high + 1n })).toEqual({ dev: '1', ino: (high + 1n).toString() });
   });
 
+  // Codex P1 (round 16): a published file whose staging link still exists is not final —
+  // the original writeNewFile may still withdraw it. Recovery must wait for completion.
+  it('verifyNewFile refuses a matching file while its staging link is still present', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-verify-inflight-'));
+    try {
+      await fsWriteFile(path.join(root, 'r.json'), '{"a":1}');
+      await fsWriteFile(path.join(root, '.r.json.some-uuid.staging'), '{"a":1}');
+      await expect(verifyNewFile(root, 'r.json', sha('{"a":1}'), 7)).rejects.toThrow(/still in flight/);
+      await rm(path.join(root, '.r.json.some-uuid.staging'));
+      await expect(verifyNewFile(root, 'r.json', sha('{"a":1}'), 7)).resolves.toMatchObject({ size: 7 });
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it('writeNewFile keeps the publish when only the root fsync after staging removal fails', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-root-sync-fail-'));
+    const realRoot = await fsp.realpath(root);
+    const realOpen = fsp.open.bind(fsp);
+    let rootSyncs = 0;
+    const spy = vi.spyOn(fsp, 'open').mockImplementation(async (...args: Parameters<typeof fsp.open>) => {
+      const handle = await realOpen(...args);
+      const st = await handle.stat();
+      if (st.isDirectory() && String(args[0]) === realRoot) {
+        handle.sync = async () => { rootSyncs += 1; throw Object.assign(new Error('EIO'), { code: 'EIO' }); };
+      }
+      return handle;
+    });
+    try {
+      await mkdir(path.join(root, 'out'));
+      const written = await writeNewFile(root, 'out/spill.json', '{"a":1}');
+      expect(written.size).toBe(7);
+      expect(rootSyncs).toBe(2); // one attempt + one retry, publish kept
+      expect(await fsReadFile(path.join(root, 'out', 'spill.json'), 'utf8')).toBe('{"a":1}');
+      expect((await fsp.readdir(root)).filter(n => n.includes('.staging'))).toEqual([]);
+    } finally {
+      spy.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   // Codex P1 (round 12): the staging hard link is a full private copy; its removal is
   // required for success, and a failure zeroes the content and withdraws the publish.
   it('writeNewFile fails closed when the staging hard link cannot be removed', async () => {

@@ -44,6 +44,17 @@ export interface DocsOutputWrittenIdentity {
   ino: bigint;
 }
 
+/**
+ * Sent by the writer as soon as the private bytes exist on disk (staging inode created),
+ * before publication. Lets the parent clean up exactly that inode if the writer is killed
+ * before it can report (timeout): staging and target are both names of this inode.
+ */
+export interface DocsOutputStagedNotice {
+  type: 'staged';
+  identity: DocsOutputWrittenIdentity;
+  stagingName: string;
+}
+
 export type DocsOutputWriteResult =
   | { ok: true; identity?: DocsOutputWrittenIdentity }
   | {
