@@ -1534,6 +1534,38 @@ describe("official Pi catalog defaults for preset-marked sources (#4295)", () =>
     });
   });
 
+  it("merges the catalog under a preset that only declares context/image metadata", () => {
+    const presets = [
+      {
+        id: "moonshot-kimi-code",
+        name: "Kimi Code",
+        runtimes: {
+          pi: {
+            baseUrl: "https://api.kimi.com/coding",
+            wireProtocol: "anthropic-messages" as const,
+            piCatalogProviderId: "kimi-coding",
+            models: [
+              // 预设显式声明档位:预设优先于官方目录。
+              { id: "k3-256k", name: "Kimi K3-256K", contextWindow: 262144, reasoning: true, reasoningEfforts: ["low", "high"], reasoningDefaultEffort: "low" },
+              // 预设只声明 context/image:reasoning 由官方目录补齐,不被短路。
+              { id: "kimi-for-coding", name: "Kimi K2.7 Code", contextWindow: 262144, supportsImageInput: true },
+            ],
+          },
+        },
+      },
+    ];
+    const runtime = { ...kimiRuntime(), catalogPresetId: "moonshot-kimi-code" };
+    const models = buildUserProvider(
+      { id: "kimi-code", name: "Kimi Code", runtimes: { pi: runtime } },
+      { presets: presets as never, modelRegistry: { schemaVersion: 4, updatedAt: "2026-09-11T00:00:00.000Z", models: [] } },
+    ).models.pi!;
+    expect(models.find((m) => m.id === "k3-256k")).toMatchObject({ efforts: ["low", "high"], defaultEffort: "low" });
+    expect(models.find((m) => m.id === "kimi-for-coding")).toMatchObject({
+      efforts: ["minimal", "low", "medium", "high"],
+      supportsImageInput: true,
+    });
+  });
+
   it("keeps explicit user reasoning settings ahead of the catalog defaults", () => {
     const runtime = kimiRuntime();
     runtime.models[0] = { ...runtime.models[0], reasoning: false } as never;

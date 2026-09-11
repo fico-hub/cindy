@@ -4,6 +4,7 @@ import {
   expandedRegistryEntries,
   resolveModelMetadata,
   applyModelMetadata,
+  mergeModelMetadata,
   pickModelMetadata,
   runtimeUserModelMetadata,
   type ModelMetadata,
@@ -491,13 +492,17 @@ export function buildUserProvider(
       // Pi 来源带 piCatalogProviderId 且仍走官方路由时,pi-host 运行期会整条套用官方 Pi
       // 目录;没有 catalogPresetId(#4108 之前创建)的存量来源在这里没有预设默认,存储
       // 模型又缺 reasoning 字段,目录投影就成了空档位,Orca 创建 Worker 时把合法的
-      // max 拒成「valid: none」(#4295)。按同一份官方目录补默认,用户显式配置仍优先。
-      const defaults =
-        presetDefaults ??
-        (agent === "pi" && rt.piCatalogProviderId && !m.route &&
+      // max 拒成「valid: none」(#4295)。按同一份官方目录补默认:预设按字段覆盖官方
+      // 目录(预设只声明 context/image 时 reasoning 仍由目录补),用户显式配置仍优先。
+      const catalogDefaults =
+        agent === "pi" && rt.piCatalogProviderId && !m.route &&
         piNativeCatalogRouteMatches(rt.piCatalogProviderId, rt.baseUrl, rt.wireProtocol)
           ? piNativeCatalogModelDefaults(rt.piCatalogProviderId, m.id)
-          : undefined);
+          : undefined;
+      const defaults =
+        catalogDefaults || presetDefaults
+          ? mergeModelMetadata(catalogDefaults, presetDefaults)
+          : undefined;
       return {
         ...toCatalogModel(
           m,
