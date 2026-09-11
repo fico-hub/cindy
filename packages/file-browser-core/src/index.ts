@@ -27,7 +27,7 @@ export {
   writeFile,
   writeNewFile,
   verifyNewFile,
-  unlinkIfSame,
+  eraseIfSame,
   type NewFileIdentity,
   createFile,
   createFolder,

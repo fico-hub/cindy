@@ -453,6 +453,38 @@ process.stdout.write(JSON.stringify({ code, outsideExists, movedValue }));
     }
   });
 
+  // Codex P1 (round 23): an abort that lands during the verifyParent await (before the commit
+  // is started) has already zeroed the staging inode; the rename must not start afterwards.
+  it('does not start the overwrite rename when an abort landed during the pre-commit verification', async () => {
+    await runDocsOutputWriteForTest(await request('report.bin', 'old', false), root);
+    const realLstat = fs.promises.lstat.bind(fs.promises);
+    let gateOpen: () => void = () => {};
+    let gated = false;
+    let rootLstats = 0;
+    const gate = new Promise<void>((r) => { gateOpen = r; });
+    const realRoot = await fs.promises.realpath(root);
+    const lstatSpy = vi.spyOn(fs.promises, 'lstat').mockImplementation((async (...args: Parameters<typeof fs.promises.lstat>) => {
+      // ensureParent verifies once before staging; the second root lstat is the verifyParent
+      // that runs after the bytes are written — hold it so the abort lands there.
+      if (String(args[0]) === realRoot && ++rootLstats === 2) { gated = true; await gate; }
+      return realLstat(...args);
+    }) as typeof fs.promises.lstat);
+    const renameSpy = vi.spyOn(fs.promises, 'rename');
+    try {
+      const pending = runDocsOutputWriteForTest(await request('report.bin', 'new', true), root).then(() => 'resolved', (e: Error) => e.message);
+      await new Promise((r) => setTimeout(r, 40));
+      expect(gated).toBe(true);
+      expect(await abortInFlightWrite()).toEqual({ cleaned: true });
+      gateOpen();
+      expect(await pending).toMatch(/中止/);
+      expect(renameSpy).not.toHaveBeenCalled();
+      expect(await fs.promises.readFile(path.join(root, 'report.bin'), 'utf8')).toBe('old');
+    } finally {
+      lstatSpy.mockRestore();
+      renameSpy.mockRestore();
+    }
+  });
+
   // Codex P1 (round 21): an abort that lands while the overwrite rename is in flight must
   // wait for its outcome; a successful rename makes the inode the user's only copy.
   it('abortInFlightWrite waits for a pending overwrite rename and never zeroes a committed replacement', async () => {

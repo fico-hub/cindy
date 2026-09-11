@@ -69,7 +69,10 @@ function parseStagedNotice(value: unknown): DocsOutputStagedNotice | null {
 /**
  * Timeout recovery: the writer was killed and could not run its own fail-closed path, but
  * it already told us which inode holds the private bytes. Zero that inode through an
- * O_NOFOLLOW handle and unlink each of its names only if the name still points at it.
+ * O_NOFOLLOW handle under each of its names. The names themselves are left alone: this
+ * parent only holds lexical paths, and unlinking by path after a check can delete an
+ * unrelated entry placed there in between (no unlink-by-inode exists). A zero-byte name is
+ * the conservative residue; the child's own cwd-bound cleanup is what removes names.
  */
 async function reclaimStagedInode(parentDir: string, names: string[], identity: { dev: bigint; ino: bigint }): Promise<void> {
   for (const name of names) {
@@ -82,10 +85,6 @@ async function reclaimStagedInode(parentDir: string, names: string[], identity: 
         await handle.truncate(0);
       } finally {
         await handle.close().catch(() => undefined);
-      }
-      const again = await fs.lstat(candidate, { bigint: true });
-      if (again.isFile() && again.dev === identity.dev && again.ino === identity.ino) {
-        await fs.unlink(candidate);
       }
     } catch {
       // Missing, replaced or not ours: nothing of ours to reclaim under this name.

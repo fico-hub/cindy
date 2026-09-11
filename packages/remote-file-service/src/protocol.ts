@@ -33,10 +33,10 @@ import type {
 } from '@cindy/file-browser-core';
 
 /** 协议兼容版本:client 与 daemon 严格相等才可用。改动任何请求/响应形状时 +1。 */
-export const FILE_SERVICE_SCHEMA_VERSION = 5;
+export const FILE_SERVICE_SCHEMA_VERSION = 6;
 
 /** 人读 bundle 版本(probe / 日志用),行为变化时手动 bump。 */
-export const FILE_SERVICE_BUNDLE_VERSION = '0.2.15';
+export const FILE_SERVICE_BUNDLE_VERSION = '0.2.16';
 
 /* ============================== 帧 ============================== */
 
@@ -185,10 +185,10 @@ export interface FsRpcMethods {
     params: { workdir: string; relPath: string; sha256: string; size: number };
     result: { size: number; mtimeMs: number; dev: string; ino: string };
   };
-  /** 仅当 relPath 仍是给定 inode 身份的普通文件时删除它;unlink 不跟随最终 symlink。 */
-  unlinkIfSame: {
+  /** 仅当 relPath 仍是给定 inode 身份的普通文件时经 fd 清零其内容;不删路径名(路径名删除有 TOCTOU)。 */
+  eraseIfSame: {
     params: { workdir: string; relPath: string; dev: string; ino: string };
-    result: { removed: boolean };
+    result: { erased: boolean };
   };
   createFolder: {
     params: { workdir: string; relPath: string };

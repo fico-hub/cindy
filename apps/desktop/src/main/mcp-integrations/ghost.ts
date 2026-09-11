@@ -608,12 +608,12 @@ interface SpillIdentity { dev: string; ino: string }
 type LocalSpillAnchor = SpillIdentity;
 
 /**
- * 本地按 inode 身份清理:先以 O_NOFOLLOW 打开并 fstat 核对,通过后经该 fd 把私密内容清零
- * (擦除与 inode 绑定,与路径无关);随后再 lstat 复核一次,仍是同一 inode 才 unlink 路径名。
- * POSIX 没有"按 inode 删除路径名"的原语,所以内容擦除才是身份绑定的保证;
- * 路径名删除在复核后仍有一个极窄的重命名竞态,但此时被删的只会是一个刚被放到同名处的空位。
+ * 本地按 inode 身份擦除:以 O_NOFOLLOW 打开并 fstat 核对,通过后经该 fd 把私密内容清零
+ * (擦除与 inode 绑定,与路径无关)。不再 unlink 路径名:POSIX 没有"按 inode 删除路径名"
+ * 的原语,检查后删除总有可能删掉期间被放到同名处的无关文件;敏感内容既已经 fd 清零,
+ * 保守地留下一个空文件名是可接受的结果。
  */
-async function truncateAndUnlinkIfSame(candidate: string, anchor: SpillIdentity): Promise<void> {
+async function truncateIfSame(candidate: string, anchor: SpillIdentity): Promise<void> {
   const handle = await fs.promises.open(candidate, fs.constants.O_RDWR | ((fs.constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0));
   try {
     const st = await handle.stat({ bigint: true });
@@ -622,13 +622,10 @@ async function truncateAndUnlinkIfSame(candidate: string, anchor: SpillIdentity)
   } finally {
     await handle.close();
   }
-  const again = await fs.promises.lstat(candidate, { bigint: true });
-  if (!again.isFile() || again.dev.toString() !== anchor.dev || again.ino.toString() !== anchor.ino) return;
-  await fs.promises.unlink(candidate);
 }
 
 /**
- * 清理刚写的外置文件。本地与远端都只按 inode 身份删:父目录可能已被换成指向别处的 symlink,并在
+ * 清理刚写的外置文件。本地与远端都只按 inode 身份擦除内容、不删路径名:父目录可能已被换成指向别处的 symlink,并在
  * 那里放一个同名文件诱导删除。只有父目录 realpath 仍在 workdir 内、且同名条目的 dev/ino
  * 与写入时记录的一致,才删那一个条目;否则放弃(宁可留下自己的文件,不删别人的)。
  */
@@ -642,7 +639,7 @@ async function discardLargeResultFile(
     if (target.remoteHostId) {
       // Identity-checked deletion on the daemon: never follows a swapped symlink, never
       // removes anything but the inode this call created/verified.
-      await getRemoteFileBrowser().request(target.remoteHostId, 'unlinkIfSame', {
+      await getRemoteFileBrowser().request(target.remoteHostId, 'eraseIfSame', {
         workdir: target.workingDir, relPath, dev: anchor.dev, ino: anchor.ino,
       });
       return;
@@ -650,7 +647,7 @@ async function discardLargeResultFile(
     const abs = path.join(target.workingDir, relPath);
     const [wdReal, parentReal] = await Promise.all([fs.promises.realpath(target.workingDir), fs.promises.realpath(path.dirname(abs))]);
     if (parentReal !== wdReal && !parentReal.startsWith(wdReal + path.sep)) return;
-    await truncateAndUnlinkIfSame(path.join(parentReal, path.basename(abs)), anchor);
+    await truncateIfSame(path.join(parentReal, path.basename(abs)), anchor);
   } catch {
     /* best-effort: the write already failed to be accounted for; keep the original error */
   }

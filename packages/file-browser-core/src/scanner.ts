@@ -775,22 +775,22 @@ export async function verifyNewFile(
 }
 
 /**
- * Delete `relPath` only if it is still the regular file with the given inode identity.
+ * Erase the private content at `relPath` only if it is still the regular file with the given
+ * inode identity — and leave the pathname alone.
  *
- * POSIX has no "unlink by inode" primitive, so the identity-bound step is the erasure: the
- * entry is opened with O_NOFOLLOW, fstat must match dev/ino, and the private content is
- * truncated through that descriptor (bound to the inode, not to the pathname). Only then is
- * the pathname re-checked with lstat and unlinked if it still names that inode. A rename race
- * between the re-check and `unlink` can at worst remove a just-placed replacement name; it can
- * never erase unrelated content, because nothing but the verified inode is ever truncated.
- * Returns whether the pathname was removed.
+ * POSIX has no "unlink by inode" primitive: any pathname unlink after a check is a TOCTOU
+ * that can delete an unrelated entry placed at that name in between. The sensitive part is
+ * the content, and that can be handled without the race: open with O_NOFOLLOW, fstat must
+ * match dev/ino, truncate through that descriptor (bound to the inode, not to the pathname).
+ * A zero-byte name may remain; that is the conservative outcome. Returns whether our inode
+ * was erased.
  */
-export async function unlinkIfSame(
+export async function eraseIfSame(
   workdir: string,
   relPath: string,
   dev: string,
   ino: string,
-): Promise<{ removed: boolean }> {
+): Promise<{ erased: boolean }> {
   const sub = assertInsideWorkdir(workdir, relPath);
   if (sub === '') throw new Error('cannot delete workdir root');
   const abs = path.join(workdir, sub);
@@ -802,20 +802,17 @@ export async function unlinkIfSame(
   } catch (err) {
     // Missing, or a symlink refused by O_NOFOLLOW (ELOOP): not our inode, nothing to do.
     const code = (err as NodeJS.ErrnoException)?.code;
-    if (code === 'ENOENT' || code === 'ELOOP') return { removed: false };
+    if (code === 'ENOENT' || code === 'ELOOP') return { erased: false };
     throw err;
   }
   try {
     const opened = await handle.stat({ bigint: true });
-    if (!opened.isFile() || !sameIdentity(opened, dev, ino)) return { removed: false };
+    if (!opened.isFile() || !sameIdentity(opened, dev, ino)) return { erased: false };
     await handle.truncate(0);
+    return { erased: true };
   } finally {
     await handle.close();
   }
-  const entry = await fs.lstat(abs, { bigint: true }).catch(() => null);
-  if (!entry || !entry.isFile() || !sameIdentity(entry, dev, ino)) return { removed: false };
-  await fs.unlink(abs);
-  return { removed: true };
 }
 
 /**

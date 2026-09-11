@@ -389,6 +389,11 @@ async function writeWithinVerifiedParent(
     assertNotAborted();
     await verifyParent(request, workingDir);
     if (request.overwrite) {
+      // Re-check *synchronously* right before the commit is started: an abort that ran
+      // during the verifyParent await above has already zeroed the staging inode and set
+      // abortRequested; starting the rename now would publish a zero-byte replacement over
+      // the user's file. From here on, an abort sees commitPending and waits for it instead.
+      assertNotAborted();
       // The commit flag is set inside the same continuation the abort path awaits, so the
       // abort can never observe "not committed" while the rename has actually succeeded.
       commitPending = replaceFile(request, workingDir, staging, target).then(

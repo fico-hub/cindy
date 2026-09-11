@@ -147,7 +147,7 @@ describe('remote-file-service RPC end-to-end', () => {
     expect(r.ino).toMatch(/^\d+$/);
   });
 
-  it('verifyNewFile proves content identity and unlinkIfSame deletes only that inode', async () => {
+  it('verifyNewFile proves content identity and eraseIfSame zeroes only that inode', async () => {
     await mkdir(path.join(workdir, 'tool-results'));
     const written = await client.request('writeNewFile', { workdir, relPath: 'tool-results/v.json', content: '{"v":1}' });
     const sha256 = createHash('sha256').update('{"v":1}').digest('hex');
@@ -159,8 +159,8 @@ describe('remote-file-service RPC end-to-end', () => {
     await expect(
       client.request('verifyNewFile', { workdir, relPath: 'tool-results/v.json', sha256, size: -1 as number }),
     ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
-    expect(await client.request('unlinkIfSame', { workdir, relPath: 'tool-results/v.json', dev: written.dev, ino: `${written.ino}0` })).toEqual({ removed: false });
-    expect(await client.request('unlinkIfSame', { workdir, relPath: 'tool-results/v.json', dev: written.dev, ino: written.ino })).toEqual({ removed: true });
+    expect(await client.request('eraseIfSame', { workdir, relPath: 'tool-results/v.json', dev: written.dev, ino: `${written.ino}0` })).toEqual({ erased: false });
+    expect(await client.request('eraseIfSame', { workdir, relPath: 'tool-results/v.json', dev: written.dev, ino: written.ino })).toEqual({ erased: true });
   });
 
   it('unknown method → UNKNOWN_METHOD; bad params → BAD_REQUEST', async () => {

@@ -33,7 +33,7 @@ import {
   writeFile,
   writeNewFile,
   verifyNewFile,
-  unlinkIfSame,
+  eraseIfSame,
   type CoreLogger,
   type SearchEvent,
 } from '@cindy/file-browser-core';
@@ -186,8 +186,8 @@ export function runFileService(
         requireString(p?.sha256, 'sha256'),
         typeof p?.size === 'number' && Number.isInteger(p.size) && p.size >= 0 ? p.size : bad('size must be a non-negative integer'),
       ),
-    unlinkIfSame: (p) =>
-      unlinkIfSame(
+    eraseIfSame: (p) =>
+      eraseIfSame(
         requireString(p?.workdir, 'workdir'),
         requireString(p?.relPath, 'relPath'),
         requireString(p?.dev, 'dev'),

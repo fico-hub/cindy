@@ -16,7 +16,7 @@ import {
   writeFile,
   writeNewFile,
   verifyNewFile,
-  unlinkIfSame,
+  eraseIfSame,
   identityOf,
   sameIdentity,
 } from '../scanner';
@@ -545,7 +545,7 @@ describe('writeNewFile', () => {
   });
 });
 
-describe('verifyNewFile / unlinkIfSame', () => {
+describe('verifyNewFile / eraseIfSame', () => {
   const sha = (text: string) => createHash('sha256').update(text).digest('hex');
 
   it('verifies only the exact regular file with matching size and content, and returns its identity', async () => {
@@ -569,27 +569,27 @@ describe('verifyNewFile / unlinkIfSame', () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
-  it('unlinkIfSame removes only the matching inode and never follows a swapped symlink', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-unlink-same-'));
+  it('eraseIfSame zeroes only the matching inode, never follows a swapped symlink, and never unlinks', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-erase-same-'));
     try {
       const written = await writeNewFile(root, 'spill.json', '{"a":1}');
       await fsWriteFile(path.join(root, 'other.json'), 'keep me');
       // Wrong identity: untouched.
-      expect(await unlinkIfSame(root, 'spill.json', written.dev, `${written.ino}0`)).toEqual({ removed: false });
+      expect(await eraseIfSame(root, 'spill.json', written.dev, `${written.ino}0`)).toEqual({ erased: false });
       expect(await fsReadFile(path.join(root, 'spill.json'), 'utf8')).toBe('{"a":1}');
-      // Swap the path for a symlink to unrelated data: not our inode, so nothing is removed.
+      // Swap the path for a symlink to unrelated data: not our inode, so nothing is touched.
       await rm(path.join(root, 'spill.json'));
       let linked = true;
       try { await symlink(path.join(root, 'other.json'), path.join(root, 'spill.json'), 'file'); } catch { linked = false; }
       if (linked) {
-        expect(await unlinkIfSame(root, 'spill.json', written.dev, written.ino)).toEqual({ removed: false });
+        expect(await eraseIfSame(root, 'spill.json', written.dev, written.ino)).toEqual({ erased: false });
         expect(await fsReadFile(path.join(root, 'other.json'), 'utf8')).toBe('keep me');
         await rm(path.join(root, 'spill.json'));
       }
-      // Matching identity: removed.
+      // Matching identity: content erased through the descriptor, pathname kept (no TOCTOU unlink).
       const again = await writeNewFile(root, 'spill.json', '{"b":2}');
-      expect(await unlinkIfSame(root, 'spill.json', again.dev, again.ino)).toEqual({ removed: true });
-      await expect(fsReadFile(path.join(root, 'spill.json'))).rejects.toThrow(/ENOENT/);
+      expect(await eraseIfSame(root, 'spill.json', again.dev, again.ino)).toEqual({ erased: true });
+      expect((await fsStat(path.join(root, 'spill.json'))).size).toBe(0);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
@@ -869,17 +869,18 @@ describe('verifyNewFile / unlinkIfSame', () => {
   // Codex P1 (round 10): erasure is bound to the inode, not the pathname. A spill renamed
   // away between identity check and unlink (modelled by a second hard link) still loses its
   // private content, while a pathname that no longer names our inode is never truncated.
-  it('unlinkIfSame erases the verified inode through its descriptor before touching the name', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-unlink-erase-'));
+  it('eraseIfSame erases the verified inode through its descriptor and leaves a replaced name alone', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-erase-'));
     try {
       const written = await writeNewFile(root, 'spill.json', '{"secret":1}');
       await fsLink(path.join(root, 'spill.json'), path.join(root, 'moved-away.json'));
-      expect(await unlinkIfSame(root, 'spill.json', written.dev, written.ino)).toEqual({ removed: true });
+      expect(await eraseIfSame(root, 'spill.json', written.dev, written.ino)).toEqual({ erased: true });
       // Same inode reachable under another name: content gone, so a renamed-away copy leaks nothing.
       expect((await fsStat(path.join(root, 'moved-away.json'))).size).toBe(0);
       // A replacement that is not our inode keeps its content untouched.
+      await rm(path.join(root, 'spill.json'));
       await fsWriteFile(path.join(root, 'spill.json'), 'someone else');
-      expect(await unlinkIfSame(root, 'spill.json', written.dev, written.ino)).toEqual({ removed: false });
+      expect(await eraseIfSame(root, 'spill.json', written.dev, written.ino)).toEqual({ erased: false });
       expect(await fsReadFile(path.join(root, 'spill.json'), 'utf8')).toBe('someone else');
     } finally { await rm(root, { recursive: true, force: true }); }
   });

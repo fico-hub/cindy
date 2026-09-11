@@ -100,8 +100,8 @@ describe('writeDocsOutput beforeCommit boundary', () => {
       const settled = writeDocsOutput({ root, path: target, data: new Uint8Array([1]), overwrite: false }).then(() => 'resolved', (e: Error) => e.message);
       expect(await settled).toBe('文档落盘隔离进程超时');
       expect(child.killed).toBe(true);
-      await expect(fs.promises.access(staging)).rejects.toThrow();
-      await expect(fs.promises.access(target)).rejects.toThrow();
+      expect((await fs.promises.stat(staging)).size).toBe(0); // erased through the fd; names kept
+      expect((await fs.promises.stat(target)).size).toBe(0);
     } finally {
       DOCS_OUTPUT_WRITER_TIMEOUT.ms = 60_000;
     }
@@ -158,8 +158,8 @@ describe('writeDocsOutput beforeCommit boundary', () => {
       };
       const outcome = await writeDocsOutput({ root, path: target, data: new Uint8Array([1]), overwrite: false }).then(() => 'resolved', (e: Error) => e.message);
       expect(outcome).toBe('文档落盘隔离进程超时');
-      await expect(fs.promises.access(staging)).rejects.toThrow();
-      await expect(fs.promises.access(target)).rejects.toThrow();
+      expect((await fs.promises.stat(staging)).size).toBe(0); // erased through the fd; names kept
+      expect((await fs.promises.stat(target)).size).toBe(0);
     } finally {
       DOCS_OUTPUT_WRITER_TIMEOUT.ms = 60_000;
     }
@@ -183,8 +183,8 @@ describe('writeDocsOutput beforeCommit boundary', () => {
     };
     const outcome = await writeDocsOutput({ root, path: target, data: new Uint8Array([1]), overwrite: false }).then(() => 'resolved', (e: Error) => e.message);
     expect(outcome).toMatch(kind === 'exit' ? /异常退出\(137\)/ : /spawn lost/);
-    await expect(fs.promises.access(staging)).rejects.toThrow();
-    await expect(fs.promises.access(target)).rejects.toThrow();
+    expect((await fs.promises.stat(staging)).size).toBe(0);
+    expect((await fs.promises.stat(target)).size).toBe(0);
   });
 
   // Codex P1 (round 17): for overwrite the announced inode becomes the user's replaced file

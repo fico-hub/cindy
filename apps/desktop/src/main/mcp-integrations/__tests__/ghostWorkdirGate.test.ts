@@ -2710,7 +2710,7 @@ describe('oversized ghost result Host storage', () => {
       expect(ledgerRefs).not.toContainEqual(expect.objectContaining({ refKind: 'ghost-tool-result' }));
       expect(ledgerRefs).not.toContainEqual(expect.objectContaining({ hash: fresh }));
       const written = writeDocsOutputMock.mock.calls[0]![0].path;
-      await expect(fs.promises.access(written)).rejects.toThrow();
+      expect((await fs.promises.stat(written)).size).toBe(0); // erased through the fd; pathname kept
       expect(releaseMutationMock).toHaveBeenCalledOnce();
     } finally {
       ledgerAddRefMock.mockImplementation(async (params: TestLedgerRef) => {
@@ -2839,7 +2839,7 @@ describe('oversized ghost result Host storage', () => {
       const hash = 'a'.repeat(64);
       await expect(deps.saveLargeGhostResult!(JSON.stringify({ image: `cindy-media://blobs/${hash}.png` }))).rejects.toThrow('live session');
       expect(writeDocsOutputMock).toHaveBeenCalledOnce();
-      await expect(fs.promises.access(writeDocsOutputMock.mock.calls[0]![0].path)).rejects.toThrow();
+      expect((await fs.promises.stat(writeDocsOutputMock.mock.calls[0]![0].path)).size).toBe(0);
       expect(ledgerAddRefMock).not.toHaveBeenCalled();
       expect(liveGrantStateMock).toHaveBeenCalledTimes(4);
     } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
@@ -2871,7 +2871,7 @@ describe('oversized ghost result Host storage', () => {
       expect(ledgerRemoveRefByIdMock).toHaveBeenCalledOnce();
       expect(ledgerRemoveRefByIdMock).toHaveBeenCalledWith(await ledgerAddRefMock.mock.results[0]!.value);
       expect(ledgerRefs).not.toContainEqual(expect.objectContaining({ hash }));
-      await expect(fs.promises.access(writeDocsOutputMock.mock.calls[0]![0].path)).rejects.toThrow();
+      expect((await fs.promises.stat(writeDocsOutputMock.mock.calls[0]![0].path)).size).toBe(0);
       expect(liveGrantStateMock).toHaveBeenCalledTimes(5);
     } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
   });
@@ -2901,7 +2901,7 @@ describe('oversized ghost result Host storage', () => {
     expect(calls()).toBe(4);
     const methods = remoteFsRequestMock.mock.calls.map(call => call[1]);
     expect(methods).not.toContain('deleteEntry');
-    expect(methods).not.toContain('unlinkIfSame');
+    expect(methods).not.toContain('eraseIfSame');
     expect(methods).not.toContain('stat');
     // The verification carries this write's exact content identity, not just a length.
     const verifyParams = remoteFsRequestMock.mock.calls.find(call => call[1] === 'verifyNewFile')![2] as { sha256: string; size: number };
@@ -2917,7 +2917,7 @@ describe('oversized ghost result Host storage', () => {
     expect(calls()).toBe(REMOTE_WRITE_RECONCILE.maxAttempts);
     const methods = remoteFsRequestMock.mock.calls.map(call => call[1]);
     expect(methods).not.toContain('deleteEntry');
-    expect(methods).not.toContain('unlinkIfSame');
+    expect(methods).not.toContain('eraseIfSame');
     expect(ledgerAddRefMock).not.toHaveBeenCalled();
   });
 
@@ -2958,7 +2958,7 @@ describe('oversized ghost result Host storage', () => {
   });
 
   // Codex P1 (round 9): remote cleanup is identity-checked on the daemon and never path-based.
-  it('cleans up a remote spill only through unlinkIfSame with the identity returned by writeNewFile', async () => {
+  it('cleans up a remote spill only through eraseIfSame with the identity returned by writeNewFile', async () => {
     const deps = makeDeps('codex');
     sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
     let calls = 0;
@@ -2968,7 +2968,7 @@ describe('oversized ghost result Host storage', () => {
     await expect(deps.saveLargeGhostResult!('result')).rejects.toThrow('live session');
     const methods = remoteFsRequestMock.mock.calls.map(call => call[1]);
     expect(methods).not.toContain('deleteEntry');
-    expect(remoteFsRequestMock).toHaveBeenCalledWith('host-1', 'unlinkIfSame', { workdir: '/srv/work', relPath: expect.stringMatching(/^tool-results\//), dev: '7', ino: '9' });
+    expect(remoteFsRequestMock).toHaveBeenCalledWith('host-1', 'eraseIfSame', { workdir: '/srv/work', relPath: expect.stringMatching(/^tool-results\//), dev: '7', ino: '9' });
   });
 
   // Codex P1 (round 6): createFolder can time out while the daemon is still running mkdir.
@@ -3026,7 +3026,7 @@ describe('oversized ghost result Host storage', () => {
     else await expect(outcome).rejects.toThrow(`writeNewFile ${code}`);
     const methods = remoteFsRequestMock.mock.calls.map(call => call[1]);
     expect(methods).not.toContain('deleteEntry');
-    expect(methods).not.toContain('unlinkIfSame');
+    expect(methods).not.toContain('eraseIfSame');
     expect(methods.slice(0, 3)).toEqual(['createFolder', 'writeNewFile', 'verifyNewFile']);
     if (!verified) expect(methods.filter(m => m === 'verifyNewFile')).toHaveLength(REMOTE_WRITE_RECONCILE.maxAttempts);
   });
