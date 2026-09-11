@@ -17,6 +17,8 @@ import {
   writeNewFile,
   verifyNewFile,
   unlinkIfSame,
+  identityOf,
+  sameIdentity,
 } from '../scanner';
 
 async function makeSymlinkFixture(): Promise<
@@ -380,7 +382,7 @@ describe('writeNewFile', () => {
           await fsp.rename(path.join(workdir, 'tool-results'), outside);
           moved = true;
         },
-        stat: () => handle.stat(),
+        stat: ((...st: Parameters<typeof handle.stat>) => handle.stat(...st)) as typeof handle.stat,
         truncate: (len?: number) => handle.truncate(len),
         close: () => handle.close(),
       }) as typeof handle;
@@ -450,7 +452,7 @@ describe('writeNewFile', () => {
       return Object.assign(Object.create(handle), {
         sync: async () => { order.push('sync'); return realSync(); },
         writeFile: (...w: Parameters<typeof handle.writeFile>) => handle.writeFile(...w),
-        stat: () => handle.stat(),
+        stat: ((...st: Parameters<typeof handle.stat>) => handle.stat(...st)) as typeof handle.stat,
         truncate: (len?: number) => handle.truncate(len),
         close: () => handle.close(),
       }) as typeof handle;
@@ -460,7 +462,7 @@ describe('writeNewFile', () => {
       // bytes fsync → link → parent-directory fsync (round 11) → root fsync after staging unlink (round 12)
       expect(order).toEqual(['sync', 'link', 'sync', 'sync']);
       const st = await fsp.lstat(path.join(root, 'out.json'));
-      expect(result).toMatchObject({ size: 11, dev: st.dev, ino: st.ino });
+      expect(result).toMatchObject({ size: 11, dev: String(st.dev), ino: String(st.ino) });
     } finally {
       openSpy.mockRestore();
       linkSpy2.mockRestore();
@@ -573,7 +575,7 @@ describe('verifyNewFile / unlinkIfSame', () => {
       const written = await writeNewFile(root, 'spill.json', '{"a":1}');
       await fsWriteFile(path.join(root, 'other.json'), 'keep me');
       // Wrong identity: untouched.
-      expect(await unlinkIfSame(root, 'spill.json', written.dev, written.ino + 1)).toEqual({ removed: false });
+      expect(await unlinkIfSame(root, 'spill.json', written.dev, `${written.ino}0`)).toEqual({ removed: false });
       expect(await fsReadFile(path.join(root, 'spill.json'), 'utf8')).toBe('{"a":1}');
       // Swap the path for a symlink to unrelated data: not our inode, so nothing is removed.
       await rm(path.join(root, 'spill.json'));
@@ -620,6 +622,17 @@ describe('verifyNewFile / unlinkIfSame', () => {
       spy.mockRestore();
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  // Windows CI (head 3e38a6d7f): NTFS file IDs are 64-bit, so as JS numbers two different
+  // inodes can compare equal (ino + 1 === ino above 2^53). Identity is bigint-backed and
+  // carried as decimal strings; a difference in the lowest bit must still be a mismatch.
+  it('identity comparison keeps the low bits of 64-bit file ids', () => {
+    const high = 2n ** 60n;
+    expect(Number(high + 1n)).toBe(Number(high)); // the precision loss that broke Windows
+    expect(sameIdentity({ dev: 1n, ino: high + 1n }, '1', high.toString())).toBe(false);
+    expect(sameIdentity({ dev: 1n, ino: high + 1n }, '1', (high + 1n).toString())).toBe(true);
+    expect(identityOf({ dev: 1n, ino: high + 1n })).toEqual({ dev: '1', ino: (high + 1n).toString() });
   });
 
   // Codex P1 (round 12): the staging hard link is a full private copy; its removal is

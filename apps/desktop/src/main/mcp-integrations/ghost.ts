@@ -569,7 +569,8 @@ function isRemoteResultUnknown(err: unknown): boolean {
 }
 
 /** 外置文件写入后记录的 inode 身份(本地 lstat / 远端 writeNewFile 或 verifyNewFile 返回),供清理时锚定。 */
-interface SpillIdentity { dev: number; ino: number }
+/** dev/ino 以十进制字符串承载:Windows 文件 ID 为 64 位,JS number 会丢低位。 */
+interface SpillIdentity { dev: string; ino: string }
 type LocalSpillAnchor = SpillIdentity;
 
 /**
@@ -582,9 +583,9 @@ async function anchorLocalSpill(workdir: string, relPath: string): Promise<Local
   if (parentReal !== wdReal && !parentReal.startsWith(wdReal + path.sep)) {
     throw new Error('Tool result storage requires an authoritative session workdir');
   }
-  const st = await fs.promises.lstat(path.join(parentReal, path.basename(abs)));
+  const st = await fs.promises.lstat(path.join(parentReal, path.basename(abs)), { bigint: true });
   if (!st.isFile()) throw new Error('Tool result storage requires an authoritative session workdir');
-  return { dev: st.dev, ino: st.ino };
+  return { dev: st.dev.toString(), ino: st.ino.toString() };
 }
 
 /**
@@ -596,14 +597,14 @@ async function anchorLocalSpill(workdir: string, relPath: string): Promise<Local
 async function truncateAndUnlinkIfSame(candidate: string, anchor: SpillIdentity): Promise<void> {
   const handle = await fs.promises.open(candidate, fs.constants.O_RDWR | ((fs.constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0));
   try {
-    const st = await handle.stat();
-    if (!st.isFile() || st.dev !== anchor.dev || st.ino !== anchor.ino) return;
+    const st = await handle.stat({ bigint: true });
+    if (!st.isFile() || st.dev.toString() !== anchor.dev || st.ino.toString() !== anchor.ino) return;
     await handle.truncate(0);
   } finally {
     await handle.close();
   }
-  const again = await fs.promises.lstat(candidate);
-  if (!again.isFile() || again.dev !== anchor.dev || again.ino !== anchor.ino) return;
+  const again = await fs.promises.lstat(candidate, { bigint: true });
+  if (!again.isFile() || again.dev.toString() !== anchor.dev || again.ino.toString() !== anchor.ino) return;
   await fs.promises.unlink(candidate);
 }
 

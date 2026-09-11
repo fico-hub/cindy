@@ -555,8 +555,17 @@ export interface NewFileIdentity {
   size: number;
   mtimeMs: number;
   /** Inode identity of the published file; lets the caller verify or delete only this file. */
-  dev: number;
-  ino: number;
+  /** Decimal strings: Windows file IDs are 64-bit and lose low bits as JS numbers. */
+  dev: string;
+  ino: string;
+}
+
+/** Identity from bigint stats, serialised without precision loss. */
+export function identityOf(st: { dev: bigint; ino: bigint }): { dev: string; ino: string } {
+  return { dev: st.dev.toString(), ino: st.ino.toString() };
+}
+export function sameIdentity(st: { dev: bigint; ino: bigint }, dev: string, ino: string): boolean {
+  return st.dev.toString() === dev && st.ino.toString() === ino;
 }
 
 /**
@@ -614,7 +623,10 @@ export async function writeNewFile(
   let published = false;
   const escape = () => new Error(`path escapes workdir via symlink: ${sub}`);
   const isOurs = async (candidate: string): Promise<boolean> => {
-    const [own, current] = await Promise.all([handle.stat().catch(() => null), fs.lstat(candidate).catch(() => null)]);
+    const [own, current] = await Promise.all([
+      handle.stat({ bigint: true }).catch(() => null),
+      fs.lstat(candidate, { bigint: true }).catch(() => null),
+    ]);
     return !!own && !!current && current.isFile() && current.ino === own.ino && current.dev === own.dev;
   };
   try {
@@ -664,9 +676,9 @@ export async function writeNewFile(
     await handle.close().catch(() => undefined);
     throw err;
   }
-  const st = await handle.stat();
+  const st = await handle.stat({ bigint: true });
   await handle.close();
-  return { size: st.size, mtimeMs: st.mtimeMs, dev: st.dev, ino: st.ino };
+  return { size: Number(st.size), mtimeMs: Number(st.mtimeMs), ...identityOf(st) };
 }
 
 /**
@@ -685,14 +697,14 @@ export async function verifyNewFile(
   if (sub === '') throw new Error('cannot verify workdir root');
   const abs = path.join(workdir, sub);
   await assertRealParentInsideWorkdir(workdir, abs);
-  const entry = await fs.lstat(abs);
+  const entry = await fs.lstat(abs, { bigint: true });
   if (!entry.isFile()) throw new Error(`not a regular file: ${sub}`);
-  if (entry.size !== expectedSize) throw new Error(`size mismatch: ${sub}`);
+  if (Number(entry.size) !== expectedSize) throw new Error(`size mismatch: ${sub}`);
   // Never follow a final symlink (a link to the renamed original must not pass).
   const O_NOFOLLOW = (fsConstants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
   const handle = await fs.open(abs, fsConstants.O_RDONLY | O_NOFOLLOW);
   try {
-    const opened = await handle.stat();
+    const opened = await handle.stat({ bigint: true });
     // The opened inode must be the very entry lstat saw (no swap in between).
     if (opened.dev !== entry.dev || opened.ino !== entry.ino) throw new Error(`identity mismatch: ${sub}`);
     const buf = await handle.readFile();
@@ -702,11 +714,11 @@ export async function verifyNewFile(
     // Reading was an await: the pathname must still name the inode whose content was
     // hashed, and its parent must still be inside workdir, or the recovery is void.
     await assertRealParentInsideWorkdir(workdir, abs);
-    const after = await fs.lstat(abs).catch(() => null);
+    const after = await fs.lstat(abs, { bigint: true }).catch(() => null);
     if (!after || !after.isFile() || after.dev !== opened.dev || after.ino !== opened.ino) {
       throw new Error(`identity mismatch after read: ${sub}`);
     }
-    return { size: opened.size, mtimeMs: opened.mtimeMs, dev: opened.dev, ino: opened.ino };
+    return { size: Number(opened.size), mtimeMs: Number(opened.mtimeMs), ...identityOf(opened) };
   } finally {
     await handle.close();
   }
@@ -726,8 +738,8 @@ export async function verifyNewFile(
 export async function unlinkIfSame(
   workdir: string,
   relPath: string,
-  dev: number,
-  ino: number,
+  dev: string,
+  ino: string,
 ): Promise<{ removed: boolean }> {
   const sub = assertInsideWorkdir(workdir, relPath);
   if (sub === '') throw new Error('cannot delete workdir root');
@@ -744,14 +756,14 @@ export async function unlinkIfSame(
     throw err;
   }
   try {
-    const opened = await handle.stat();
-    if (!opened.isFile() || opened.dev !== dev || opened.ino !== ino) return { removed: false };
+    const opened = await handle.stat({ bigint: true });
+    if (!opened.isFile() || !sameIdentity(opened, dev, ino)) return { removed: false };
     await handle.truncate(0);
   } finally {
     await handle.close();
   }
-  const entry = await fs.lstat(abs).catch(() => null);
-  if (!entry || !entry.isFile() || entry.dev !== dev || entry.ino !== ino) return { removed: false };
+  const entry = await fs.lstat(abs, { bigint: true }).catch(() => null);
+  if (!entry || !entry.isFile() || !sameIdentity(entry, dev, ino)) return { removed: false };
   await fs.unlink(abs);
   return { removed: true };
 }

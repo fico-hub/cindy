@@ -142,8 +142,9 @@ describe('remote-file-service RPC end-to-end', () => {
     await expect(
       client.request('writeNewFile', { workdir, relPath: 'tool-results/y.json', content: 42 as unknown as string }),
     ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
-    expect(typeof r.dev).toBe('number');
-    expect(typeof r.ino).toBe('number');
+    expect(typeof r.dev).toBe('string');
+    expect(typeof r.ino).toBe('string');
+    expect(r.ino).toMatch(/^\d+$/);
   });
 
   it('verifyNewFile proves content identity and unlinkIfSame deletes only that inode', async () => {
@@ -158,7 +159,7 @@ describe('remote-file-service RPC end-to-end', () => {
     await expect(
       client.request('verifyNewFile', { workdir, relPath: 'tool-results/v.json', sha256, size: -1 as number }),
     ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
-    expect(await client.request('unlinkIfSame', { workdir, relPath: 'tool-results/v.json', dev: written.dev, ino: written.ino + 1 })).toEqual({ removed: false });
+    expect(await client.request('unlinkIfSame', { workdir, relPath: 'tool-results/v.json', dev: written.dev, ino: `${written.ino}0` })).toEqual({ removed: false });
     expect(await client.request('unlinkIfSame', { workdir, relPath: 'tool-results/v.json', dev: written.dev, ino: written.ino })).toEqual({ removed: true });
   });
 

@@ -2776,7 +2776,7 @@ describe('oversized ghost result Host storage', () => {
 
   // Codex P1 (rounds 5–9): after a client TIMEOUT the daemon may still be writing; the only
   // acceptable proof of *this* write is the daemon's content-identity check (verifyNewFile).
-  const remoteIdentity = { size: 0, mtimeMs: 0, dev: 7, ino: 9 };
+  const remoteIdentity = { size: 0, mtimeMs: 0, dev: '7', ino: '9' };
   const timeoutThenVerify = (verify: (call: number) => unknown) => {
     let verifyCalls = 0;
     remoteFsRequestMock.mockImplementation(async (_host, method) => {
@@ -2848,11 +2848,11 @@ describe('oversized ghost result Host storage', () => {
     let calls = 0;
     // resolve(2) → pre-write(3) → after directory step(4) → post-write(5): the 5th read ends the instance.
     liveGrantStateMock.mockImplementation(() => (++calls <= 4 ? { permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => true, reviewAction: reviewAllow } : null));
-    remoteFsRequestMock.mockImplementation(async (_host, method) => (method === 'writeNewFile' ? { size: 5, mtimeMs: 1, dev: 7, ino: 9 } : {}));
+    remoteFsRequestMock.mockImplementation(async (_host, method) => (method === 'writeNewFile' ? { size: 5, mtimeMs: 1, dev: '7', ino: '9' } : {}));
     await expect(deps.saveLargeGhostResult!('result')).rejects.toThrow('live session');
     const methods = remoteFsRequestMock.mock.calls.map(call => call[1]);
     expect(methods).not.toContain('deleteEntry');
-    expect(remoteFsRequestMock).toHaveBeenCalledWith('host-1', 'unlinkIfSame', { workdir: '/srv/work', relPath: expect.stringMatching(/^tool-results\//), dev: 7, ino: 9 });
+    expect(remoteFsRequestMock).toHaveBeenCalledWith('host-1', 'unlinkIfSame', { workdir: '/srv/work', relPath: expect.stringMatching(/^tool-results\//), dev: '7', ino: '9' });
   });
 
   // Codex P1 (round 6): createFolder can time out while the daemon is still running mkdir.

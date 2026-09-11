@@ -190,8 +190,8 @@ export function runFileService(
       unlinkIfSame(
         requireString(p?.workdir, 'workdir'),
         requireString(p?.relPath, 'relPath'),
-        typeof p?.dev === 'number' && Number.isFinite(p.dev) ? p.dev : bad('dev must be a number'),
-        typeof p?.ino === 'number' && Number.isFinite(p.ino) ? p.ino : bad('ino must be a number'),
+        requireString(p?.dev, 'dev'),
+        requireString(p?.ino, 'ino'),
       ),
     createFolder: (p) =>
       createFolder(requireString(p?.workdir, 'workdir'), requireString(p?.relPath, 'relPath')),
