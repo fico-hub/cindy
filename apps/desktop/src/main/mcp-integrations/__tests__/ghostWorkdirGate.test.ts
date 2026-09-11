@@ -107,7 +107,7 @@ const ledgerHasGhostToolGrantMock = vi.fn(
 );
 let ledgerRefSeq = 0;
 const ledgerAddRefMock = vi.fn(async (params: TestLedgerRef) => {
-  const id = `ref-${++ledgerRefSeq}`;
+  const id = params.id ?? `ref-${++ledgerRefSeq}`;
   ledgerRefs.push({ ...params, id });
   return id;
 });
@@ -436,7 +436,7 @@ beforeEach(() => {
   ledgerAddRefMock.mockReset();
   ledgerAddRefMock.mockImplementation(async (params: TestLedgerRef) => {
     ledgerRefs.push({ ...params });
-    return `ref-${ledgerRefs.length}`;
+    return params.id ?? `ref-${ledgerRefs.length}`;
   });
   ledgerRefs.length = 0;
   dirDepositMock.mockClear();
@@ -2561,15 +2561,16 @@ describe('oversized ghost result Host storage', () => {
       ledgerRefs.push({ hash: existing, refKind: 'session-attachment', refId: 's1', originKind: 'tool' });
       ledgerAddRefMock.mockImplementation(async (params: TestLedgerRef) => {
         if (params.hash === broken) throw new Error('FOREIGN KEY constraint failed');
-        const id = `ref-${++ledgerRefSeq}`;
+        const id = params.id ?? `ref-${++ledgerRefSeq}`;
         ledgerRefs.push({ ...params, id });
         return id;
       });
       const text = JSON.stringify({ a: `cindy-media://blobs/${existing}.png`, b: `cindy-media://blobs/${fresh}.png`, c: `cindy-media://blobs/${broken}.png` });
       await expect(deps.saveLargeGhostResult!(text)).rejects.toThrow('media references unavailable');
       // The file identity is independent of the pre-existing session-attachment row: both
-      // `existing` and `fresh` got their own ghost-tool-result refs, and only those roll back.
-      expect(ledgerRemoveRefByIdMock).toHaveBeenCalledTimes(2);
+      // `existing` and `fresh` got their own ghost-tool-result refs; rollback covers those two
+      // plus the id reserved for `broken` (its insert may have landed before rejecting).
+      expect(ledgerRemoveRefByIdMock).toHaveBeenCalledTimes(3);
       expect(ledgerRemoveSessionAttachmentRefMock).not.toHaveBeenCalled();
       expect(ledgerRefs).toContainEqual(expect.objectContaining({ hash: existing, refKind: 'session-attachment', refId: 's1' }));
       expect(ledgerRefs).not.toContainEqual(expect.objectContaining({ refKind: 'ghost-tool-result' }));
@@ -2579,7 +2580,7 @@ describe('oversized ghost result Host storage', () => {
       expect(releaseMutationMock).toHaveBeenCalledOnce();
     } finally {
       ledgerAddRefMock.mockImplementation(async (params: TestLedgerRef) => {
-        const id = `ref-${++ledgerRefSeq}`;
+        const id = params.id ?? `ref-${++ledgerRefSeq}`;
         ledgerRefs.push({ ...params, id });
         return id;
       });
@@ -2597,7 +2598,7 @@ describe('oversized ghost result Host storage', () => {
     ledgerHasRefMock.mockImplementation(async () => false);
     ledgerAddRefMock.mockImplementation(async (params: TestLedgerRef) => {
       if (params.hash === broken) throw new Error('FOREIGN KEY constraint failed');
-      const id = `ref-${++ledgerRefSeq}`;
+      const id = params.id ?? `ref-${++ledgerRefSeq}`;
       ledgerRefs.push({ ...params, id });
       return id;
     });
@@ -2609,14 +2610,15 @@ describe('oversized ghost result Host storage', () => {
       expect(bad.status).toBe('rejected');
       const remaining = ledgerRefs.filter(ref => ref.hash === shared && ref.refKind === 'ghost-tool-result');
       expect(remaining).toHaveLength(1); // the successful call's row survives
-      expect(ledgerRemoveRefByIdMock).toHaveBeenCalledOnce();
+      // Rollback touches only this call's reserved ids (shared + broken), never the other call's row.
+      expect(ledgerRemoveRefByIdMock).toHaveBeenCalledTimes(2);
       expect(ledgerRemoveRefByIdMock).not.toHaveBeenCalledWith(remaining[0]!.id);
     } finally {
       ledgerHasRefMock.mockImplementation(async (params: TestLedgerRef) =>
         ledgerRefs.some(ref => ref.hash === params.hash && ref.refKind === params.refKind && ref.refId === params.refId
           && (params.originKind === undefined || ref.originKind === params.originKind)));
       ledgerAddRefMock.mockImplementation(async (params: TestLedgerRef) => {
-        const id = `ref-${++ledgerRefSeq}`;
+        const id = params.id ?? `ref-${++ledgerRefSeq}`;
         ledgerRefs.push({ ...params, id });
         return id;
       });
@@ -2721,7 +2723,7 @@ describe('oversized ghost result Host storage', () => {
         await fs.promises.writeFile(input.path, input.data);
       });
       ledgerAddRefMock.mockImplementation(async (params: TestLedgerRef) => {
-        const id = `ref-${++ledgerRefSeq}`;
+        const id = params.id ?? `ref-${++ledgerRefSeq}`;
         ledgerRefs.push({ ...params, id });
         return id;
       });
@@ -2891,6 +2893,39 @@ describe('oversized ghost result Host storage', () => {
       const written = writeDocsOutputMock.mock.calls[0]![0].path as string;
       await expect(fs.promises.readFile(path.join(outside, path.basename(written)), 'utf8')).resolves.toBe('unrelated');
     } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
+  });
+
+  // Codex P2: an insert whose row landed but whose response was lost must still roll back.
+  it('rolls back a ref whose insert committed but whose response was lost', async () => {
+    const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ghost-spill-lost-insert-'));
+    try {
+      const deps = makeDeps('codex');
+      sessionSnapshotMock.mockResolvedValue({ workingDir: root, remoteHostId: null, permissionMode: 'auto', planModeEnabled: false });
+      writeDocsOutputMock.mockImplementation(async input => {
+        await fs.promises.mkdir(path.dirname(input.path), { recursive: true });
+        await fs.promises.writeFile(input.path, input.data);
+      });
+      const lost = 'a'.repeat(64);
+      ledgerAddRefMock.mockImplementation(async (params: TestLedgerRef) => {
+        const id = params.id ?? `ref-${++ledgerRefSeq}`;
+        ledgerRefs.push({ ...params, id });
+        if (params.hash === lost) throw new Error('worker exited before the response');
+        return id;
+      });
+      await expect(deps.saveLargeGhostResult!(JSON.stringify({ image: `cindy-media://blobs/${lost}.png` }))).rejects.toThrow('media references unavailable');
+      const reservedId = (ledgerAddRefMock.mock.calls[0]![0] as TestLedgerRef).id;
+      expect(reservedId).toBeTruthy();
+      expect(ledgerRemoveRefByIdMock).toHaveBeenCalledWith(reservedId);
+      expect(ledgerRefs).not.toContainEqual(expect.objectContaining({ hash: lost }));
+      await expect(fs.promises.access(writeDocsOutputMock.mock.calls[0]![0].path)).rejects.toThrow();
+    } finally {
+      ledgerAddRefMock.mockImplementation(async (params: TestLedgerRef) => {
+        const id = params.id ?? `ref-${++ledgerRefSeq}`;
+        ledgerRefs.push({ ...params, id });
+        return id;
+      });
+      await fs.promises.rm(root, { recursive: true, force: true });
+    }
   });
 
   // Codex P1 (round 6): createFolder can time out while the daemon is still running mkdir.

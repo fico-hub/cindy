@@ -625,6 +625,9 @@ async function discardLargeResultFile(
  * 文件,不留没有结果文件的孤立引用。成功时把插入的 id 交给调用方,供后续复验失败回滚。
  */
 async function commitLargeResultMediaRefs(target: LargeResultSpillTarget, relPath: string, text: string, anchor: LocalSpillAnchor | null): Promise<string[]> {
+  // Reserve every ref id *before* the insert RPC: a DB worker that commits the row but
+  // loses its response would otherwise leave an id we never learned and cannot roll back.
+  // Rollback removes all attempted ids (removeRefById is idempotent for rows never written).
   const inserted: string[] = [];
   let failed = 0;
   for (const url of collectChatMediaUrls(text)) {
@@ -633,13 +636,16 @@ async function commitLargeResultMediaRefs(target: LargeResultSpillTarget, relPat
     try {
       await ledger.pinBlob(parsed.hash);
       if (await ledger.hasRef({ hash: parsed.hash, refKind: 'ghost-tool-result', refId: relPath })) continue;
-      inserted.push(await ledger.addRef({
+      const id = randomUUID();
+      inserted.push(id);
+      await ledger.addRef({
+        id,
         hash: parsed.hash,
         refKind: 'ghost-tool-result',
         refId: relPath,
         originSessionId: target.sessionId,
         originKind: 'tool',
-      }));
+      });
     } catch (err) {
       failed += 1;
       log.warn('ghost large result: media ref commit failed for url', {
