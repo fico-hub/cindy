@@ -67,6 +67,26 @@ describe("ghost_call oversized result boundary", () => {
     expect(call).toHaveBeenCalledOnce();
   });
 
+  // Codex P1 (round 13): a rejected callGhostTool must not bypass the bound.
+  it("bounds an oversized thrown error from callGhostTool through the same helper", async () => {
+    const message = "transport failure: " + "y".repeat(200000);
+    const save = vi.fn(async () => "thrown.json");
+    const response = await handleGhostCall({ callGhostTool: async () => { throw new Error(message); }, saveLargeGhostResult: save }, input);
+    expect(Buffer.byteLength(JSON.stringify(response))).toBeLessThanOrEqual(GHOST_RESULT_MAX_BYTES);
+    expect(response.isError).toBe(true);
+    const projected = JSON.parse(response.content[0].text);
+    expect(projected).toMatchObject({ ok: false, errorCode: "INTERNAL", saved_to: "thrown.json", truncated: true, complete_result_saved: true });
+    expect(save).toHaveBeenCalledOnce();
+    expect(JSON.parse(save.mock.calls[0]![0] as string).message).toBe(message);
+  });
+
+  it("keeps a small thrown error byte for byte", async () => {
+    const save = vi.fn();
+    const response = await handleGhostCall({ callGhostTool: async () => { throw new Error("boom"); }, saveLargeGhostResult: save }, input);
+    expect(response).toEqual({ content: [{ type: "text", text: JSON.stringify({ ok: false, errorCode: "INTERNAL", message: "boom" }) }], isError: true });
+    expect(save).not.toHaveBeenCalled();
+  });
+
   it("retains the original error status for an oversized plugin failure", async () => {
     const response = await handleGhostCall({ callGhostTool: async () => ({ ok: false, errorCode: "INTERNAL", message: "x".repeat(70000) }), saveLargeGhostResult: async () => "error.json" }, input);
     expect(response.isError).toBe(true);

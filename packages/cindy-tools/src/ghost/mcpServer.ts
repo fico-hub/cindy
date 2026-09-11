@@ -987,14 +987,15 @@ export async function handleGhostCall(
       ...mediaHint,
     });
   } catch (err) {
-    return textResult(
-      {
-        ok: false,
-        errorCode: "INTERNAL",
-        message: err instanceof Error ? err.message : String(err),
-      },
-      true,
-    );
+    // Thrown errors (start-up / transport failures) can embed provider-sized
+    // diagnostics: they go through the same bound as every other envelope.
+    const message = err instanceof Error ? err.message : String(err);
+    try {
+      return await boundGhostResult(deps, { ok: false, errorCode: "INTERNAL", message }, true);
+    } catch {
+      // The bounding helper itself failed: still never return an unbounded envelope.
+      return textResult({ ok: false, errorCode: "INTERNAL", message: message.slice(0, 1024), truncated: true }, true);
+    }
   }
 }
 
