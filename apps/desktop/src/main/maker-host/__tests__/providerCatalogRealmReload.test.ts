@@ -93,6 +93,7 @@ vi.mock('../../authManager.js', () => ({
 vi.mock('../../appSessionState.js', () => ({
   getActiveAppSession: () => ({ mode: 'signed-out', dataOwnerId: h.owner }),
   activeOwnerScopeKey: () => `signed-out:${h.owner ?? 'none'}`,
+  isAppSessionBoundaryPending: () => false,
   ownerScopedUserDataPath: (...segments: string[]) =>
     path.join(os.tmpdir(), 'provider-catalog-realm-reload', h.owner, ...segments),
 }));
@@ -136,6 +137,7 @@ vi.mock('../../secrets/providerSecretStore.js', () => ({
   genericOAuthSecretIo: {},
   readCustomProviderHeaders: () => null,
   readCustomProviderKey: () => null,
+  getProviderSecretStore: () => ({ get: () => null }),
   setProviderSecretsClearedListener: () => undefined,
   addProviderSecretsClearedListener: () => undefined,
 }));
@@ -243,7 +245,7 @@ describe('provider catalog realm reload', () => {
         staleToken: 'rejected-token',
       }),
     ).resolves.toBe('fresh-token');
-    expect(h.recoverGrokAuthAfterRejection).toHaveBeenLastCalledWith('rejected-token');
+    expect(h.recoverGrokAuthAfterRejection).toHaveBeenLastCalledWith('rejected-token', 'xai');
 
     h.recoverGrokAuthAfterRejection.mockResolvedValueOnce('unchanged');
     await expect(
@@ -832,8 +834,8 @@ describe('provider catalog realm reload', () => {
     expect(projectedAllXd?.imageModels).toEqual([]);
     expect(projectedAllXd?.embeddingModels).toEqual([]);
     expect(projectedAllXd?.videoModels?.map((model) => model.id)).not.toContain('happyhorse');
-    expect(projectedAll.providers.find((provider) => provider.id === 'xai')?.videoModels).toEqual(
-      inheritedXai.videoModels,
+    expect(projectedAll.providers.find((provider) => provider.id === 'xai')?.videoModels?.map(({ id, name }) => ({ id, name }))).toEqual(
+      inheritedXai.videoModels?.map(({ id, name }) => ({ id, name })),
     );
 
     const inheritedEmbedding = structuredClone(inheritedAll);
@@ -996,8 +998,8 @@ describe('provider catalog realm reload', () => {
         videoModels: [],
         embeddingModels: [],
       });
-      expect(projected.providers.find((provider) => provider.id === 'xai')?.videoModels).toEqual(
-        fallbackXai.videoModels,
+      expect(projected.providers.find((provider) => provider.id === 'xai')?.videoModels?.map(({ id, name }) => ({ id, name }))).toEqual(
+        fallbackXai.videoModels?.map(({ id, name }) => ({ id, name })),
       );
       expect(events).toHaveLength(1);
 
@@ -1083,8 +1085,8 @@ describe('provider catalog realm reload', () => {
     expect(xd?.imageModels).toEqual([]);
     expect(xd?.embeddingModels).toEqual([]);
     expect(xd?.videoModels?.map((model) => model.id)).not.toContain('happyhorse');
-    expect(projected.providers.find((provider) => provider.id === 'xai')?.videoModels).toEqual(
-      xai.videoModels,
+    expect(projected.providers.find((provider) => provider.id === 'xai')?.videoModels?.map(({ id, name }) => ({ id, name }))).toEqual(
+      xai.videoModels?.map(({ id, name }) => ({ id, name })),
     );
 
     const recoveredCatalog = structuredClone(fallback);
@@ -1120,7 +1122,7 @@ describe('provider catalog realm reload', () => {
     expect(promotedXd?.imageModels).toEqual([]);
     expect(promotedXd?.embeddingModels).toEqual([]);
     expect(promotedXd?.videoModels).toEqual([]);
-    expect(promoted.providers.find((provider) => provider.id === 'xai')?.videoModels).toEqual(
+    expect(promoted.providers.find((provider) => provider.id === 'xai')?.videoModels?.map(({ id, name }) => ({ id, name }))).toEqual(
       recoveredXai.videoModels,
     );
   });

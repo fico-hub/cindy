@@ -74,7 +74,7 @@ import {
   CONTACTS_RULES_ENABLED,
 } from '../../contacts/system-prompt.js';
 import { MemoryFlushController } from '../../memory/flush-controller.js';
-import { buildMemoryScopeKey } from '../../memory/storage.js';
+import { resolveMemoryScopeKey } from '../../memory/scope-resolver.js';
 import type {
   Capabilities,
   EffortDescriptor,
@@ -964,7 +964,9 @@ export class ClaudeCodeAgent extends BaseAgent {
    */
   private async refreshSubscriptionTokenInPlace(env: Record<string, string>): Promise<string | null> {
     try {
-      const fresh = await this.deps.auth.getFreshSubscriptionToken!(env.CLAUDE_CODE_OAUTH_TOKEN);
+      const fresh = env.CINDY_CLAUDE_ACCOUNT_PROVIDER_ID
+        ? await this.deps.auth.getFreshSubscriptionToken!(env.CLAUDE_CODE_OAUTH_TOKEN, env.CINDY_CLAUDE_ACCOUNT_PROVIDER_ID)
+        : await this.deps.auth.getFreshSubscriptionToken!(env.CLAUDE_CODE_OAUTH_TOKEN);
       if (fresh) env.CLAUDE_CODE_OAUTH_TOKEN = fresh;
       return fresh ?? null;
     } catch (e) {
@@ -1213,7 +1215,12 @@ export class ClaudeCodeAgent extends BaseAgent {
             providerId: opts.providerId,
             model: opts.model,
           });
-    const authOptions = credentialMode ? { credentialMode } : undefined;
+    const authOptions = credentialMode
+      ? {
+          credentialMode,
+          ...(credentialMode !== 'gateway-key' && opts.providerId ? { providerId: opts.providerId } : {}),
+        }
+      : undefined;
     const authState = await this.deps.auth.getState(authOptions);
     if (!authState.authenticated) {
       throw new AgentNotAuthenticatedError(
@@ -1492,10 +1499,13 @@ export class ClaudeCodeAgent extends BaseAgent {
       : opts.makerMemoryEnabled ?? this.deps.runtimeConfig.makerMemoryEnabled ?? false;
     const makerMemory = this.deps.makerMemory;
     const makerMemoryEnabled = makerMemoryFlag === true && !!makerMemory;
-    // SSH remote 的 workingDir 是远端路径 — store 定位统一经 scope key,
-    // 键规则与理由见 buildMemoryScopeKey (memory/storage.ts)。
-    const memoryScopeKey =
-      opts.makerMemoryScopeKey ?? buildMemoryScopeKey(opts.workingDir, opts.remoteHostId);
+    // SSH remote 的 workingDir 是远端路径 — store 定位统一经 scope key;
+    // 本地会话额外做 git worktree 归一化 (#2379)。已注入的 makerMemoryScopeKey
+    // (含 bot:) 原样透传。Maker Memory 关闭时跳过 git 探测 (Codex #2399 P1):
+    // 解析结果本就不会被用, 失败还能空耗 3s timeout。
+    const memoryScopeKey = makerMemoryEnabled
+      ? (opts.makerMemoryScopeKey ?? (await resolveMemoryScopeKey(opts.workingDir, opts.remoteHostId)))
+      : (opts.makerMemoryScopeKey ?? opts.workingDir);
     // This per-session injection flag must not mutate the shared manager.
     if (makerMemoryEnabled && makerMemory) {
       try {
@@ -1612,7 +1622,7 @@ export class ClaudeCodeAgent extends BaseAgent {
       const context: McpProviderContext = {
         agentKind: 'claude-code' as const,
         workingDir: opts.workingDir,
-        ...(opts.makerMemoryScopeKey ? { memoryScopeKey: opts.makerMemoryScopeKey } : {}),
+        ...((makerMemoryEnabled || opts.makerMemoryScopeKey) ? { memoryScopeKey } : {}),
         vendorOptions: vo,
         // business sessionId 由 maker.createSession 通过 opts.sessionId 注入
         // (见 maker.ts: agent.startSession({...opts, sessionId: id}))。MCP server
@@ -2632,9 +2642,10 @@ export class ClaudeCodeAgent extends BaseAgent {
     // ── Usage tracker (Stage 2 B') ──────────────────────────────────────────
     // 单 session 共享的 mutable usage state. translator 通过 ctx 注入访问.
     // handle.getUsageSnapshot 也读它, 形成"SDK 原始 usage → tracker → status event / handle snapshot"
-    // 单一可信源. 窗口跟白名单同一份实时目录,不冻启动快照。
+    // 单一可信源。预算跟随已应用的进程配置；设置变更等待重建后才反映到用量。
+    let appliedContextWindow = resolveModelContextWindow(mutableModel);
     const usageTracker = new UsageTracker();
-    usageTracker.setContextWindow(resolveModelContextWindow(mutableModel) ?? 0);
+    usageTracker.setContextWindow(appliedContextWindow ?? 0);
 
     // ── 跨 turn 共享状态 ───────────────────────────────────────────────────
     let configuredResumeSessionId: string | undefined = opts.resumeSessionId;
@@ -3056,6 +3067,7 @@ export class ClaudeCodeAgent extends BaseAgent {
     }): Promise<Query> => {
       const currentSdkModel = sdkModelFor(mutableModel);
       const workingWindow = resolveModelContextWindow(mutableModel);
+      appliedContextWindow = workingWindow;
       applyClaudeContextWindow(env, workingWindow, this.deps.runtimeConfig.autoCompactThresholdPct);
       if (remoteEnv) applyClaudeContextWindow(remoteEnv, workingWindow, this.deps.runtimeConfig.autoCompactThresholdPct);
       const currentSdkEffort = getSdkEffortForModel(mutableModel, mutableEffort);
@@ -3290,7 +3302,7 @@ export class ClaudeCodeAgent extends BaseAgent {
           makerMemoryEnabled,
           // 同一个 scope key 也必须随注册的 session ctx 走: prompt 段用它读索引
           // (上方 memoryScopeKey), 远端工具侧不给就会回落到 workdir 键。
-          ...(opts.makerMemoryScopeKey ? { makerMemoryScopeKey: opts.makerMemoryScopeKey } : {}),
+          ...((makerMemoryEnabled || opts.makerMemoryScopeKey) ? { makerMemoryScopeKey: memoryScopeKey } : {}),
           onApprovalRequest: async (rawParams: unknown) => {
             // 110s timeout — must respond before daemon's 120s server-request timeout.
             // On timeout, dismiss the pending interaction (clears UI) and reject to
@@ -4908,7 +4920,7 @@ export class ClaudeCodeAgent extends BaseAgent {
               log,
               getModel: () => mutableModel,
               getProviderId: () => mutableProviderId,
-              getModelContextWindow: () => resolveModelContextWindow(mutableModel),
+              getModelContextWindow: () => appliedContextWindow,
               getEffort: () => mutableEffort,
               getPermissionMode: () => mutablePermissionMode,
               getFastMode: () => mutableFastMode,
@@ -6706,6 +6718,7 @@ export class ClaudeCodeAgent extends BaseAgent {
           });
         }
         const newContextWindow = resolveModelContextWindow(mutableModel);
+        appliedContextWindow = newContextWindow;
         if (newContextWindow === undefined) {
           // setContextWindow(0) 是 no-op —— tracker 会静默沿用旧模型窗口直到下一个
           // result 的 modelUsage 修正。UI 环 / auto-compact 期间按旧窗口算(偏乐观),

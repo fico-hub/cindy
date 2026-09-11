@@ -44,9 +44,9 @@
     "viewOnly": "表示のみ",
     "upgrade": "コンピューター側の Cindy を更新してください。",
     "disabled": "コンピューターの設定 → リモート操作でリモートデスクトップを有効にしてください。",
-    "busy": "デスクトップ操作中です。他のデバイスの操作を解除するか、Agent の操作終了を待ってください。",
+    "busy": "他のデバイスまたは Agent がパソコンを操作中です。他のデバイスでの操作を終了するか、Agent の操作が終わるまでお待ちください。",
     "connectionError": "接続が終了しました。コンピューターがオンラインか確認し、再接続してください。",
-    "releaseControl": "操作を解除",
+    "releaseControl": "操作を終了",
     "takeControl": "操作を開始",
     "pointer": "トラックパッド",
     "touch": "タッチ",
@@ -1298,8 +1298,7 @@
             "manual": "手動"
           },
           "toast": {
-            "title": "辞書に自動追加しました",
-            "titleMultiple": "{{count}} 件を辞書に自動追加しました",
+            "title": "辞書に追加しました",
             "termsSummary": "{{terms}} ほか合計 {{count}} 件",
             "automaticAdded": "辞書に自動追加しました：{{term}}",
             "automaticAddedMultiple": "辞書に自動追加しました：{{term}} ほか {{count}} 件",
@@ -1416,7 +1415,7 @@
           "description": "オンにすると Codex はサブスクではなく、モデルプロバイダーの Cindy AI Key を使用します。",
           "noKey": "Cindy AI Key が未設定です。モデルプロバイダーで Cindy AI を接続してください",
           "noKeyDialog": {
-            "title": "API Key が未設定です",
+            "title": "API key が未設定です",
             "description": "API モードは Cindy AI Key を再利用しますが、まだ設定されていません。モデルプロバイダーで Cindy AI を接続すると有効化できます。"
           },
           "badge": {
@@ -1434,25 +1433,25 @@
       "xai": {
         "logoutConfirm": {
           "title": "xAI(SuperGrok)を切断しますか?",
-          "description": "切断するとこの端末に保存された xAI の認証情報が削除されます。再認証するまで Grok モデルを選択したセッションは利用できません。",
-          "confirm": "切断",
+          "description": "Cindy はこの Grok サブスクリプションを使用できなくなります。",
+          "confirm": "接続を解除",
           "cancel": "キャンセル"
         },
         "toast": {
-          "loggedIn": "xAI(SuperGrok)にログインしました",
-          "loggedOut": "xAI を切断しました",
-          "loginFailed": "認証に失敗しました。再試行してください",
-          "logoutFailed": "切断に失敗しました。再試行してください"
+          "loggedIn": "Grok にログインしました",
+          "loggedOut": "Grok の接続を解除しました",
+          "loginFailed": "Grok にログインできませんでした。再試行してください。",
+          "logoutFailed": "Grok の接続を解除できませんでした。再試行してください。"
         }
       },
       "claude": {
         "subtitle": {
-          "authorizing": "認証中（ブラウザ）…",
-          "authorized": "Claude.ai サブスクリプション · 認証済み",
-          "unauthorized": "未認証（「認証」をクリックして Claude.ai にログイン）"
+          "authorizing": "ログイン中…",
+          "authorized": "Claude サブスクリプション · 接続済み",
+          "unauthorized": "未接続"
         },
         "button": {
-          "authorize": "認証"
+          "authorize": "ログイン"
         },
         "badge": {
           "api": "● API",
@@ -1460,17 +1459,17 @@
         },
         "logoutConfirm": {
           "title": "Claude.ai サブスクリプションを切断しますか？",
-          "description": "切断するとこの端末の Claude Code のログイン資格情報が削除されます（ローカルの `claude` CLI もログアウトされます）。サブスクリプションモード中の場合は Cindy AI に自動的に戻ります。復元するには再度認証が必要です。",
-          "confirm": "切断",
+          "description": "Cindy はこの Claude サブスクリプションを使用できなくなります。",
+          "confirm": "接続を解除",
           "cancel": "キャンセル"
         },
         "toast": {
-          "loggedIn": "Claude.ai サブスクリプションにログインしました",
-          "loggedOut": "Claude.ai サブスクリプションを切断しました",
-          "loginFailed": "認証に失敗しました。再試行してください",
-          "logoutFailed": "切断に失敗しました。再試行してください",
+          "loggedIn": "Claude にログインしました",
+          "loggedOut": "Claude の接続を解除しました",
+          "loginFailed": "Claude にログインできませんでした。再試行してください。",
+          "logoutFailed": "Claude の接続を解除できませんでした。再試行してください。",
           "notSubscription": "このアカウントには Claude サブスクリプション（Pro/Max）がありません。サブスクリプションモードは利用できません",
-          "needAuth": "先に Claude.ai にログイン認証してください"
+          "needAuth": "先に Claude にログインしてください"
         },
         "apiMode": {
           "label": "API モード（Cindy AI 経由）",
@@ -1478,7 +1477,7 @@
           "toggleAria": "Claude API モードを切り替え",
           "sharedKeyWarning": "Cindy AI と Key を共有 — API モードをオフにしても Claude 以外のモデルには Cindy AI が必要です",
           "noKeyDialog": {
-            "title": "API Key が未設定です",
+            "title": "API key が未設定です",
             "description": "API モードをオフ（サブスクリプション）にしても、Claude 以外のモデル（gpt / deepseek など）には Cindy AI Key を再利用しますが、まだ設定されていません。モデルプロバイダーで Cindy AI を接続してください。"
           },
           "toast": {
@@ -1498,11 +1497,16 @@
       },
       "pill": {
         "connected": "接続済み",
-        "suspended": "無効"
+        "configured": "設定済み",
+        "disconnected": "未接続",
+        "connecting": "接続中…",
+        "rename": "名前を変更",
+        "suspended": "無効",
+        "unconfigured": "未設定"
       },
       "button": {
-        "authorize": "認証",
-        "logout": "ログアウト",
+        "authorize": "ログイン",
+        "logout": "接続を解除",
         "connect": "接続",
         "disconnect": "切断",
         "cancel": "キャンセル",
@@ -1519,10 +1523,20 @@
         "title": "OpenAI",
         "subtitle": "1 つの ChatGPT アカウントを Codex と Claude の両方で使用",
         "modelLabel": "GPT モデル",
-        "reconnectRequired": "再接続が必要",
-        "connect": "ChatGPT に接続",
-        "reconnect": "ChatGPT に再接続",
-        "cancelConnect": "接続をキャンセル"
+        "reconnectRequired": "再ログイン",
+        "connect": "ローカル Codex アカウントを使う",
+        "reconnect": "再ログイン",
+        "cancelConnect": "キャンセル",
+        "accountSource": {
+          "local": "ローカル Codex アカウント",
+          "oauth": "個別アカウント",
+          "unknown": "既存の OpenAI 接続"
+        },
+        "useLocalAccount": "ローカル Codex アカウントを使う",
+        "addIndependentAccount": "別のアカウントでログイン",
+        "accountSourcesDescription": "既存のローカル Codex 接続を使うか、別のアカウントにログインします。どちらも同じ機能を利用できます。",
+        "independentAccountDescription": "別途保存する ChatGPT アカウントにログインするか、API キーで接続します。",
+        "localUnavailable": "再利用できるローカル接続がありません。既存の接続のアカウントは変更されません。"
       },
       "xai": {
         "title": "xAI",
@@ -1531,7 +1545,7 @@
         "billingLabel": "SuperGrok サブスク直結",
         "asset": {
           "weeklyTitle": "週間上限",
-          "weeklyUsed": "{{percent}}% 使用済み",
+          "weeklyRemaining": "残り {{percent}}%",
           "resetsAt": "{{at}} にリセット",
           "productLine": "{{product}} {{percent}}%",
           "openUsage": "Grok の使用量ページを開く"
@@ -1585,19 +1599,19 @@
       },
       "custom": {
         "tag": "カスタム",
-        "editAria": "編集",
+        "editAria": "接続設定を編集",
         "deleteAria": "削除",
         "save": "保存",
         "cancel": "キャンセル",
         "dialog": {
           "createTitle": "カスタムプロバイダーを追加",
-          "editTitle": "カスタムプロバイダーを編集",
+          "editTitle": "接続設定を編集",
           "desc": "OpenAI / Anthropic 互換のプロバイダーを設定します。"
         },
         "imageGenerationReload": {
           "title": "Codex を再読み込み",
-          "description": "この画像生成設定を保存するには Codex の再読み込みが必要で、現在実行中の Codex タスクは中断されます。",
-          "interrupt": "保存して停止",
+          "description": "この変更を適用するには Codex の再読み込みが必要で、現在実行中の Codex タスクは中断されます。",
+          "interrupt": "続行してタスクを停止",
           "cancel": "キャンセル",
           "close": "閉じる"
         },
@@ -1619,6 +1633,7 @@
           "modelIdPlaceholder": "model-id",
           "modelNamePlaceholder": "表示名",
           "modelContextWindowPlaceholder": "コンテキスト(tokens)",
+          "modelType": "モデルの種類",
           "modelContextWindowTitle": "コンテキストウィンドウ(トークン数)。空欄の場合は保守的な既定値 200K。ウィンドウ表示と圧縮しきい値に影響します。",
           "modelSupportsImageInput": "画像入力に対応",
           "modelSupportsImageInputHelp": "モデルが実際に画像入力へ対応している場合のみ有効にしてください。保存後、新しい Pi タスクで反映されます。",
@@ -1690,8 +1705,8 @@
           "deleteFailed": "削除に失敗しました"
         },
         "deleteConfirm": {
-          "title": "カスタムプロバイダーを削除しますか?",
-          "description": "「{{name}}」の設定とローカルに保存されたキーを削除します。使用中のセッションは既定のソースに戻ります。",
+          "title": "プロバイダーを削除しますか？",
+          "description": "Cindy は「{{name}}」を使用できなくなります。メッセージ履歴は保持され、後から再追加できます。",
           "confirm": "削除",
           "cancel": "キャンセル"
         },
@@ -1722,10 +1737,10 @@
         "authMode": {
           "label": "認証方式",
           "apiKey": "API キー",
-          "oauth": "OAuth サブスクリプション認証",
+          "oauth": "サブスクリプションアカウント",
           "none": "認証なし",
           "noneHelp": "ローカルまたは信頼できるセルフホスト型プロキシ向けです。Cindy は転送前に CLI のサブスクリプション認証情報とアカウントヘッダーを削除します。",
-          "oauthHelp": "OAuth ログインを提供するプロバイダー向けです。ブラウザコールバックまたはデバイスコード方式を選び、保存後にプロバイダー一覧から認証します。認証情報はこのデバイスにのみ暗号化して保存されます。",
+          "oauthHelp": "OAuth ログインに対応したプロバイダー向けです。ブラウザーまたはデバイスコードを選択し、保存後にプロバイダー一覧からログインします。認証情報はこのデバイスに保存されます。",
           "flowLabel": "OAuth フロー",
           "flow": {
             "authorization-code": "ブラウザコールバック（PKCE）",
@@ -1738,7 +1753,7 @@
             "clientId": "Client ID",
             "scopes": "Scopes（スペース区切り）"
           },
-          "modelsAutoNote": "モデル一覧は認可の完了後に自動取得されます。手動入力は不要です。"
+          "modelsAutoNote": "ログイン後に利用可能なモデルを自動取得"
         },
         "advanced": {
           "label": "詳細設定（モデル / リクエストヘッダー）"
@@ -1815,7 +1830,7 @@
         "subscription": "サブスク",
         "subscriptionProduct": "{{product}} サブスク",
         "noResults": "一致するモデルがありません",
-        "capabilityNote": "{{agent}} では利用不可",
+        "capabilityNote": "{{agent}} は未設定",
         "refreshAria": "モデル一覧を更新(追加のみ)",
         "refreshBuiltinAria": "モデル一覧を更新",
         "refreshingAria": "モデル一覧を更新中…",
@@ -1828,7 +1843,7 @@
         "paymentRequired": "有料",
         "paymentUnlock": "有料で解放",
         "enableModel": "このモデルを有効にする",
-        "capabilityGroupHint": "チャットのモデル選択には表示されず、画像生成などの機能でのみ使用されます。",
+        "capabilityGroupHint": "チャットのモデル選択には表示されません。スイッチで画像・動画機能への掲載を制御します。",
         "accessWriteFailed": "変更を保存できませんでした。もう一度お試しください。",
         "visibilityWriteFailed": "モデルの表示設定を保存できませんでした。もう一度お試しください。問題が解決しない場合は、Cindy を再起動してください。",
         "disabledGroup": "無効",
@@ -1891,6 +1906,7 @@
           "engines": "エンジン対応",
           "enginesHint": "互換モードはリクエストを変換します。初期状態ではオフですが、必要に応じて有効にできます。",
           "engineUnsupported": "非対応",
+          "engineNotConfigured": "未設定",
           "engineNoFast": "Fast なし",
           "vision": {
             "vision": "対応",
@@ -1911,7 +1927,7 @@
           "close": "閉じる",
           "maxOutput": "最大出力",
           "catalogCapabilities": "カタログに記載された機能",
-          "contextInvalid": "1～100,000 K の整数を入力してください。",
+          "contextInvalid": "{{min}}～100,000 K の整数を入力してください。",
           "contextWriteFailed": "保存できませんでした。再試行してください。",
           "contextMixed": "実行環境ごとに設定が異なります。変更やリセットはすべてに適用されます。",
           "inputModalities": "入力形式",
@@ -1965,24 +1981,24 @@
         }
       },
       "genericOAuth": {
-        "subtitle": "サブスクリプション認証（OAuth）",
+        "subtitle": "サブスクリプションアカウント",
         "toast": {
           "loggedIn": "{{name}} にログインしました",
-          "loginFailed": "{{name}} へのログインに失敗しました。再試行してください",
-          "loggedOut": "{{name}} からログアウトしました",
-          "logoutFailed": "{{name}} からのログアウトに失敗しました"
+          "loginFailed": "{{name}} にログインできませんでした。再試行してください。",
+          "loggedOut": "{{name}} の接続を解除しました",
+          "logoutFailed": "{{name}} の接続を解除できませんでした。再試行してください。"
         },
         "logoutConfirm": {
-          "title": "{{name}} からログアウトしますか？",
-          "description": "ログアウトするとこのソースのモデルは利用できなくなります。いつでも再ログインできます。",
-          "confirm": "ログアウト",
+          "title": "「{{name}}」の接続を解除しますか？",
+          "description": "Cindy は「{{name}}」を使用できなくなります。プロバイダーは保持され、後から再接続できます。",
+          "confirm": "接続を解除",
           "cancel": "キャンセル"
         }
       },
       "addProvider": "プロバイダーを追加",
       "detail": {
         "singleAgentNote": "{{agent}} のみ対応",
-        "emptyModels": "認証すると利用可能なモデルが自動的に検出されます",
+        "emptyModels": "ログイン後に利用可能なモデルを自動取得",
         "emptyList": "左下の「プロバイダーを追加」から最初のモデルソースを接続してください",
         "emptyModelsConnected": "接続済み — 利用可能なモデルを検出中です。空のままの場合は、しばらくしてから再度お試しください。",
         "discoveryFailed": {
@@ -1990,7 +2006,7 @@
           "timeout": "このプロバイダーへの接続がタイムアウトしたため、モデル一覧を取得できません。ネットワークを確認してから再試行してください。",
           "upstream": "このプロバイダーは現在モデル一覧を返せません。しばらくしてから再試行してください。",
           "regionBlocked": "このプロバイダーは現在の地域でサービスを提供していないため、モデル一覧を取得できません。別のプロバイダーをご利用ください。",
-          "unauthorized": "このプロバイダーが現在の認証を拒否したため、モデル一覧を取得できません。切断してから接続し直してください。",
+          "unauthorized": "現在のログインまたは API key が拒否されたため、モデル一覧を取得できません。再ログインするか API key を更新してください。",
           "forbidden": "このプロバイダーがリクエストを拒否したため、モデル一覧を取得できません。プロキシまたは VPN をご利用の場合は、出口を変えてから再試行してください。",
           "rejected": "このプロバイダーがリクエストを拒否したため、モデル一覧を取得できません。しばらくしてから再試行するか、別のプロバイダーをご利用ください。",
           "empty": "このプロバイダーから利用可能なモデルが返されませんでした。アカウントの権限を確認してから再試行してください。"
@@ -2000,7 +2016,7 @@
           "timeout": "このプロバイダーへの接続がタイムアウトしました。以下は前回取得したモデル一覧です。ネットワークを確認してから再試行してください。",
           "upstream": "このプロバイダーは現在モデル一覧を返せません。以下は前回取得した一覧です。しばらくしてから再試行してください。",
           "regionBlocked": "このプロバイダーは現在の地域でサービスを提供していません。以下は前回取得したモデル一覧です。別のプロバイダーをご利用ください。",
-          "unauthorized": "このプロバイダーが現在の認証を拒否しました。以下は前回取得したモデル一覧です。切断してから接続し直してください。",
+          "unauthorized": "現在のログインまたは API key が拒否されました。前回のモデル一覧を表示しています。再ログインするか API key を更新してください。",
           "forbidden": "このプロバイダーがリクエストを拒否しました。以下は前回取得したモデル一覧です。プロキシまたは VPN をご利用の場合は、出口を変えてから再試行してください。",
           "rejected": "このプロバイダーがリクエストを拒否しました。以下は前回取得したモデル一覧です。しばらくしてから再試行するか、別のプロバイダーをご利用ください。",
           "empty": "今回このプロバイダーから利用可能なモデルが返されませんでした。以下は前回取得した一覧です。アカウントの権限を確認してから再試行してください。"
@@ -2010,8 +2026,8 @@
       },
       "detect": {
         "groupLabel": "このデバイスで検出",
-        "action": "認証する",
-        "hintLoggedIn": "{{cli}} はこのデバイスでログイン済みです。認証してすぐに接続できます",
+        "action": "ローカルアカウントを使用",
+        "hintLoggedIn": "{{cli}} はログイン済みです。ローカルアカウントを使用できます。",
         "hintInstalled": "このデバイスに {{cli}} がインストールされています"
       },
       "wizard": {
@@ -2024,21 +2040,21 @@
         "searchPlaceholder": "プロバイダーを検索…",
         "groupRecommend": "おすすめ",
         "groupDetectedLocal": "このパソコンで検出",
-        "groupSubscription": "サブスクリプション認証",
+        "groupSubscription": "サブスクリプションアカウント",
         "recommendReason": {
           "has-local-models": "このパソコンにモデルがある",
           "machine-capable": "このパソコンでローカルモデルを動かせる",
-          "subscription": "サブスクリプション認証"
+          "subscription": "サブスクリプションアカウント"
         },
         "groupApiKey": "API とセルフホスト型プロキシ · プリセットはカタログと同期",
         "groupCustom": "カスタム",
-        "metaOAuth": "サブスクリプション認証",
-        "metaApiKey": "API キー",
+        "metaOAuth": "サブスクリプションアカウント",
+        "metaApiKey": "API key",
         "metaNoAuth": "ローカル / セルフホスト · 認証なし",
         "customTitle": "カスタムエンドポイント",
         "customMeta": "OpenAI / Anthropic 互換の任意のモデルソースを接続",
-        "pickHint": "認証方式はプロバイダーの定義で決まります。OAuth エンドポイントとベース URL はプリセットに含まれ、手入力は不要です。",
-        "oauthDesc": "ブラウザでサブスクリプション認証を完了します。API キーは不要です",
+        "pickHint": "接続するアカウントまたはサービスを選択してください。",
+        "oauthDesc": "ブラウザーでログインします。API key は不要です。",
         "deviceOAuthDesc": "ワンタイムデバイスコードを使い、プロバイダーの認証ページで認証します",
         "authorizeInBrowser": "ブラウザで認証",
         "authorizeWithDeviceCode": "デバイスコードを使用",
@@ -2050,8 +2066,8 @@
         "deviceCodeCopied": "デバイスコードをコピーしました",
         "deviceCodeCopyFailed": "デバイスコードをコピーできませんでした",
         "verificationPageOpenFailed": "認証ページを開けませんでした",
-        "authorizedToast": "「{{name}}」に接続しました",
-        "authorizeFailed": "「{{name}}」の認証に失敗しました。もう一度お試しください",
+        "authorizedToast": "{{name}} にログインしました",
+        "authorizeFailed": "{{name}} にログインできませんでした。再試行してください。",
         "nameLabel": "表示名",
         "onlyAgentNote": "このプロバイダーは {{agent}} のみ対応です",
         "endpointLabel": "{{agent}} ベース URL",
@@ -2074,7 +2090,7 @@
         "finish": "追加を完了",
         "cancel": "キャンセル",
         "useApiKey": "API キーで接続する",
-        "metaOAuthOrApi": "サブスク認証 · API キー",
+        "metaOAuthOrApi": "サブスクリプションアカウント · API key",
         "builtinApiKey": {
           "subtitle": "自分の API key で接続",
           "note": "このソースは画像生成モデルを提供し、チャットには参加しません。API key はこの端末のみに保存され(システムキーチェーンで暗号化)、アップロードされません。"
@@ -2210,7 +2226,7 @@
       },
       "builtinApiKey": {
         "subtitle": "API key で接続",
-        "replaceKey": "key を変更",
+        "replaceKey": "接続設定を編集",
         "saveKey": "保存",
         "keyPlaceholder": "API key を貼り付け",
         "toast": {
@@ -2221,33 +2237,25 @@
         },
         "disconnectConfirm": {
           "title": "{{name}} を切断しますか?",
-          "description": "切断するとこの端末に保存された API key が削除され、このソースのモデルは利用できなくなります。いつでも再追加できます。",
+          "description": "この接続の API key を消去します。プロバイダーは保持され、API key を入力すると再利用できます。",
           "confirm": "切断",
           "cancel": "キャンセル"
         }
       },
-      "imagesKey": {
-        "label": "画像生成 API key",
-        "placeholder": "OpenAI プラットフォーム API key を貼り付け",
-        "save": "保存",
-        "clear": "クリア",
-        "toast": {
-          "saved": "画像生成 API key を保存しました",
-          "saveFailed": "画像生成 API key の保存に失敗しました。もう一度お試しください",
-          "cleared": "画像生成 API key をクリアしました",
-          "clearFailed": "画像生成 API key のクリアに失敗しました"
-        }
-      },
       "usage": {
-        "percentUsed": "{{percent}}% 使用済み",
+        "percentRemaining": "残り {{percent}}%",
         "resetsAt": "{{at}} にリセット",
         "claudePlanFallback": "Claude サブスクリプション",
-        "claudeWeekly": "7 日ウィンドウ {{percent}}%",
-        "scopedModel": "{{model}} {{percent}}%",
+        "claudeWeekly": "7日間の残り {{percent}}%",
+        "scopedModel": "{{model}} 残り {{percent}}%",
         "openClaudeUsage": "使用量ページを開く",
         "codexPlanFallback": "ChatGPT サブスクリプション",
-        "codexSecondary": "副ウィンドウ {{percent}}%",
+        "codexSecondary": "第2ウィンドウの残り {{percent}}%",
         "codexResetCredits": "上限リセット券 {{count}} 枚"
+      },
+      "localAccount": {
+        "useClaude": "ローカルの Claude Code アカウントを使用",
+        "unavailable": "利用できるローカルログインがありません。元のアプリにログインするか、別のアカウントを追加してください。"
       }
     },
     "experimental": {
@@ -5561,6 +5569,37 @@
     "cindyMake": {
       "title": "Cindy Make",
       "openToolsDir": "ツールフォルダを開く",
+      "source": {
+        "title": "個人版ソース",
+        "openDir": "ソースコードフォルダーを開く",
+        "prepare": "ソースを準備",
+        "reset": "ソースを削除",
+        "update": "ソースを更新",
+        "preparingAction": "ソースを準備中",
+        "path": "パス",
+        "channel": "チャンネル",
+        "version": "バージョン",
+        "ref": "Ref",
+        "commit": "コミット",
+        "status": {
+          "missing": "個人版のソースコードは未準備です",
+          "pending": "ソースを準備中",
+          "preparing": "個人版のソースコードを準備中です",
+          "ready": "個人版のソースコードを準備しました",
+          "failed": "ソースコードの準備に失敗しました",
+          "cancelled": "ソースの準備を停止しました"
+        },
+        "resetConfirm": {
+          "title": "個人用ソースを削除しますか？",
+          "description": "Cindy が管理するソースディレクトリを削除します。個人版ブランチと、まだパッケージ化していないすべての変更も含まれます。必要になったら、もう一度ソースを準備できます。",
+          "confirm": "ソースを削除",
+          "cancel": "キャンセル"
+        },
+        "branch": "個人版ブランチ",
+        "baseCommit": "ベースライン",
+        "description": "個人版 Cindy のソースコピーです。個人版を作るたびに個人版ブランチから独立した作業ディレクトリを作成し、テスト済みの変更をここへマージします。このディレクトリ自体を直接編集することはありません。",
+        "stop": "停止"
+      },
       "description": "下のカードで本機の環境を確認し、不足するポータブルツールをインストールできます。ネイティブなコンパイラが不足している場合は公式の案内を表示します。",
       "checking": "環境を確認中…",
       "forceManaged": {
@@ -5967,6 +6006,8 @@
     "modelWeeklyLabel": "{{model}} 週間",
     "usedPercent": "使用済み {{percent}}%",
     "remainingPercent": "残り {{percent}}%",
+    "resetIn": "{{duration}}後にリセット",
+    "resetPending": "リセット情報の更新待ち",
     "resetAt": "{{at}} にリセット",
     "noWindows": "クォータ期間のデータはありません",
     "limitRejected": "プランの上限に到達しました。リクエストが拒否される可能性があります",
@@ -7046,6 +7087,7 @@
     }
   },
   "sidebar": {
+    "backToSessions": "セッションに戻る",
     "vendorReadiness": {
       "loading": "利用可否を確認中",
       "ready": "準備完了",
@@ -7119,6 +7161,7 @@
     }
   },
   "bots": {
+    "settingsBack": "設定に戻る",
     "sidebar": {
       "newTaskWith": "{{name}}と新しいタスクを始める"
     },
@@ -7156,6 +7199,7 @@
       "openFailed": "仲間のフォルダを開けませんでした。"
     },
     "profile": {
+      "title": "プロフィール",
       "changeAvatar": "アバターを変更",
       "avatarFailed": "アバターを変更できませんでした。5 MB未満のPNG、JPEG、WebP画像を選択してください。",
       "summary": "自己紹介",
@@ -7237,8 +7281,9 @@
       "empty": "一致する仲間履歴はありません。"
     },
     "lifecycle": {
+      "restartHint": "返事が来ない場合",
       "stoppedBots": "対応が必要な仲間",
-      "title": "稼働状況と履歴",
+      "title": "仲間の管理",
       "description": "仲間を一時停止・再開し、過去のメッセージや成果を探せます。",
       "activeTitle": "仲間は稼働中です",
       "activeDescription": "メッセージの受信、バックグラウンドタスクの実行、他の仲間への連絡ができます。",
@@ -7250,9 +7295,13 @@
       "resume": "仲間を再開",
       "delete": "完全に削除",
       "deleteTitle": "仲間を完全に削除",
-      "deleteDescription": "{{name}} を削除します。性格・つないだチャネル・予定した実行がすべてなくなり、元に戻せません。",
+      "deleteDescription": "{{name}} を削除すると、プロフィール、記憶、作業ディレクトリ、チャンネル接続、自動化タスクが完全に削除されます。タスク履歴と独立したworktreeは保持されます。",
       "working": "更新中…",
-      "actionFailed": "操作が完了しませんでした。しばらくしてから再試行してください。"
+      "actionFailed": "操作が完了しませんでした。しばらくしてから再試行してください。",
+      "restart": "チームメイトを再起動",
+      "restartDescription": "現在の実行を停止して再開の準備をします。会話履歴、メモリ、ファイルは保持されます。",
+      "restarting": "再起動中…",
+      "restarted": "再起動しました。メッセージを送信して続けられます。"
     },
     "backToChat": "チャットに戻る",
     "memoryRecovery": {
@@ -7555,7 +7604,7 @@
       "chooseOne": "設定方法を1つ選択してください",
       "restoreAria": "{{name}} の設定を展開",
       "minimizeAria": "{{name}} の設定を折りたたむ",
-      "completeOnDesktop": "操作対象のデスクトップで設定を完了してください。このカードは自動的に更新されます。",
+      "completeOnDesktop": "リモートのパソコンで設定を完了してください。このカードは自動的に更新されます。",
       "cancel": "キャンセル",
       "cancelling": "キャンセル中…",
       "retry": "再試行",
@@ -7736,6 +7785,7 @@
         "china": "中国",
         "image": "画像",
         "video": "動画",
+        "audio": "音声生成",
         "tts": "音声合成",
         "stt": "音声認識",
         "realtime": "リアルタイム音声",
@@ -9236,8 +9286,8 @@
       "modelSwitchedFastModeOff": "モデルを切り替えました。Fast Mode は無効になりました"
     },
     "remoteDesktopConfirmation": {
-      "title": "制御対象のコンピューターで確認が必要です",
-      "description": "制御対象のコンピューターで Cindy を開き、内容を確認して応答してください。"
+      "title": "リモートのパソコンで確認が必要です",
+      "description": "リモートのパソコンで Cindy を開き、内容を確認して応答してください。"
     },
     "handoff": {
       "card": {
@@ -9598,7 +9648,7 @@
         "switched": "セッション分岐を切り替えました",
         "switchedWithDraft": "分岐を切り替え、元のプロンプトを入力欄に戻しました",
         "runningBlocked": "現在のターンが終了してから分岐を切り替えてください。",
-        "remoteBlocked": "分岐を切り替える前に、操作対象のデスクトップを再接続または更新してください。",
+        "remoteBlocked": "分岐を切り替える前に、リモートのパソコンを再接続または更新してください。",
         "filesWarning": "切り替わるのは会話コンテキストだけで、作業ファイルは巻き戻りません。",
         "summarize": "離れる分岐を要約する（モデルを使用）",
         "summaryFocus": "任意：要約の重点（例：エラー処理の結論を残す）",
@@ -11231,6 +11281,10 @@
       }
     },
     "scanResult": {
+      "rejectedTitle": "審査で却下されました",
+      "rejectedDesc": "このバージョンは審査に通りませんでした。以下の指摘を修正して、再度公開してください。",
+      "rejectionReasonUnavailable": "このバージョンは審査に通りませんでしたが、具体的な理由は提供されていません。詳細は審査担当者にお問い合わせください。",
+      "rejectionReason": "却下理由",
       "dismiss": "了解",
       "passedTitle": "セキュリティスキャン通過",
       "passedDesc": "このバージョンはすべてのセキュリティチェックに合格し、マーケットに公開されました。",
@@ -11450,6 +11504,7 @@
       "qrExpired": "QR コードが期限切れです。最初からやり直してください",
       "registrationFailed": "作成に失敗しました。後でもう一度お試しください",
       "silentStopExhausted": "モデルが空の応答を繰り返し返したため、自動再開を一時停止しました。「続行」をクリックしてタスクを再開してください。",
+      "outputLimit": "モデルが出力上限に達したため、この応答は不完全な可能性があります。次のメッセージを送信して続行できます。",
       "permissionTightenInterruptFailed": "権限を厳格化する際に実行中のタスクを停止できませんでした。タスクは終了まで確認なしで実行され続ける可能性があります。必要に応じて手動で停止してください。",
       "codexAutoReviewUnavailable": "自動レビューは一時的に利用できません。現在の操作をブロックし、デフォルト権限に切り替えました。もう一度実行してください。必要な場合は確認します。",
       "hostShellCommandBlocked": "Cindy は内蔵 iOS シミュレータを迂回するシェルコマンドをブロックしました。デバイスの操作、アプリの起動、画面操作、スクリーンショット、診断には iOS シミュレータツールを使用してください。",
@@ -11502,7 +11557,7 @@
       "goToSettings": "設定を開く",
       "remoteCodexBinaryMissingTitle": "リモートデバイスの Codex コンポーネントが未準備です",
       "remotePiBinaryMissingTitle": "リモートデバイスの Pi コンポーネントが未準備です",
-      "remoteAuthDescription": "操作対象のデバイス「{{device}}」で設定を完了してから、ここでセッションを開始できます。そのデバイスで設定してから再試行してください。",
+      "remoteAuthDescription": "リモートデバイス「{{device}}」で設定を完了してから、ここでセッションを開始できます。そのデバイスで設定してから再試行してください。",
       "remoteCodexNoSourceTitle": "リモートデバイスに利用可能な Codex ソースがありません",
       "remoteCodexNoSourceDescription": "デバイス「{{device}}」には Codex で利用可能なモデルソースが接続されていないため、ここからセッションを開始できません。そのデバイスで {{appName}} を開き、「設定 → プロバイダー」で OpenAI にログインするか他のソースを接続してから再試行してください。",
       "remoteCcNoSourceTitle": "リモートデバイスに利用可能な Claude ソースがありません",
@@ -12161,6 +12216,11 @@
     "compression": "長い内容を短くまとめるために。"
   },
   "routines": {
+    "unsavedTitle": "未保存の変更があります",
+    "unsavedDescription": "戻ると、このルーチンへの変更が破棄されます。",
+    "discard": "変更を破棄",
+    "continueEditing": "編集を続ける",
+
     "title": "ルーティン",
     "add": "ルーティンを追加",
     "back": "ルーティンに戻る",
@@ -12310,7 +12370,7 @@
       }
     },
     "upstream": {
-      "pending": "すべての環境チェックに合格すると、上流の検索を自動で開始します。",
+      "pending": "環境とソースの準備が完了すると、上流の検索を自動で開始します。",
       "needsRequest": "変更内容の入力待ち",
       "needRequest": "変更したい機能名や具体的なエラーを入力して、関連する上流の内容を検索します。",
       "placeholder": "例：メッセージ表示のちらつきを修正",
@@ -12328,8 +12388,6 @@
       "wait": "上流を待つ",
       "personal": "個人版の作成を続ける",
       "retry": "環境を再確認して検索",
-      "expand": "上流の結果を表示",
-      "collapse": "上流の結果を隠す",
       "count": "関連する可能性のあるオープン Issue／PR が {{count}} 件見つかりました",
       "kind": {
         "issue": "Issue",
@@ -12347,7 +12405,7 @@
       },
       "decisionHint": {
         "wait": "このフローは停止しました。通知の購読や自動更新は設定していません。",
-        "personal": "選択をこのカードに記録しました。ソースの準備とビルドはまだ未対応です。ソースの取得や変更は行っていません。"
+        "personal": "選択を記録しました。Cindy がソースディレクトリで実装用のセッションを作成しています。"
       },
       "failure": {
         "network": "GitHub に接続できません。接続を確認して再試行してください。",
@@ -12358,6 +12416,61 @@
     },
     "title": "Cindy Make",
     "stepEnvironment": "1 · 環境の準備",
-    "stepUpstream": "2 · 上流の検索"
+    "stepUpstream": "3 · 上流の検索",
+    "stepSource": "2 · ソースを準備",
+    "source": {
+      "preparing": "ソースを準備しています",
+      "phase": {
+        "checking": "Git とソースを確認中",
+        "cloning": "ソースをダウンロード中",
+        "fetching": "リポジトリを更新中",
+        "checkingOut": "バージョンを切替中",
+        "preparingBranch": "個人版ブランチを準備中"
+      },
+      "ready": "ソースの準備が完了しました",
+      "failed": "ソースの準備に失敗しました",
+      "cancelled": "ソースの準備を停止しました",
+      "errors": {
+        "unsupportedVersion": "現在のバージョン形式はサポートされていません。",
+        "tagNotFound": "現在のバージョンに必要なタグが見つかりません。",
+        "dirty": "ソースディレクトリに未コミットの変更があります。設定の Cindy Make でソースをクリアしてから再試行してください。",
+        "gitFailed": "Git でソースを準備できませんでした。",
+        "cancelled": "ソースの準備を停止しました。",
+        "localCommits": "ソースに上流に含まれないローカルコミットまたはスタッシュがあります。削除する前に保存またはバックアップしてください。",
+        "environmentNotReady": "ビルド環境の準備ができていません。必要なツールを確認してください。",
+        "gitUnavailable": "Git を利用できません。環境カードで Git を確認してインストールし、再試行してください。",
+        "installFailed": "依存関係のインストールに失敗しました。再試行してください。",
+        "locked": "一部のファイルが他のプログラムで使用中のため削除できません。そのプログラムを閉じるか Cindy を再起動してから再試行してください。"
+      },
+      "gitProgress": {
+        "counting": "オブジェクトを集計中",
+        "compressing": "オブジェクトを圧縮中",
+        "receiving": "オブジェクトを受信中",
+        "resolving": "差分を解決中",
+        "checkingOut": "ファイルを更新中"
+      },
+      "missing": "ソースはまだ準備されていません",
+      "personalBranch": "個人版ブランチ {{branch}}",
+      "baseCommit": "{{ref}} {{commit}} を基準"
+    },
+    "code": {
+      "starting": "個人版タスクを開いています",
+      "started": "個人版タスクを作成しました",
+      "failed": "個人版タスクを作成できませんでした",
+      "start": "個人版を作成",
+      "open": "個人版タスクを開く",
+      "sendFailed": "要求を送信できませんでした。個人版タスクを開いて再試行してください",
+      "preparingWorkspace": "独立した作業ディレクトリを作成し、依存関係をインストールしています",
+      "workspace": "作業ディレクトリ {{branch}}"
+    },
+    "complete": {
+      "title": "個人版の変更が完了しました",
+      "description": "エージェントが要望どおりにソースの変更を完了しました。",
+      "stepCode": "ソースを変更",
+      "changedFiles_one": "{{count}} 個のファイルを変更",
+      "changedFiles_other": "{{count}} 個のファイルを変更",
+      "commit": "{{commit}} を基準",
+      "branch": "{{branch}} にコミット済み"
+    }
   }
 }

@@ -21,8 +21,8 @@ import { Check, Info, Plus, Search } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { toast } from '@/lib/toast';
 import { Spinner } from '@/components/ui/spinner';
-import { createCustomProvider, type RuntimeKeys } from '@/lib/customProviders';
-import { PROVIDER_SECRET_IDS } from '../../../shared/providerSecrets';
+import { createCustomProvider, deleteCustomProvider, type RuntimeKeys } from '@/lib/customProviders';
+import { isBuiltinApiKeyProviderId } from '../../../shared/providerSecrets';
 import { CURRENT_CINDY_REGION } from '../../../shared/brandRegion';
 import { configuredPresetAgents } from '../../../shared/piRuntimeInitialization';
 import { uniqueCustomProviderId } from '@/lib/customProviderId';
@@ -37,14 +37,15 @@ import { extractIpcError } from '@/utils/ipcError';
 import { pickWizardRecommend, type WizardRecommend } from './wizardRecommend';
 import { localCliDisplayName, type LocalCliDetection } from '../../../shared/localCliDetect';
 import { providerMonogram } from '@/lib/providerModels';
-import { isChatGptConnectionConnected, useCodexAuth } from '@/hooks/useCodexAuth';
 import { useProviderOAuthDeviceCode } from '@/hooks/useProviderOAuthDeviceCode';
+import { acquireCodexLogin, type CodexLoginLease } from '@/hooks/codexAuthLogin';
 import { hasProviderLogo, ProviderLogoMark } from '@/components/icons/ProviderLogoMark';
 import { LocalOllamaInstall, offersManagedOllamaInstall } from './LocalOllamaInstall';
 import { OAuthDeviceCodeCard } from './OAuthDeviceCodeCard';
 import { SettingsTextInput } from './SettingsTextInput';
 
 import {
+  PROVIDER_MEDIA_FIELDS,
   isLoopbackProviderUrl,
   isProviderRequestPath,
   presetDisplayName,
@@ -322,6 +323,10 @@ function GroupLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
+function hasRetainedBuiltinConnection(provider: ProviderView): boolean {
+  return !provider.removed && (provider.connected || provider.removed === false);
+}
+
 export function AddProviderWizard({
   providers,
   entry,
@@ -330,7 +335,13 @@ export function AddProviderWizard({
   onDone,
 }: AddProviderWizardProps) {
   const { t, i18n } = useTranslation();
-  const codexAuth = useCodexAuth();
+
+  // Native credentials alone do not mean this Cindy account has added the local
+  // connection. Keep the slot occupied when suspended or awaiting reconnection.
+  const localOpenAiAlreadyAdded = providers.some(
+    provider => provider.id === 'openai' &&
+      !provider.removed && (provider.connected || provider.removed === false || provider.openAiAccount?.reconnectRequired === true),
+  );
 
   const [presets, setPresets] = useState<ProviderPreset[]>([]);
   const [query, setQuery] = useState('');
@@ -460,29 +471,30 @@ export function AddProviderWizard({
     };
   }, []);
 
-  // Step 1 数据:未连接的 OAuth 渠道(bespoke 三家 + 目录通用 OAuth;xd 凭据自动下发不进向导)。
+  // Native subscription brands remain available for adding another independent account.
   const oauthChoices = useMemo(
     () =>
       providers.filter(
         (p) =>
           p.id !== 'xd' &&
           p.source === 'builtin' &&
-          !p.connected &&
+          (!hasRetainedBuiltinConnection(p) || ['anthropic', 'openai', 'xai'].includes(p.id)) &&
           (['anthropic', 'openai', 'xai'].includes(p.id) ||
             (p.auth.method === 'oauth' && !!p.auth.oauth)),
       ),
     [providers],
   );
-  // 内置 API-key 渠道(auth.method 'apiKey' 的 builtin 条目,今天只有 gemini 图像来源):
-  // 已连接的不再进向导;声明了媒体清单才展示(纯占位条目没有可配置的能力面)。
+  // 内置 API-key 渠道(auth.method 'apiKey' 的 builtin 条目):
+  // 已添加（包括断开后保留）的连接不再进向导；声明了媒体清单才展示。
   const builtinApiKeyChoices = useMemo(
     () =>
       providers.filter(
         (p) =>
           p.source === 'builtin' &&
           p.auth.method === 'apiKey' &&
-          !p.connected &&
-          ((p.imageModels?.length ?? 0) > 0 || (p.videoModels?.length ?? 0) > 0),
+          isBuiltinApiKeyProviderId(p.id) &&
+          !hasRetainedBuiltinConnection(p) &&
+          PROVIDER_MEDIA_FIELDS.some((field) => (p[field]?.length ?? 0) > 0),
       ),
     [providers],
   );
@@ -664,44 +676,94 @@ export function AddProviderWizard({
     if (preset) pickPreset(preset);
   }, [entry, presets, pickPreset]);
 
-  /**
-   * 本向导内是否发起过 OpenAI 登录。codexAuth 反映的是整机 ChatGPT 凭证,不含
-   * 「凭证归哪个账号」的 native binding —— 换账号后本机可能已有别人绑定的登录,
-   * 此时 codexAuth 一挂载就是 connected;若不加此限定,检测建议直达打开的向导会
-   * 挂载即自关,既不弹任何 UI 也不给当前账号补绑定,「去授权」永远点不出效果。
-   */
-  const openaiLoginStartedRef = useRef(false);
+  const accountLoginRef = useRef<{ providerId: string; ownerId: string } | null>(null);
+  const localLoginRef = useRef<{ cancel: () => void } | null>(null);
+  useEffect(() => () => {
+    const localLogin = localLoginRef.current;
+    localLoginRef.current = null;
+    localLogin?.cancel();
+    const login = accountLoginRef.current;
+    accountLoginRef.current = null;
+    if (login) void window.electronAPI.maker.providerOAuthCancel(login.providerId, { ownerId: login.ownerId, releaseOwner: true });
+  }, []);
+
+  const useLocalOpenAiAccount = useCallback(async () => {
+    setLoggingIn(true);
+    let lease: CodexLoginLease | undefined;
+    const login = { cancel: () => lease?.release({ cancelIfLastOwner: true }) };
+    localLoginRef.current = login;
+    try {
+      lease = acquireCodexLogin('local');
+      const state = await lease.promise;
+      if (localLoginRef.current !== login) return;
+      if (state.authenticated && state.authSource === 'oauth' && state.credentialScope === 'system-shared') {
+        onDone('openai');
+      } else if (state.errorReason !== 'login_cancelled') {
+        toast.error(t('settings.providers.openai.localUnavailable'));
+      }
+    } catch {
+      if (localLoginRef.current === login) toast.error(t('settings.providers.openai.localUnavailable'));
+    } finally {
+      lease?.release();
+      if (localLoginRef.current === login) {
+        localLoginRef.current = null;
+        setLoggingIn(false);
+      }
+    }
+  }, [onDone, t]);
+
+  const useLocalClaudeAccount = useCallback(async () => {
+    setLoggingIn(true);
+    const loginKey = crypto.randomUUID();
+    const login = { cancel: () => { void window.electronAPI.maker.claudeOAuthCancel(loginKey).catch(() => undefined); } };
+    localLoginRef.current = login;
+    try {
+      const result = await window.electronAPI.maker.claudeOAuthLogin(loginKey);
+      if (localLoginRef.current !== login) return;
+      if (result.ok) onDone('anthropic');
+      else if (result.reason !== 'login_cancelled') toast.error(t('settings.providers.localAccount.unavailable'));
+    } catch { if (localLoginRef.current === login) toast.error(t('settings.providers.localAccount.unavailable')); }
+    finally {
+      if (localLoginRef.current === login) {
+        localLoginRef.current = null;
+        setLoggingIn(false);
+      }
+    }
+  }, [onDone, t]);
 
   // ── OAuth 授权(复用既有鉴权流;成功即完成,无第 3 步)────────────────────
   const handleAuthorize = useCallback(
-    async (mode: 'browser' | 'device-code' = 'browser') => {
+    async () => {
       if (!sel || sel.kind !== 'oauth') return;
-      const id = sel.provider.id;
+      let id = sel.provider.id;
       clearGenericDeviceCode();
       setLoggingIn(true);
       try {
         let ok = false;
-        if (id === 'anthropic') {
-          const r = await window.electronAPI.maker.claudeOAuthLogin();
-          ok = r.ok;
-          if (!r.ok && r.reason === 'not_a_subscription') {
-            toast.error(t('settings.connections.claude.toast.notSubscription'));
-            return;
+        if (id === 'openai' || id === 'anthropic' || id === 'xai') {
+          const brand = id;
+          const native = brand === 'openai' ? 'codex' as const : brand === 'anthropic' ? 'claude' as const : 'xai' as const;
+          id = `${brand}-${crypto.randomUUID().slice(0, 8)}`;
+          const login = { providerId: id, ownerId: crypto.randomUUID() };
+          accountLoginRef.current = login;
+          let created = false;
+          try {
+            await createCustomProvider({ id, name: sel.provider.name, auth: { method: 'oauth', native },
+              runtimes: brand === 'anthropic'
+                ? { 'claude-code': { baseUrl: 'https://api.anthropic.com', wireProtocol: 'anthropic-messages', models: [] } }
+                : { codex: { baseUrl: brand === 'openai' ? 'https://chatgpt.com/backend-api/codex' : 'https://api.x.ai/v1', wireProtocol: 'openai-responses', models: [] } },
+            }, {});
+            created = true;
+            if (accountLoginRef.current !== login) return;
+            const result = await window.electronAPI.maker.providerOAuthLogin(id, { ownerId: login.ownerId });
+            if (accountLoginRef.current !== login || result.reason === 'login_cancelled') return;
+            // A late success belongs to a cancelled wizard until ownership is checked.
+            // Keep ok false so finally also removes credentials committed before cancellation.
+            ok = result.ok;
+          } finally {
+            if (accountLoginRef.current === login) accountLoginRef.current = null;
+            if (created && !ok) await deleteCustomProvider(id);
           }
-          if (!r.ok && r.reason === 'login_cancelled') return;
-        } else if (id === 'openai') {
-          if (codexAuth.state.oauthWritesBlocked) {
-            toast.error(t('chatgptAuthRecovery.devWriteBlocked'));
-            return;
-          }
-          openaiLoginStartedRef.current = true;
-          const outcome = await codexAuth.triggerLogin(mode);
-          ok = outcome === 'authenticated';
-          if (outcome === 'cancelled') return;
-        } else if (id === 'xai') {
-          const r = await window.electronAPI.maker.xaiOAuthLogin();
-          ok = r.ok;
-          if (!r.ok && r.reason === 'login_cancelled') return;
         } else {
           const ownedLogin = beginGenericOwnedLogin();
           try {
@@ -728,7 +790,7 @@ export function AddProviderWizard({
         setLoggingIn(false);
       }
     },
-    [sel, clearGenericDeviceCode, beginGenericOwnedLogin, codexAuth, onDone, t],
+    [sel, clearGenericDeviceCode, beginGenericOwnedLogin, onDone, t],
   );
 
   /**
@@ -736,15 +798,20 @@ export function AddProviderWizard({
    * 都必须能中止 main 侧 login runner,否则浏览器流挂起时用户无法重试。
    */
   const cancelAuthorize = useCallback(() => {
+    const localLogin = localLoginRef.current;
+    localLoginRef.current = null;
+    localLogin?.cancel();
     if (!sel || sel.kind !== 'oauth') return;
     const id = sel.provider.id;
-    if (id === 'anthropic') void window.electronAPI.maker.claudeOAuthCancel();
-    else if (id === 'openai') void codexAuth.cancelLogin();
-    else if (id === 'xai') void window.electronAPI.maker.xaiOAuthCancel();
+    if (id === 'openai' || id === 'anthropic' || id === 'xai') {
+      const login = accountLoginRef.current;
+      accountLoginRef.current = null;
+      if (login) void window.electronAPI.maker.providerOAuthCancel(login.providerId, { ownerId: login.ownerId, releaseOwner: true });
+    }
     else cancelGenericOwnedLogin();
     clearGenericDeviceCode();
     setLoggingIn(false);
-  }, [sel, clearGenericDeviceCode, cancelGenericOwnedLogin, codexAuth]);
+  }, [sel, clearGenericDeviceCode, cancelGenericOwnedLogin]);
 
   /** 关闭向导:授权等待中先取消再关,不留挂起的 login runner。 */
   const handleClose = useCallback(() => {
@@ -769,21 +836,6 @@ export function AddProviderWizard({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [handleClose]);
 
-  // OpenAI 走 useCodexAuth:hook 状态翻 connected 时视为完成(triggerLogin 也会返回,
-  // oneshot ref 保证只收口一次)。只收口本向导内发起的登录(openaiLoginStartedRef),
-  // 不把「本机已有凭证」误当成完成 —— 见 openaiLoginStartedRef 的注释。
-  const openaiDoneRef = useRef(false);
-  useEffect(() => {
-    if (openaiDoneRef.current || !openaiLoginStartedRef.current) return;
-    if (
-      sel?.kind === 'oauth' &&
-      sel.provider.id === 'openai' &&
-      isChatGptConnectionConnected(codexAuth.state, false)
-    ) {
-      openaiDoneRef.current = true;
-      onDone('openai');
-    }
-  }, [codexAuth.state, sel, onDone]);
 
   // ── 预设:进入 Step 3 时自动拉取模型 ─────────────────────────────────────
   const startFetch = useCallback(async () => {
@@ -1056,7 +1108,7 @@ export function AddProviderWizard({
   const handleSaveBuiltinApiKey = useCallback(async () => {
     if (!sel || sel.kind !== 'builtinApiKey') return;
     const id = sel.provider.id;
-    if (!(PROVIDER_SECRET_IDS as readonly string[]).includes(id)) {
+    if (!isBuiltinApiKeyProviderId(id)) {
       // 目录出现了未在 providerSecrets 登记的内置 API-key 供应商 = 数据/代码脱节,
       // 明确报错让问题在配置期暴露,不静默写错键。
       toast.error(t('settings.providers.wizard.authorizeFailed', { name: sel.provider.name }));
@@ -1125,6 +1177,9 @@ export function AddProviderWizard({
               id: m.id,
               name: m.name,
               discoveredMetadata,
+              ...(presetModel?.mode ? { mode: presetModel.mode } : {}),
+              ...(presetModel?.modalities ? { modalities: { input: [...presetModel.modalities.input], output: [...presetModel.modalities.output] } } : {}),
+              ...(presetModel?.officialDocs ? { officialDocs: presetModel.officialDocs } : {}),
               ...(agent === 'pi' && presetModel?.piApi ? { piApi: presetModel.piApi } : {}),
               ...((presetModel?.route ?? m.routes?.[agent])
                 ? { route: presetModel?.route ?? m.routes?.[agent] }
@@ -1199,16 +1254,6 @@ export function AddProviderWizard({
           agent: AGENT_LABEL[sel.provider.agents[0]],
         })
       : null;
-  const openAiDeviceLoginPending =
-    sel?.kind === 'oauth' &&
-    sel.provider.id === 'openai' &&
-    loggingIn &&
-    codexAuth.state.kind === 'login-pending' &&
-    codexAuth.state.mode === 'device-code';
-  const openAiDeviceCode =
-    openAiDeviceLoginPending && codexAuth.state.kind === 'login-pending'
-      ? codexAuth.state.deviceCode
-      : undefined;
 
   const checkedCount = [...picks.values()].filter((v) => v.checked).length;
   const presetHasRecommendedModels =
@@ -1575,7 +1620,11 @@ export function AddProviderWizard({
                   </span>
                   <span className="text-12" style={{ color: 'var(--text-tertiary)' }}>
                     {t(
-                      sel.provider.auth.oauth?.flow === 'device-code'
+                      sel.provider.id === 'openai'
+                        ? localOpenAiAlreadyAdded
+                          ? 'settings.providers.openai.independentAccountDescription'
+                          : 'settings.providers.openai.accountSourcesDescription'
+                        : sel.provider.auth.oauth?.flow === 'device-code'
                         ? 'settings.providers.wizard.deviceOAuthDesc'
                         : 'settings.providers.wizard.oauthDesc',
                     )}
@@ -1600,12 +1649,23 @@ export function AddProviderWizard({
                   </button>
                 ) : (
                   <>
+                    {sel.provider.id === 'openai' && !localOpenAiAlreadyAdded && (
+                      <button type="button" onClick={() => void useLocalOpenAiAccount()}
+                        className="flex h-9 items-center justify-center rounded-full border px-6 text-13 font-medium transition-colors hover:bg-[var(--surface-hover)]"
+                        style={{ backgroundColor: 'var(--settings-btn-secondary-bg)', borderColor: 'var(--settings-btn-secondary-border)', color: 'var(--settings-btn-secondary-text)' }}>
+                        {t('settings.providers.openai.useLocalAccount')}
+                      </button>
+                    )}
+                    {sel.provider.id === 'anthropic' && !providers.some(p => p.id === 'anthropic' && !p.removed && (p.connected || p.removed === false)) && (
+                      <button type="button" onClick={() => void useLocalClaudeAccount()}
+                        className="flex h-9 items-center justify-center rounded-full border px-6 text-13 font-medium hover:bg-[var(--surface-hover)]"
+                        style={{ backgroundColor: 'var(--settings-btn-secondary-bg)', borderColor: 'var(--settings-btn-secondary-border)', color: 'var(--settings-btn-secondary-text)' }}>
+                        {t('settings.providers.localAccount.useClaude')}
+                      </button>
+                    )}
                     <button
                       type="button"
-                      onClick={() => void handleAuthorize('browser')}
-                      disabled={
-                        sel.provider.id === 'openai' && codexAuth.state.oauthWritesBlocked === true
-                      }
+                      onClick={() => void handleAuthorize()}
                       className="flex h-9 items-center justify-center rounded-full border px-6 text-13 font-medium transition-colors hover:bg-[var(--surface-hover)] disabled:cursor-not-allowed disabled:opacity-50"
                       style={{
                         backgroundColor: 'var(--settings-btn-secondary-bg)',
@@ -1614,30 +1674,13 @@ export function AddProviderWizard({
                       }}
                     >
                       {t(
-                        sel.provider.id === 'openai' && codexAuth.state.oauthWritesBlocked
-                          ? 'chatgptAuthRecovery.devReadOnly'
-                          : sel.provider.id === 'openai'
-                            ? 'settings.providers.wizard.authorizeInBrowser'
+                        ['openai', 'anthropic', 'xai'].includes(sel.provider.id)
+                            ? 'settings.providers.openai.addIndependentAccount'
                             : sel.provider.auth.oauth?.flow === 'device-code'
                               ? 'settings.providers.wizard.authorizeWithDeviceCode'
                               : 'settings.providers.button.authorize',
                       )}
                     </button>
-                    {sel.provider.id === 'openai' && (
-                      <button
-                        type="button"
-                        onClick={() => void handleAuthorize('device-code')}
-                        disabled={codexAuth.state.oauthWritesBlocked === true}
-                        className="flex h-9 items-center justify-center rounded-full border px-6 text-13 font-medium transition-colors hover:bg-[var(--surface-hover)] disabled:cursor-not-allowed disabled:opacity-50"
-                        style={{
-                          backgroundColor: 'transparent',
-                          borderColor: 'var(--settings-btn-secondary-border)',
-                          color: 'var(--settings-btn-secondary-text)',
-                        }}
-                      >
-                        {t('settings.providers.wizard.authorizeWithDeviceCode')}
-                      </button>
-                    )}
                   </>
                 )}
                 {/* 替代路径:API 用户没有订阅,OAuth 对其是错误路径——切到该渠道的
@@ -1653,14 +1696,13 @@ export function AddProviderWizard({
                     style={{
                       backgroundColor: 'transparent',
                       borderColor: 'var(--settings-btn-secondary-border)',
-                      color: 'var(--settings-btn-secondary-text)',
+                      color: 'var(--text-primary)',
                     }}
                   >
                     {t('settings.providers.wizard.useApiKey')}
                   </button>
                 )}
               </div>
-              {openAiDeviceLoginPending && <OAuthDeviceCodeCard deviceCode={openAiDeviceCode} />}
               {genericDeviceFlow && loggingIn && (
                 <OAuthDeviceCodeCard deviceCode={genericDeviceCode} />
               )}
@@ -2000,7 +2042,7 @@ export function AddProviderWizard({
               className="flex h-9 items-center justify-center rounded-full border px-6 text-13 font-medium transition-colors hover:bg-[var(--surface-hover)]"
               style={{
                 borderColor: 'var(--settings-btn-secondary-border)',
-                color: 'var(--settings-btn-secondary-text)',
+                color: 'var(--text-primary)',
               }}
             >
               {t('settings.providers.wizard.cancel')}
