@@ -489,11 +489,15 @@ async function writeLargeResultToRemote(
 }
 
 /** 结果未知时的 stat 轮询节奏:总时长约 10s,覆盖慢文件系统上 2 MiB 上限的写入;测试可缩短。 */
-export const REMOTE_WRITE_RECONCILE = { intervalMs: 250, maxAttempts: 40 };
+export const REMOTE_WRITE_RECONCILE = { intervalMs: 250, maxAttempts: 40, windowMs: 10_000 };
 
-type RemoteStatResult = { type: string; size?: number | null } | null;
+type RemoteStatResult = { type: string; size?: number | null; mtimeMs?: number | null } | null;
 
-/** 轮询 stat 直到 done 为真(返回 true)或次数耗尽(false);stat 失败按 null 交给 done。 */
+/**
+ * 轮询 stat 直到 done 为真(返回 true),或次数/总时长耗尽(false);stat 失败按 null 交给 done。
+ * 总时长按墙钟计:每次 stat 本身可能等到客户端 15s 超时,不能让 40 次探测把 ghost_call 与
+ * owner lease 拖到十分钟;窗口一到就停,不再发下一次探测。
+ */
 async function pollRemoteStat(
   remote: ReturnType<typeof getRemoteFileBrowser>,
   remoteHostId: string,
@@ -501,13 +505,16 @@ async function pollRemoteStat(
   relPath: string,
   options: { attempts: number; done: (stat: RemoteStatResult) => boolean; giveUp?: (stat: RemoteStatResult) => boolean },
 ): Promise<boolean> {
+  const deadline = Date.now() + REMOTE_WRITE_RECONCILE.windowMs;
   for (let attempt = 0; attempt < options.attempts; attempt += 1) {
     const stat = (await remote.request(remoteHostId, 'stat', { workdir, relPath }).catch(() => null)) as RemoteStatResult;
     if (options.done(stat)) return true;
     if (options.giveUp?.(stat)) return false;
-    if (attempt + 1 < options.attempts) {
-      await new Promise<void>((resolve) => setTimeout(resolve, REMOTE_WRITE_RECONCILE.intervalMs));
-    }
+    if (attempt + 1 >= options.attempts) break;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    await new Promise<void>((resolve) => setTimeout(resolve, Math.min(REMOTE_WRITE_RECONCILE.intervalMs, remaining)));
+    if (Date.now() >= deadline) break;
   }
   return false;
 }
@@ -528,11 +535,22 @@ async function reconcileUnknownRemoteWrite(
   cause: unknown,
 ): Promise<void> {
   let lastSeen: { type: string; size: number | null } | null = null;
+  // Published state, not just length: the daemon writes to a root staging file and publishes
+  // with link, so a target entry of the full length can only be a fully written file. The one
+  // post-publish mutation is the daemon's own anchor-failure compensation (unlink/zero within
+  // the same call). Requiring the same full length and the same mtime on two consecutive
+  // probes separated by an interval rules that out; a server-side completion token would need
+  // a protocol change (see the PR note).
+  let previous: { size: number; mtimeMs: number | null } | null = null;
   const complete = await pollRemoteStat(remote, remoteHostId, workdir, relPath, {
     attempts: REMOTE_WRITE_RECONCILE.maxAttempts,
     done: (stat) => {
       if (stat) lastSeen = { type: stat.type, size: stat.type === 'file' ? (stat.size ?? null) : null };
-      return stat?.type === 'file' && stat.size === expectedBytes;
+      if (stat?.type !== 'file' || stat.size !== expectedBytes) { previous = null; return false; }
+      const current = { size: stat.size, mtimeMs: stat.mtimeMs ?? null };
+      const confirmed = previous !== null && previous.size === current.size && previous.mtimeMs === current.mtimeMs;
+      previous = current;
+      return confirmed;
     },
   });
   if (complete) return;
@@ -551,13 +569,47 @@ function isRemoteResultUnknown(err: unknown): boolean {
   return code === 'CHANNEL_CLOSED' || code === 'CHANNEL_ERROR' || code === 'TIMEOUT';
 }
 
-async function discardLargeResultFile(target: LargeResultSpillTarget, relPath: string): Promise<void> {
+/** 本地外置文件写入后立刻记录的 inode 身份,供清理时锚定(不能凭路径删)。 */
+interface LocalSpillAnchor { dev: number; ino: number }
+
+/**
+ * 写入后按真实父目录锚定并记录 inode:父目录 realpath 必须仍在 workdir realpath 内,
+ * 且其中同名条目是普通文件。拿不到锚定时调用方记 null,后续清理直接放弃。
+ */
+async function anchorLocalSpill(workdir: string, relPath: string): Promise<LocalSpillAnchor> {
+  const abs = path.join(workdir, relPath);
+  const [wdReal, parentReal] = await Promise.all([fs.promises.realpath(workdir), fs.promises.realpath(path.dirname(abs))]);
+  if (parentReal !== wdReal && !parentReal.startsWith(wdReal + path.sep)) {
+    throw new Error('Tool result storage requires an authoritative session workdir');
+  }
+  const st = await fs.promises.lstat(path.join(parentReal, path.basename(abs)));
+  if (!st.isFile()) throw new Error('Tool result storage requires an authoritative session workdir');
+  return { dev: st.dev, ino: st.ino };
+}
+
+/**
+ * 清理刚写的外置文件。本地不做裸路径 unlink:父目录可能已被换成指向别处的 symlink,并在
+ * 那里放一个同名文件诱导删除。只有父目录 realpath 仍在 workdir 内、且同名条目的 dev/ino
+ * 与写入时记录的一致,才删那一个条目;否则放弃(宁可留下自己的文件,不删别人的)。
+ */
+async function discardLargeResultFile(
+  target: LargeResultSpillTarget,
+  relPath: string,
+  anchor: LocalSpillAnchor | null,
+): Promise<void> {
   try {
     if (target.remoteHostId) {
       await getRemoteFileBrowser().request(target.remoteHostId, 'deleteEntry', { workdir: target.workingDir, relPath });
-    } else {
-      await fs.promises.unlink(path.join(target.workingDir, relPath));
+      return;
     }
+    if (!anchor) return;
+    const abs = path.join(target.workingDir, relPath);
+    const [wdReal, parentReal] = await Promise.all([fs.promises.realpath(target.workingDir), fs.promises.realpath(path.dirname(abs))]);
+    if (parentReal !== wdReal && !parentReal.startsWith(wdReal + path.sep)) return;
+    const candidate = path.join(parentReal, path.basename(abs));
+    const st = await fs.promises.lstat(candidate);
+    if (!st.isFile() || st.dev !== anchor.dev || st.ino !== anchor.ino) return;
+    await fs.promises.unlink(candidate);
   } catch {
     /* best-effort: the write already failed to be accounted for; keep the original error */
   }
@@ -572,7 +624,7 @@ async function discardLargeResultFile(target: LargeResultSpillTarget, relPath: s
  * id**;任一 URL 挂账失败时只按这些 id 回滚(并发的另一次外置不受影响),再删掉刚写的
  * 文件,不留没有结果文件的孤立引用。成功时把插入的 id 交给调用方,供后续复验失败回滚。
  */
-async function commitLargeResultMediaRefs(target: LargeResultSpillTarget, relPath: string, text: string): Promise<string[]> {
+async function commitLargeResultMediaRefs(target: LargeResultSpillTarget, relPath: string, text: string, anchor: LocalSpillAnchor | null): Promise<string[]> {
   const inserted: string[] = [];
   let failed = 0;
   for (const url of collectChatMediaUrls(text)) {
@@ -599,7 +651,7 @@ async function commitLargeResultMediaRefs(target: LargeResultSpillTarget, relPat
   }
   if (failed === 0) return inserted;
   for (const id of inserted) await ledger.removeRefById(id).catch(() => 0);
-  await discardLargeResultFile(target, relPath);
+  await discardLargeResultFile(target, relPath, anchor);
   throw new Error('Tool result media references unavailable');
 }
 
@@ -1654,31 +1706,35 @@ export function getCindyGhostsMcpDeps(
           ? path.posix.join(target.workingDir, relativePath)
           : path.join(target.workingDir, relativePath),
       );
+      let anchor: LocalSpillAnchor | null = null;
       if (target.remoteHostId) {
         await writeLargeResultToRemote(target.remoteHostId, target.workingDir, relativePath, text, () => target.revalidate());
       } else {
         // Reuse the root-anchored, no-overwrite writer, including its symlink/race
         // checks. No plugin-controlled filename or raw fs write enters this path.
         await writeDocsOutput({ root: target.workingDir, path: path.join(target.workingDir, relativePath), data: Buffer.from(text, 'utf8'), overwrite: false });
+        // Record the written inode so any later cleanup can only ever remove this file.
+        // Without an anchor cleanup is skipped (leaving our own file beats deleting someone else's).
+        anchor = await anchorLocalSpill(target.workingDir, relativePath).catch(() => null);
       }
       // The write is another async boundary: an instance that ended or lost its
       // automatic-write grant meanwhile must not have refs booked in its name.
       try {
         await target.revalidate();
       } catch (err) {
-        await discardLargeResultFile(target, relativePath);
+        await discardLargeResultFile(target, relativePath, anchor);
         throw err;
       }
       // Keep media referenced by the full response alive even when the SDK only
       // receives its bounded projection; refs are committed after the bytes are durable.
-      const insertedRefs = await commitLargeResultMediaRefs(target, relativePath, text);
+      const insertedRefs = await commitLargeResultMediaRefs(target, relativePath, text, anchor);
       // The ledger mutations above are further async boundaries: an instance that
       // ended or lost its grant meanwhile must not keep refs or a private file in its name.
       try {
         await target.revalidate();
       } catch (err) {
         for (const id of insertedRefs) await ledger.removeRefById(id).catch(() => 0);
-        await discardLargeResultFile(target, relativePath);
+        await discardLargeResultFile(target, relativePath, anchor);
         throw err;
       }
       return relativePath;

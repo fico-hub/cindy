@@ -2383,6 +2383,7 @@ describe('oversized ghost result Host storage', () => {
     // Shorten the remote reconcile window so ambiguity paths stay fast in tests.
     REMOTE_WRITE_RECONCILE.intervalMs = 1;
     REMOTE_WRITE_RECONCILE.maxAttempts = 5;
+    REMOTE_WRITE_RECONCILE.windowMs = 2_000;
     liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: null, isCurrent: () => true, reviewAction: reviewAllow });
   });
 
@@ -2751,7 +2752,8 @@ describe('oversized ghost result Host storage', () => {
       return {};
     });
     await expect(deps.saveLargeGhostResult!(text)).resolves.toMatch(/^tool-results\//);
-    expect(statCalls).toBe(4);
+    // Published state is confirmed on two consecutive full-length probes (same mtime), not one.
+    expect(statCalls).toBe(5);
     expect(remoteFsRequestMock.mock.calls.map(call => call[1])).not.toContain('deleteEntry');
   });
 
@@ -2791,7 +2793,7 @@ describe('oversized ghost result Host storage', () => {
       return {};
     });
     await expect(deps.saveLargeGhostResult!(text)).resolves.toMatch(/^tool-results\//);
-    expect(statCalls).toBe(3);
+    expect(statCalls).toBe(4);
   });
 
   // Codex P1 (round 7): the directory RPC is an async boundary; re-check the instance before the private bytes go out.
@@ -2806,6 +2808,89 @@ describe('oversized ghost result Host storage', () => {
     expect(methods).toContain('createFolder');
     expect(methods).not.toContain('writeNewFile');
     expect(calls).toBe(4);
+  });
+
+  // Codex P1 (round 8): each probe may itself wait on the client deadline; the whole
+  // reconciliation is bounded by wall-clock, not by probe count.
+  it('stops reconciling once the wall-clock window is spent even if probes are slow', async () => {
+    const deps = makeDeps('codex');
+    sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
+    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => true, reviewAction: reviewAllow });
+    REMOTE_WRITE_RECONCILE.maxAttempts = 40;
+    REMOTE_WRITE_RECONCILE.windowMs = 60;
+    const text = JSON.stringify({ ok: true, result: 'x'.repeat(100) });
+    let statCalls = 0;
+    remoteFsRequestMock.mockImplementation(async (_host, method) => {
+      if (method === 'writeNewFile') throw Object.assign(new Error('writeNewFile TIMEOUT'), { code: 'TIMEOUT' });
+      if (method === 'stat') {
+        statCalls += 1;
+        await new Promise(resolve => setTimeout(resolve, 40)); // a slow probe
+        throw Object.assign(new Error('stat TIMEOUT'), { code: 'TIMEOUT' });
+      }
+      return {};
+    });
+    const started = Date.now();
+    await expect(deps.saveLargeGhostResult!(text)).rejects.toThrow('writeNewFile TIMEOUT');
+    expect(statCalls).toBeLessThanOrEqual(3);
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  // Codex P1 (round 8): a full-length probe followed by the daemon's own compensation must not count.
+  it('does not declare success on a single full-length probe that is gone on the next one', async () => {
+    const deps = makeDeps('codex');
+    sessionSnapshotMock.mockResolvedValue({ workingDir: '/srv/work', remoteHostId: 'host-1', permissionMode: 'auto', planModeEnabled: false });
+    liveGrantStateMock.mockReturnValue({ permissionMode: 'auto', remoteHostId: 'host-1', isCurrent: () => true, reviewAction: reviewAllow });
+    const text = JSON.stringify({ ok: true, result: 'x'.repeat(100) });
+    const full = Buffer.byteLength(text, 'utf8');
+    let statCalls = 0;
+    remoteFsRequestMock.mockImplementation(async (_host, method) => {
+      if (method === 'writeNewFile') throw Object.assign(new Error('writeNewFile TIMEOUT'), { code: 'TIMEOUT' });
+      if (method === 'stat') {
+        statCalls += 1;
+        if (statCalls === 1) return { relPath: 'x', mtimeMs: 1, type: 'file', size: full };
+        if (statCalls === 2) return { relPath: 'x', mtimeMs: 2, type: 'file', size: 0 }; // zeroed by the daemon
+        throw new Error('OPERATION_FAILED: ENOENT');
+      }
+      return {};
+    });
+    await expect(deps.saveLargeGhostResult!(text)).rejects.toThrow('writeNewFile TIMEOUT');
+    expect(ledgerAddRefMock).not.toHaveBeenCalled();
+  });
+
+  // Codex P1 (round 8): local cleanup must never follow a swapped parent to someone else's file.
+  it('does not delete an unrelated outside file when the local parent is swapped before cleanup', async () => {
+    const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ghost-spill-cleanup-swap-'));
+    const workdir = path.join(root, 'workdir');
+    const outside = path.join(root, 'outside');
+    await fs.promises.mkdir(workdir, { recursive: true });
+    await fs.promises.mkdir(outside, { recursive: true });
+    try {
+      const deps = makeDeps('codex');
+      sessionSnapshotMock.mockResolvedValue({ workingDir: workdir, remoteHostId: null, permissionMode: 'auto', planModeEnabled: false });
+      let calls = 0;
+      let swapped = false;
+      liveGrantStateMock.mockImplementation(() => {
+        calls += 1;
+        if (calls <= 3) return { permissionMode: 'auto', remoteHostId: null, isCurrent: () => true, reviewAction: reviewAllow };
+        // Post-write revalidation fails; before cleanup runs, swap the parent for a link to
+        // an outside directory holding an unrelated file under the very same UUID name.
+        if (!swapped) {
+          const written = writeDocsOutputMock.mock.calls[0]![0].path as string;
+          fs.writeFileSync(path.join(outside, path.basename(written)), 'unrelated');
+          fs.renameSync(path.join(workdir, 'tool-results'), path.join(root, 'moved'));
+          try { fs.symlinkSync(outside, path.join(workdir, 'tool-results'), 'dir'); swapped = true; } catch { /* no symlinks */ }
+        }
+        return null;
+      });
+      writeDocsOutputMock.mockImplementation(async input => {
+        await fs.promises.mkdir(path.dirname(input.path), { recursive: true });
+        await fs.promises.writeFile(input.path, input.data);
+      });
+      await expect(deps.saveLargeGhostResult!('result')).rejects.toThrow('live session');
+      if (!swapped) return;
+      const written = writeDocsOutputMock.mock.calls[0]![0].path as string;
+      await expect(fs.promises.readFile(path.join(outside, path.basename(written)), 'utf8')).resolves.toBe('unrelated');
+    } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
   });
 
   // Codex P1 (round 6): createFolder can time out while the daemon is still running mkdir.
