@@ -368,6 +368,26 @@ process.stdout.write(JSON.stringify({ code, outsideExists, movedValue }));
     }
   });
 
+  // Codex P1 (round 19): cleaned:true only when erasure and name removal actually succeeded.
+  it('abortInFlightWrite reports cleaned:false when the erasure fails', async () => {
+    const realOpen = fs.promises.open.bind(fs.promises);
+    const openSpy = vi.spyOn(fs.promises, 'open').mockImplementation(async (...args: Parameters<typeof fs.promises.open>) => {
+      const handle = await realOpen(...args);
+      if (String(args[0]).includes('.cindy-docs-staging-')) {
+        handle.writeFile = (() => new Promise<void>(() => {})) as typeof handle.writeFile;
+        handle.truncate = (async () => { throw Object.assign(new Error('EIO'), { code: 'EIO' }); }) as typeof handle.truncate;
+      }
+      return handle;
+    });
+    try {
+      void runDocsOutputWriteForTest(await request('report.bin', 'private', false), root).catch(() => undefined);
+      await new Promise((r) => setTimeout(r, 30));
+      expect(await abortInFlightWrite()).toEqual({ cleaned: false });
+    } finally {
+      openSpy.mockRestore();
+    }
+  });
+
   it('abortInFlightWrite leaves a committed overwrite replacement alone', async () => {
     expect(await abortInFlightWrite()).toEqual({ cleaned: false }); // nothing in flight
   });

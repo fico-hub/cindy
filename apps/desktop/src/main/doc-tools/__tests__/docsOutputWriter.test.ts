@@ -138,6 +138,33 @@ describe('writeDocsOutput beforeCommit boundary', () => {
     }
   });
 
+  // Codex P1 (round 19): a success that races in after the abort started must not win;
+  // the abort chain owns the terminal state and reclaims the inode.
+  it('ignores a late success result once the abort has started', async () => {
+    DOCS_OUTPUT_WRITER_TIMEOUT.ms = 30;
+    DOCS_OUTPUT_WRITER_ABORT_GRACE.ms = 60;
+    try {
+      const staging = path.join(root, '.cindy-docs-staging-u-out.txt');
+      const target = path.join(root, 'out.txt');
+      await fs.promises.writeFile(staging, 'private bytes', { mode: 0o600 });
+      await fs.promises.link(staging, target);
+      const st = await fs.promises.lstat(staging, { bigint: true });
+      child.result = null;
+      child.postMessage = function (this: FakeChild, message: unknown) {
+        const type = (message as { type?: string }).type ?? '';
+        if (type === 'write') queueMicrotask(() => this.emit('message', { type: 'staged', identity: { dev: st.dev, ino: st.ino }, stagingName: '.cindy-docs-staging-u-out.txt' }));
+        // On abort the child answers with a *success* instead of `aborted`, then stays silent.
+        if (type === 'abort') queueMicrotask(() => this.emit('message', { ok: true, identity: { dev: st.dev, ino: st.ino } }));
+      };
+      const outcome = await writeDocsOutput({ root, path: target, data: new Uint8Array([1]), overwrite: false }).then(() => 'resolved', (e: Error) => e.message);
+      expect(outcome).toBe('文档落盘隔离进程超时');
+      await expect(fs.promises.access(staging)).rejects.toThrow();
+      await expect(fs.promises.access(target)).rejects.toThrow();
+    } finally {
+      DOCS_OUTPUT_WRITER_TIMEOUT.ms = 60_000;
+    }
+  });
+
   // Codex P1 (round 17b): a crash / external kill after the staged notice must reclaim the
   // inode exactly like the watchdog does, not just reject.
   it.each(['exit', 'error'])('reclaims the staged inode when the writer terminates abnormally (%s)', async (kind) => {

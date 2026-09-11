@@ -317,6 +317,10 @@ export const writeDocsOutput: WriteDocsOutputFn = async (input) => {
       }
       const result = parseResult(message);
       if (!result) return;
+      // Once an abort has started, the abort chain owns the terminal state: a result that
+      // races in during the grace window (e.g. {ok:true} right before the child is killed
+      // and its inode reclaimed) must not be surfaced as success to the caller.
+      if (aborting) return;
       if (result.ok) {
         // Identity is read by the writer through its own handle; carried as decimal
         // strings (64-bit file ids do not survive as JS numbers).

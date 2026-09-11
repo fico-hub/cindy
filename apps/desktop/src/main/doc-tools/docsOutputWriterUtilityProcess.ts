@@ -187,18 +187,26 @@ async function syncDirectory(dirPath: string): Promise<void> {
   }
 }
 
-/** Remove `target` only if it still names the inode behind `handle`. */
-async function unlinkIfOurs(target: string, handle: fs.promises.FileHandle): Promise<void> {
+/**
+ * Remove `target` only if it still names the inode behind `handle`. Returns whether the
+ * name is now known not to carry our inode (removed, absent, or pointing elsewhere);
+ * false means an I/O error left that unknown.
+ */
+async function unlinkIfOurs(target: string, handle: fs.promises.FileHandle): Promise<boolean> {
   try {
-    const [own, current] = await Promise.all([
-      handle.stat({ bigint: true }),
-      fs.promises.lstat(target, { bigint: true }),
-    ]);
+    const own = await handle.stat({ bigint: true });
+    let current: fs.BigIntStats;
+    try {
+      current = await fs.promises.lstat(target, { bigint: true });
+    } catch (error) {
+      return hasCode(error, 'ENOENT');
+    }
     if (current.isFile() && !current.isSymbolicLink() && current.dev === own.dev && current.ino === own.ino) {
       await fs.promises.unlink(target);
     }
+    return true;
   } catch {
-    // Already gone or not ours: leave it.
+    return false;
   }
 }
 
@@ -282,10 +290,17 @@ export async function abortInFlightWrite(): Promise<{ cleaned: boolean }> {
   const current = inFlight;
   if (!current) return { cleaned: false };
   if (current.committedOverwrite()) return { cleaned: false }; // the replacement is the user's file
-  await current.handle.truncate(0).catch(() => undefined);
-  if (current.published()) await unlinkIfOurs(current.target, current.handle);
-  await unlinkIfOurs(current.staging, current.handle);
-  return { cleaned: true };
+  // Only a confirmed erasure + name removal counts; any I/O failure reports false so the
+  // parent runs its own reclaim instead of trusting a partial cleanup.
+  let cleaned = true;
+  try {
+    await current.handle.truncate(0);
+  } catch {
+    cleaned = false;
+  }
+  if (current.published()) cleaned = (await unlinkIfOurs(current.target, current.handle)) && cleaned;
+  cleaned = (await unlinkIfOurs(current.staging, current.handle)) && cleaned;
+  return { cleaned };
 }
 
 /** Test hook: clear abort state between runs. */
