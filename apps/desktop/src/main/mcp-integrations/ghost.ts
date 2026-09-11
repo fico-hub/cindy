@@ -573,11 +573,14 @@ async function reconcileUnknownRemoteWrite(
 
 /**
  * 变更类 RPC 的结果未知:断链(CHANNEL_CLOSED / CHANNEL_ERROR)与客户端超时(TIMEOUT,
- * daemon 可能已写完只是响应晚到)都不能当作「没写」,必须回读 stat 核对。
+ * daemon 可能已写完只是响应晚到)都不能当作「没写」,必须回读核对。
+ * ENDPOINT_STALE 是 RemoteFileBrowserManager 在端点代次变化时于 catch/成功后生成的包装错误,
+ * 会盖掉底层结果:请求可能已发出甚至已成功发布,同样只能按未知处理、经当前端点 verifyNewFile
+ * 消歧(不是同一台机器时核验自然失败,保持"失败但不删"的现场)。
  */
 function isRemoteResultUnknown(err: unknown): boolean {
   const code = (err as { code?: unknown } | null)?.code;
-  return code === 'CHANNEL_CLOSED' || code === 'CHANNEL_ERROR' || code === 'TIMEOUT';
+  return code === 'CHANNEL_CLOSED' || code === 'CHANNEL_ERROR' || code === 'TIMEOUT' || code === 'ENDPOINT_STALE';
 }
 
 /** 外置文件写入后记录的 inode 身份(本地 lstat / 远端 writeNewFile 或 verifyNewFile 返回),供清理时锚定。 */

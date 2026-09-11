@@ -2995,6 +2995,9 @@ describe('oversized ghost result Host storage', () => {
     { name: 'keeps an unverified path untouched after a lost response and reports failure', code: 'CHANNEL_CLOSED', verified: false },
     { name: 'accepts a verified complete file after a client timeout', code: 'TIMEOUT', verified: true },
     { name: 'keeps an unverified path untouched after a client timeout and reports failure', code: 'TIMEOUT', verified: false },
+    // Codex P1 (round 15b): the endpoint-generation wrapper error hides the real outcome.
+    { name: 'accepts a verified complete file after an endpoint-stale wrapper error', code: 'ENDPOINT_STALE', verified: true },
+    { name: 'keeps an unverified path untouched after an endpoint-stale wrapper error', code: 'ENDPOINT_STALE', verified: false },
   ])('$name', async ({ code, verified }) => {
     const deps = makeDeps('codex'); remoteSession();
     const text = JSON.stringify({ ok: true, result: 'x'.repeat(100) });
