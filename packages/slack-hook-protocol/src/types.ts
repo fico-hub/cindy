@@ -1445,10 +1445,29 @@ export interface MessageOpPayload {
  * 整个动词集只能发不能改。失败时 `error` 说明原因; `retryAfterMs` 非空表示
  * 服务端限速队列建议的等待(客户端据此排后续 op, 不自行加固定上限)。
  */
+export interface TelegramSentMessageEntity {
+  type: string;
+  offset: number;
+  length: number;
+  url?: string;
+  language?: string;
+  custom_emoji_id?: string;
+  user?: {
+    id: number | string;
+    is_bot?: boolean;
+    first_name: string;
+    last_name?: string;
+    username?: string;
+    language_code?: string;
+  };
+  unix_time?: number;
+  date_time_format?: string;
+}
+
 export interface TelegramSentMessage {
   chatId: string;
   text: string;
-  entities: { type: string; offset: number; length: number; url?: string; language?: string }[];
+  entities: TelegramSentMessageEntity[];
   tier: 'html' | 'plain';
 }
 

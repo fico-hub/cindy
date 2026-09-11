@@ -185,8 +185,16 @@ export function createTelegramDeliveryBridge(deps: {
         if (!concurrent || concurrent.inputSha256 !== inputSha256) throw new Error('IDEMPOTENCY_CONFLICT');
         return concurrent;
       }
-      try { fs.writeFileSync(fd, JSON.stringify(row)); fs.fsyncSync(fd); }
-      finally { fs.closeSync(fd); }
+      try {
+        try { fs.writeFileSync(fd, JSON.stringify(row)); fs.fsyncSync(fd); }
+        finally { fs.closeSync(fd); }
+      } catch (error) {
+        // Only this invocation's exclusive claim can be removed, and only
+        // before deps.send is reached. Existing/torn claims and failures after
+        // network I/O stay fail-closed because their delivery may be unknown.
+        try { fs.unlinkSync(fileFor(input.idempotencyKey)); } catch { /* retain the claim if cleanup fails */ }
+        throw error;
+      }
       try {
         const result = await deps.send({
           opId: row.opId, scope: { externalKey: target.externalKey },

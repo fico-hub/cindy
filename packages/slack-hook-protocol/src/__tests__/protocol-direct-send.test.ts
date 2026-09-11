@@ -42,3 +42,25 @@ describe('direct delivery metadata validation', () => {
     expect(parseHookMessage(JSON.stringify(frame)).ok).toBe(true);
   });
 });
+
+describe('type-specific Telegram receipt entities', () => {
+  const user = { id: 101, is_bot: false, first_name: 'Ada', username: 'test_ada' };
+  const entities = [
+    { type: 'custom_emoji', offset: 0, length: 2, custom_emoji_id: '123456789' },
+    { type: 'text_mention', offset: 3, length: 3, user },
+    { type: 'date_time', offset: 7, length: 4, unix_time: 1789000000, date_time_format: 'r' },
+  ];
+  const frame = () => makeMessageOpResult({ opId: 'op', ok: true, messageId: '1', deliveryState: 'sent',
+    sentMessage: { chatId: '2', text: '📮 Ada time', tier: 'html', entities } });
+  it('preserves type-specific fields across the wire', () => {
+    expect(parseHookMessage(JSON.stringify(frame()))).toMatchObject({ ok: true, message: { payload: { sentMessage: { entities } } } });
+  });
+  it.each([{ custom_emoji_id: 123 }, { custom_emoji_id: '' }, { user: 42 },
+    { user: { ...user, id: 1.5 } }, { user: { ...user, first_name: 42 } }, { user: { ...user, is_bot: 'false' } },
+    { unix_time: '1789000000' }, { date_time_format: 42 }
+  ])('rejects malformed type-specific metadata %j', bad => {
+    const raw = JSON.parse(JSON.stringify(frame()));
+    Object.assign(raw.payload.sentMessage.entities[0], bad);
+    expect(parseHookMessage(JSON.stringify(raw)).ok).toBe(false);
+  });
+});

@@ -22,7 +22,7 @@ function harness() {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-telegram-delivery-'));
   directories.push(directory);
   const status = vi.fn(() => ({ connected: true, supported: true, sendEpoch: 'epoch', target }));
-  const send = vi.fn(async (payload: { opId: string }) => sent(payload.opId));
+  const send = vi.fn(async (payload: { opId: string }): Promise<MessageOpResultPayload | null> => sent(payload.opId));
   return { directory, status, send, bridge: createTelegramDeliveryBridge({ directory, status, send }) };
 }
 describe('official Telegram delivery', () => {
@@ -169,4 +169,62 @@ it('keeps a confirmed plain presentation sent for an HTML request', async () => 
   const h = harness();
   h.send.mockImplementation(async p => ({ ...sent(p.opId), sentMessage: { ...sent(p.opId).sentMessage!, tier: 'plain' } }));
   expect(await h.bridge.send(input)).toMatchObject({ state: 'sent', requestedTier: 'html', formatVerified: false, result: { sentMessage: { tier: 'plain' } } });
+});
+
+it('retains type-specific wire entities in a durable late receipt', async () => {
+  const h = harness();
+  const bridge = createTelegramDeliveryBridge({ ...h, send: async () => null });
+  const row = await bridge.send(input);
+  const entities = [
+    { type: 'custom_emoji', offset: 0, length: 2, custom_emoji_id: '123456789' },
+    { type: 'text_mention', offset: 3, length: 3, user: { id: 101, is_bot: false, first_name: 'Ada' } },
+    { type: 'date_time', offset: 7, length: 4, unix_time: 1789000000, date_time_format: 'r' },
+  ];
+  const result = { ...sent(row.opId), sentMessage: { chatId: target.principalId, text: '📮 Ada time', tier: 'html' as const, entities } };
+  const parsed = parseHookMessage(serializeHookMessage(makeMessageOpResult(result)));
+  if (!parsed.ok || parsed.message.type !== 'msg.op.result') throw new Error('invalid fixture');
+  bridge.onResult(parsed.message.payload);
+  expect(createTelegramDeliveryBridge(h).receipt(input.idempotencyKey)).toMatchObject({ state: 'sent', result: { sentMessage: { entities } } });
+});
+
+
+it.each(['write', 'fsync'] as const)('removes only its own unsent claim after %s fails', async operation => {
+  const h = harness();
+  const error = Object.assign(new Error('fixture disk failure'), { code: 'ENOSPC' });
+  const realWrite = fs.writeFileSync.bind(fs);
+  const spy = operation === 'write'
+    ? vi.spyOn(fs, 'writeFileSync').mockImplementationOnce((file) => { realWrite(file, '{'); throw error; })
+    : vi.spyOn(fs, 'fsyncSync').mockImplementationOnce(() => { throw error; });
+  try {
+    await expect(h.bridge.send(input)).rejects.toThrow('fixture disk failure');
+    expect(h.send).not.toHaveBeenCalled();
+    expect(fs.readdirSync(h.directory)).toEqual([]);
+  } finally { spy.mockRestore(); }
+  // Explicit retry after a proven pre-network failure may create a new claim.
+  expect(await createTelegramDeliveryBridge(h).send(input)).toMatchObject({ state: 'sent' });
+  expect(h.send).toHaveBeenCalledOnce();
+});
+
+it('preserves the claim when result persistence fails after the network attempt', async () => {
+  const h = harness();
+  h.send.mockImplementation(async () => null);
+  const realSync = fs.fsyncSync.bind(fs);
+  const spy = vi.spyOn(fs, 'fsyncSync').mockImplementationOnce(realSync)
+    .mockImplementationOnce(() => { throw new Error('fixture result fsync failure'); });
+  try { await expect(h.bridge.send(input)).rejects.toThrow('fixture result fsync failure'); }
+  finally { spy.mockRestore(); }
+  expect(await createTelegramDeliveryBridge(h).send(input)).toMatchObject({ state: 'started' });
+  expect(h.send).toHaveBeenCalledOnce();
+});
+
+
+it('keeps an unsent claim fail-closed when cleanup itself fails', async () => {
+  const h = harness();
+  const realWrite = fs.writeFileSync.bind(fs);
+  const write = vi.spyOn(fs, 'writeFileSync').mockImplementationOnce(file => { realWrite(file, '{'); throw new Error('fixture disk failure'); });
+  const unlink = vi.spyOn(fs, 'unlinkSync').mockImplementationOnce(() => { throw new Error('fixture cleanup failure'); });
+  try { await expect(h.bridge.send(input)).rejects.toThrow('fixture disk failure'); }
+  finally { write.mockRestore(); unlink.mockRestore(); }
+  await expect(createTelegramDeliveryBridge(h).send(input)).rejects.toThrow('DELIVERY_JOURNAL_UNREADABLE');
+  expect(h.send).not.toHaveBeenCalled();
 });

@@ -228,3 +228,7 @@ Cindy 有两个 Telegram bot，用户看到的是同一个产品：
 
 
 主动发送入口通过 Host 的逐次 MCP 授权策略，不能由 scheduler server 的整体信任或调用方自报 runId 代替授权；Auto/Full Access 仍遵循宿主既有权限模式。持久成功回执以完整临时文件的原子、不可覆盖发布保存，旧 unknown/not_sent 写入不能覆盖成功证据；旧日志保持可读，回滚旧客户端可能只见原始 started，因此必须保留整个日志目录且不补发。HTML 请求收到匹配目标的真实 plain 回执仍记 sent，实际 tier 与 requestedTier 分别保留，由调用方验真格式。
+
+回执实体还保留 `custom_emoji_id`、`user`（text_mention 的实际用户对象）、`unix_time` 与 `date_time_format`，两仓 parser 校验提供的字段形状；这些字段均可选，旧回执缺失时不补造。实际展示稿验证必须比较相关类型字段，不能只比较 offset/length；Host 的 formatVerified 始终为 false。
+
+首次独占创建 claim 后、网络调用前的写入/fsync 失败会尽力关闭并清理本次 claim，显式重试可重新认领；不清理此前存在的损坏日志、started/unknown 或网络调用后的回执写入失败。清理自身失败仍拒发，不自动补发。

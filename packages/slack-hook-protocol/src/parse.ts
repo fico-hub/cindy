@@ -547,7 +547,21 @@ function validateMessageOpResult(p: Record<string, unknown>): string | null {
           !Number.isSafeInteger(e.length) || Number(e.offset) < 0 || Number(e.length) <= 0 ||
           Number(e.offset) + Number(e.length) > m.text.length ||
           (e.url !== undefined && typeof e.url !== 'string') ||
-          (e.language !== undefined && typeof e.language !== 'string')) return 'invalid sentMessage entity';
+          (e.language !== undefined && typeof e.language !== 'string') ||
+          (e.custom_emoji_id !== undefined && !isNonEmptyString(e.custom_emoji_id)) ||
+          (e.unix_time !== undefined && !Number.isSafeInteger(e.unix_time)) ||
+          (e.date_time_format !== undefined && typeof e.date_time_format !== 'string')) return 'invalid sentMessage entity';
+      if (e.user !== undefined) {
+        const user = e.user;
+        if (!isPlainObject(user) ||
+            !(typeof user.id === 'number' ? Number.isSafeInteger(user.id) && user.id > 0
+              : typeof user.id === 'string' && /^[1-9]\d*$/.test(user.id)) ||
+            !isNonEmptyString(user.first_name) ||
+            (user.is_bot !== undefined && typeof user.is_bot !== 'boolean') ||
+            ['last_name', 'username', 'language_code'].some(key => user[key] !== undefined && typeof user[key] !== 'string')) {
+          return 'invalid sentMessage entity user';
+        }
+      }
     }
   }
   return null;
