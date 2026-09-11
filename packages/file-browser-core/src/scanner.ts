@@ -752,6 +752,11 @@ export async function verifyNewFile(
     const opened = await handle.stat({ bigint: true });
     // The opened inode must be the very entry lstat saw (no swap in between).
     if (opened.dev !== entry.dev || opened.ino !== entry.ino) throw new Error(`identity mismatch: ${sub}`);
+    // A finished publish has exactly one link (the target). A second link means either
+    // the writer is still in flight (its staging link) or the staging link was renamed
+    // away — in both cases the writer may still withdraw (zero) this inode, so recovery
+    // must not accept it. This holds even when the staging marker name is gone.
+    if (opened.nlink !== 1n) throw new Error(`write still in flight: ${sub}`);
     const buf = await handle.readFile();
     if (buf.length !== expectedSize) throw new Error(`size mismatch: ${sub}`);
     const actual = createHash('sha256').update(buf).digest('hex');

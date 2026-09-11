@@ -746,6 +746,19 @@ describe('verifyNewFile / eraseIfSame', () => {
     }
   });
 
+  // Codex P1 (round 27): marker absence can be manufactured (staging link renamed away while
+  // the write is in flight); the verified inode itself must have exactly one link.
+  it('verifyNewFile refuses an inode that still has a second link even without a staging marker', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-verify-nlink-'));
+    try {
+      await fsWriteFile(path.join(root, 'r.json'), '{"a":1}');
+      await fsLink(path.join(root, 'r.json'), path.join(root, 'renamed-staging-copy'));
+      await expect(verifyNewFile(root, 'r.json', sha('{"a":1}'), 7)).rejects.toThrow(/still in flight/);
+      await rm(path.join(root, 'renamed-staging-copy'));
+      await expect(verifyNewFile(root, 'r.json', sha('{"a":1}'), 7)).resolves.toMatchObject({ size: 7 });
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
   it('writeNewFile keeps the publish when only the root fsync after staging removal fails', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'xdt-root-sync-fail-'));
     const realRoot = await fsp.realpath(root);
