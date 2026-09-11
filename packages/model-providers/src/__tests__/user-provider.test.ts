@@ -1503,3 +1503,58 @@ describe("live preset defaults and discovery provenance", () => {
     expect(current().supportsImageInput).toBeUndefined();
   });
 });
+
+describe("official Pi catalog defaults for preset-marked sources (#4295)", () => {
+  const kimiRuntime = () => ({
+    piCatalogProviderId: "kimi-coding",
+    baseUrl: "https://api.kimi.com/coding",
+    wireProtocol: "anthropic-messages" as const,
+    models: [
+      // 2026-09-09 之前从预设创建的存量来源:没有 catalogPresetId,模型也没有 reasoning 字段。
+      { id: "k3-256k", name: "Kimi K3-256K", contextWindow: 262144 },
+      { id: "kimi-for-coding", name: "Kimi K2.7 Code", contextWindow: 262144 },
+    ],
+  });
+  const build = (config: CustomProviderConfig) =>
+    buildUserProvider(config, {
+      modelRegistry: { schemaVersion: 4, updatedAt: "2026-09-11T00:00:00.000Z", models: [] },
+    }).models.pi!;
+
+  it("projects reasoning efforts from the official Pi catalog when the stored model lacks them", () => {
+    const models = build({ id: "kimi-code", name: "Kimi Code", runtimes: { pi: kimiRuntime() } });
+    expect(models.find((m) => m.id === "k3-256k")).toMatchObject({
+      efforts: ["low", "high", "max"],
+      defaultEffort: "high",
+      supportsImageInput: true,
+      maxOutput: 131072,
+    });
+    // 官方目录对该模型只声明 reasoning 而无档位表:与 pi-host 运行期同样得到通用四档。
+    expect(models.find((m) => m.id === "kimi-for-coding")).toMatchObject({
+      efforts: ["minimal", "low", "medium", "high"],
+    });
+  });
+
+  it("keeps explicit user reasoning settings ahead of the catalog defaults", () => {
+    const runtime = kimiRuntime();
+    runtime.models[0] = { ...runtime.models[0], reasoning: false } as never;
+    const models = build({ id: "kimi-code", name: "Kimi Code", runtimes: { pi: runtime } });
+    expect(models.find((m) => m.id === "k3-256k")).toMatchObject({ efforts: [], defaultEffort: null });
+  });
+
+  it("does not lend catalog capabilities to a hand-edited endpoint or protocol", () => {
+    const edited = kimiRuntime();
+    edited.baseUrl = "https://proxy.example/coding";
+    expect(
+      build({ id: "kimi-code", name: "Kimi Code", runtimes: { pi: edited } }).find((m) => m.id === "k3-256k"),
+    ).toMatchObject({ efforts: [] });
+    const otherProtocol = { ...kimiRuntime(), wireProtocol: "openai-chat" as const };
+    expect(
+      build({ id: "kimi-code", name: "Kimi Code", runtimes: { pi: otherProtocol } }).find((m) => m.id === "k3-256k"),
+    ).toMatchObject({ efforts: [] });
+    const unmarked = kimiRuntime();
+    delete (unmarked as { piCatalogProviderId?: string }).piCatalogProviderId;
+    expect(
+      build({ id: "kimi-code", name: "Kimi Code", runtimes: { pi: unmarked } }).find((m) => m.id === "k3-256k"),
+    ).toMatchObject({ efforts: [] });
+  });
+});
