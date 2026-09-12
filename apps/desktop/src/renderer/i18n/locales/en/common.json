@@ -2008,6 +2008,7 @@
       },
       "genericOAuth": {
         "subtitle": "Subscription account",
+        "reopenLoginPage": "Reopen sign-in page",
         "toast": {
           "loggedIn": "Signed in to {{name}}",
           "loginFailed": "Could not sign in to {{name}}. Try again.",
@@ -7184,6 +7185,7 @@
     }
   },
   "bots": {
+    "creationName": "Name",
     "settingsBack": "Back to Settings",
     "sidebar": {
       "newTaskWith": "Start a task with {{name}}"
@@ -7191,28 +7193,7 @@
     "title": "Teammates",
     "add": "Add teammate",
     "createWizard": {
-      "createFailed": "The teammate could not be created. Try again.",
-      "templates": {
-        "cindy": {
-          "title": "Cindy Assistant",
-          "defaultName": "Cindy",
-          "defaultDescription": "I like bringing a little order to busy days and hearing fresh ideas. Writing, research, everyday odds and ends—let’s work through them together."
-        },
-        "dash": {
-          "title": "Dash, Company CEO",
-          "defaultName": "Dash",
-          "defaultDescription": "I’m curious about good products and good businesses. I enjoy thinking things through, talking about possibilities, and making a clear decision together."
-        },
-        "lizi": {
-          "title": "LiZi, Technical Director",
-          "defaultName": "LiZi",
-          "defaultDescription": "I enjoy taking tricky problems apart and turning ideas into something real. When we hit a snag, we’ll figure it out together."
-        },
-        "custom": {
-          "title": "Custom"
-        }
-      },
-      "chooseTemplate": "Who would you like to invite?"
+      "createFailed": "The teammate could not be created. Try again."
     },
     "homeFolder": {
       "title": "Advanced configuration",
@@ -7358,7 +7339,15 @@
       "trackedTask": "Runs independently and returns its result",
       "stopTask": "Stop task",
       "messageSent": "Message sent to background task",
-      "watchWork": "Watch the work",
+      "watchWork": "Open task",
+      "viewPr": "View PR",
+      "stale": "Details may be outdated. Unable to refresh.",
+      "artifactCount": "{{count}} files",
+      "prCount": "{{count}} PRs",
+      "artifactCount_one": "{{count}} file",
+      "artifactCount_other": "{{count}} files",
+      "prCount_one": "{{count}} PR",
+      "prCount_other": "{{count}} PRs",
       "actionFailed": "That didn't go through. Try again.",
       "retrying": "Hasn't started yet — retrying…",
       "status": {
@@ -7437,6 +7426,47 @@
       "toolset": "Built-in tools",
       "unavailable": "Unavailable",
       "empty": "No matching capabilities"
+    },
+    "guided": {
+      "title": "Create a teammate",
+      "reviewTitle": "Your new teammate",
+      "question": "Briefly describe your expectations.",
+      "placeholder": "For example, help me practice English through everyday conversation and thoughtful corrections.",
+      "generate": "Create teammate",
+      "generating": "Shaping your teammate…",
+      "generationFailed": "Could not generate your teammate. Your idea is still here; please try again.",
+      "modelRequired": "Select an available default model in Cindy first.",
+      "cindyDescription": "I can help you use Cindy, connect your tools, and get things done together.",
+      "cindySummary": "Manage Cindy, connect tools, and get things done.",
+      "openCindy": "Open Cindy",
+      "addCindy": "Add Cindy",
+      "done": "Done",
+      "editName": "Edit name",
+      "duplicateName": "That name is taken. Choose a name you can easily tell apart.",
+      "introduction": "About me",
+      "editIntroduction": "Edit introduction",
+      "refine": "Adjust teammate",
+      "refinePlaceholder": "What would you change? For example, less formal and a little more playful.",
+      "back": "Back",
+      "invite": "Invite teammate",
+      "portrait": "Portrait {{number}}",
+      "upload": "Upload image",
+      "generateAvatar": "Generate portrait",
+      "useAvatar": "Use this portrait",
+      "examples": {
+        "english": {
+          "label": "Practice English",
+          "prompt": "Practice English with me through everyday conversation. Be patient and correct unnatural expressions thoughtfully."
+        },
+        "ideas": {
+          "label": "Explore ideas",
+          "prompt": "An imaginative creative partner with opinions, helping me develop writing and product ideas into practical plans."
+        },
+        "life": {
+          "label": "Talk about life",
+          "prompt": "A warm, funny companion who listens to the little things in my life without rushing to give advice."
+        }
+      }
     }
   },
   "common": {
@@ -11541,6 +11571,7 @@
       "qrExpired": "QR code expired, please start again",
       "registrationFailed": "Creation failed, please retry later",
       "silentStopExhausted": "The model returned empty responses repeatedly; auto-resume is paused. Click \"Continue\" to resume the task.",
+      "executionResultUnavailable": "Unable to retrieve the execution result. Automatic continuation has stopped. Ask the assistant to check the existing execution result.",
       "outputLimit": "The model reached its output limit, so this response may be incomplete. Send the next message to continue.",
       "permissionTightenInterruptFailed": "Failed to stop the running task while tightening permissions; it may keep running without approval prompts until it finishes. Stop it manually if needed.",
       "codexAutoReviewUnavailable": "Auto-review is temporarily unavailable. The current action was blocked and permissions switched to Default. Retry the request; Cindy will ask when needed.",

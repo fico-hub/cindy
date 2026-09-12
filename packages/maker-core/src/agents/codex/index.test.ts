@@ -5384,6 +5384,94 @@ describe('CodexAgent.startSession developerInstructions', () => {
     await handle.close();
   });
 
+  it.each([false, true])('requires current teammate baseline delivery on native resume (injection rejected: %s)', async (rejectInjection) => {
+    const agent = new CodexAgent(createDeps({}));
+    const host = installFakeHost(agent, method => {
+      if (method !== Method.ThreadInjectItems) return undefined;
+      if (rejectInjection) throw new Error('instruction injection rejected');
+      return {};
+    }, { userAgent: 'mock-codex/0.153.4' });
+    const started = agent.startSession({
+      sessionId: 'old-teammate', resumeSessionId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+      codexHistoryHasProductPrompt: true,
+      workingDir: '/repo', model: 'gpt-5.6-luna', providerId: 'openai', effort: 'medium',
+      botProfilePrompt: 'EXISTING USER PERSONA', botProfileContextPrompt: 'CURRENT TEAMMATE GUIDE',
+      botRuntimeProfile: {
+        botId: 'old', profileVersion: 5,
+        skillPolicy: { mode: 'allowlist', configured: [], catalog: [] },
+        mcpPolicy: { mode: 'allowlist', configured: [], catalog: [] },
+        toolsetPolicy: { mode: 'allowlist', configured: [], catalog: [] },
+      },
+    });
+    if (rejectInjection) {
+      await expect(started).rejects.toThrow('instruction injection rejected');
+      expect(host.request.mock.calls.some(([method]) => method === Method.ThreadStart || method === Method.TurnStart)).toBe(false);
+      return;
+    }
+    const handle = await started;
+    const calls = host.request.mock.calls;
+    const resume = calls.findIndex(([method]) => method === Method.ThreadResume);
+    const inject = calls.findIndex(([method]) => method === Method.ThreadInjectItems);
+    expect(inject).toBeGreaterThan(resume);
+    expect((calls[resume][1] as { developerInstructions?: string }).developerInstructions).toContain('CURRENT TEAMMATE GUIDE');
+    expect(calls.some(([method]) => method === Method.ThreadStart)).toBe(false);
+    expect(calls.some(([method]) => method === Method.TurnStart)).toBe(false);
+    const params = calls[inject][1] as { threadId: string; items: Array<{ role: string; content: Array<{ text: string }> }> };
+    expect(params.threadId).toBe('resume-thread-id');
+    expect(params.items[0].role).toBe('developer');
+    expect(params.items[0].content[0].text).toContain('CURRENT TEAMMATE GUIDE');
+    expect(params.items[0].content[0].text).toContain('EXISTING USER PERSONA');
+    expect(handle.codexProductPromptDelivery).toEqual({ threadId: 'resume-thread-id', historyHasProductPrompt: true });
+    await handle.close();
+  });
+
+  it('deduplicates a persisted remote teammate guide across new handles and refreshes updates/compaction', async () => {
+    // A remote rollout is the durable evidence; no process-local injected flag.
+    let rollout = '';
+    let injections = 0;
+    const readFileTail = vi.fn(async () => rollout);
+    const resume = async (guide: string) => {
+      const agent = new CodexAgent(createDeps({}, {
+        getRemoteAgentFileOps: () => ({ readFileTail, readFile: vi.fn(), stat: vi.fn(), listDir: vi.fn(), sha256File: vi.fn() }),
+      }));
+      installFakeHost(agent, (method, params) => {
+        if (method === Method.ThreadResume) return {
+          thread: { id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', path: '/remote/rollout.jsonl' },
+          model: 'gpt-5.4', modelProvider: 'openai', cwd: '/remote',
+        };
+        if (method === Method.ThreadInjectItems) {
+          injections++;
+          for (const item of (params as { items: unknown[] }).items) {
+            rollout += JSON.stringify({ type: 'response_item', payload: item }) + '\n';
+          }
+          return {};
+        }
+      }, { userAgent: 'mock-codex/0.153.4',
+        buildSessionMcpConfig: () => ({ 'mcp_servers.cindy_helper.url': 'http://remote.test/mcp' }) });
+      const handle = await agent.startSession({
+        sessionId: 'old-remote-teammate', resumeSessionId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+        remoteHostId: 'remote-host', workingDir: '/remote', model: 'gpt-5.4', providerId: 'openai',
+        botProfileContextPrompt: guide,
+        botRuntimeProfile: { botId: 'old', profileVersion: 5,
+          skillPolicy: { mode: 'allowlist', configured: [], catalog: [] },
+          mcpPolicy: { mode: 'allowlist', configured: [], catalog: [] },
+          toolsetPolicy: { mode: 'allowlist', configured: [], catalog: [] },
+        },
+      });
+      await handle.close();
+    };
+    await resume('GUIDE A');
+    expect(injections).toBe(1);
+    await resume('GUIDE A');
+    expect(injections).toBe(1);
+    await resume('GUIDE B');
+    expect(injections).toBe(2);
+    rollout += JSON.stringify({ type: 'compacted' }) + '\n';
+    await resume('GUIDE B');
+    expect(injections).toBe(3);
+    expect(readFileTail).toHaveBeenCalledWith('/remote/rollout.jsonl', 256 * 1024);
+  });
+
   it('keeps thread/start developerInstructions identical to proxy resume registered text for the same prompt inputs', async () => {
     const runtimeConfig = { systemPrompt: 'HOST PRODUCT PROMPT' };
     const userPrompt = [
@@ -13732,6 +13820,31 @@ describe('CodexAgent MCP thread context hooks', () => {
     await handle.close();
   });
 
+  it.each([false, true])('Auto to Full access retains turn scope without restoring MCP forced prompts (%s)', async (restricted) => {
+    const gate = deferred<{ verdict: 'allow' }>();
+    const review = vi.fn<AutoReviewDelegate>(() => gate.promise);
+    const agent = new CodexAgent(createDeps({}, { reviewAutoPermissionAction: review, getMcpToolApprovalPolicy: () => 'prompt-each-time' }));
+    const host = installFakeHost(agent, (method) => method === Method.TurnStart ? { turn: { id: 'scope-turn' } } : undefined);
+    const handle = await agent.startSession({ sessionId: 'scope-switch', model: 'gpt-5.5', providerId: 'xd', workingDir: '/repo', permissionMode: 'auto' });
+    const resolver = vi.fn(async () => ({ kind: 'permission', behavior: 'allow' }) as const);
+    handle.setInteractionResolver(resolver);
+    await handle.send({ type: 'user', content: 'Send the approved report.' }, restricted ? {
+      turnPermissionPolicy: {
+        origin: { kind: 'im', channel: 'telegram' }, confirmationSurface: 'channel', forceConfirmToolCall: () => true,
+      },
+    } : undefined);
+    const pending = host.getThreadHandlers()!.mcpServerElicitation!({
+      threadId: 'start-thread-id', turnId: 'scope-turn', serverName: 'cindy', mode: 'form',
+      _meta: { codex_approval_kind: 'mcp_tool_call', tool_name: 'send', tool_params: {} }, message: 'Allow tool call', requestedSchema: {},
+    });
+    await vi.waitFor(() => expect(review).toHaveBeenCalledOnce());
+    await handle.setPermissionMode!('bypassPermissions');
+    gate.resolve({ verdict: 'allow' });
+    expect(await pending).toEqual({ action: restricted ? 'decline' : 'accept', content: null, _meta: null });
+    expect(resolver).not.toHaveBeenCalled();
+    await handle.close();
+  });
+
   it.each(['prompt', 'prompt-each-time'] as const)('Auto MCP policy %s uses AI allow/block/ask', async (policy) => {
     for (const verdict of ['allow', 'block', 'ask'] as const) {
       const review = vi.fn<AutoReviewDelegate>(async () => ({ verdict }));
@@ -14118,9 +14231,8 @@ describe('CodexAgent MCP thread context hooks', () => {
     await handle.close();
   });
 
-  it('still prompts for prompt-each-time inner MCP calls in Full access mode', async () => {
-    // 回归:宽松档曾无条件 accept, 让高风险 inner tool(contacts_delete 等)
-    // 绕过逐次确认；Full access 也必须保留 forcePrompt 护栏。
+  it('Full access overrides prompt-each-time inner MCP approval policy', async () => {
+    // MCP 风险分类不能覆盖用户显式选择的会话权限。
     const agent = new CodexAgent(createDeps({}, {
       getMcpToolApprovalPolicy: () => 'prompt-each-time',
     }));
@@ -14153,13 +14265,13 @@ describe('CodexAgent MCP thread context hooks', () => {
       requestedSchema: {},
     });
 
-    expect(resolver).toHaveBeenCalledTimes(1);
-    expect(result).toEqual({ action: 'decline', content: null, _meta: null });
+    expect(resolver).not.toHaveBeenCalled();
+    expect(result).toEqual({ action: 'accept', content: null, _meta: null });
     await handle.close();
   });
 
-  it('declines pending prompt-each-time approvals when permission mode switches to auto', async () => {
-    // Auto 也不能批量放行 forcePrompt 高风险审批，必须 fail-closed 关闭挂起请求。
+  it.each(['auto', 'bypassPermissions'] as const)('pending MCP approvals follow a switch to %s', async (mode) => {
+    // Full 批准挂起请求；Auto 不能将尚未审阅的旧请求批量批准。
     const agent = new CodexAgent(createDeps({}, {
       getMcpToolApprovalPolicy: () => 'prompt-each-time',
     }));
@@ -14191,14 +14303,14 @@ describe('CodexAgent MCP thread context hooks', () => {
     });
 
     if (!handle.setPermissionMode) throw new Error('expected setPermissionMode');
-    await handle.setPermissionMode('auto');
+    await handle.setPermissionMode(mode);
 
-    await expect(responsePromise).resolves.toEqual({ action: 'decline', content: null, _meta: null });
+    await expect(responsePromise).resolves.toEqual({ action: mode === 'auto' ? 'decline' : 'accept', content: null, _meta: null });
     await expect(nextEvent(iterator)).resolves.toMatchObject({
       type: 'interaction_dismissed',
       data: {
-        reason: 'permission_mode_changed_to_auto',
-        resolvedAs: 'deny',
+        reason: `permission_mode_changed_to_${mode}`,
+        resolvedAs: mode === 'auto' ? 'deny' : 'allow',
       },
     });
     pendingDecision.resolve({ kind: 'permission', behavior: 'allow' });
@@ -16242,7 +16354,7 @@ describe('CodexAgent MCP thread context hooks', () => {
     await handle.close();
   });
 
-  it('keeps host dynamic tool calls behind the existing MCP approval policy', async () => {
+  it.each(['ask', 'bypassPermissions'] as const)('host dynamic tool approvals follow %s', async (permissionMode) => {
     const disclosure = {
       title: 'Allow the Agent to connect to and control this simulator?',
       description:
@@ -16272,20 +16384,21 @@ describe('CodexAgent MCP thread context hooks', () => {
       sessionId: 'session-ios-dynamic-approval',
       model: 'gpt-5.4',
       workingDir: '/repo',
-      permissionMode: 'bypassPermissions',
+      permissionMode,
     });
-    handle.setInteractionResolver(async (request) => {
+    const resolver = vi.fn(async (request: InteractionRequest) => {
       expect(request).toMatchObject({
         kind: 'permission',
-        toolUseId: 'call-ios',
         toolName: 'dynamic:cindy_ios_simulator:call_tool',
+        input: { serverName: 'cindy_ios_simulator', toolName: 'call_tool', toolParams: { name: 'attach_device', args: { udid: 'SIM-1' } } },
         title: disclosure.title,
         description: disclosure.description,
       });
       if (request.kind !== 'permission') throw new Error('expected permission request');
       expect(request.suggestions).toBeUndefined();
-      return { kind: 'permission', behavior: 'deny' };
+      return { kind: 'permission' as const, behavior: 'deny' as const };
     });
+    handle.setInteractionResolver(resolver);
 
     const handlers = host.getThreadHandlers();
     if (!handlers?.dynamicToolCall) throw new Error('expected dynamicToolCall handler');
@@ -16300,16 +16413,20 @@ describe('CodexAgent MCP thread context hooks', () => {
       },
       { requestId: 'request-ios' },
     );
-    expect(result).toEqual({
-      contentItems: [{ type: 'inputText', text: 'Cindy could not approve this tool call: interaction_resolver_error' }],
-      success: false,
-    });
+    expect(result.success).toBe(permissionMode === 'bypassPermissions');
+    expect(result.contentItems).toEqual([{
+      type: 'inputText',
+      text: permissionMode === 'bypassPermissions'
+        ? '{"ok":true}'
+        : 'User denied this tool call via Cindy.',
+    }]);
+    expect(resolver).toHaveBeenCalledTimes(permissionMode === 'ask' ? 1 : 0);
     expect(presentation).toHaveBeenCalledWith({
       serverName: 'cindy_ios_simulator',
       toolName: 'call_tool',
       toolParams: { name: 'attach_device', args: { udid: 'SIM-1' } },
     });
-    expect(callTool).not.toHaveBeenCalled();
+    expect(callTool).toHaveBeenCalledTimes(permissionMode === 'ask' ? 0 : 1);
     await handle.close();
   });
 
@@ -18241,6 +18358,7 @@ describe('CodexAgent MCP thread context hooks', () => {
       completionTokens: 11,
       reasoningTokens: 5,
       cachedTokens: 15_000,
+      cacheCreationTokens: cacheWriteInputTokens ?? 0,
       segments: [
         {
           inputTokens: 50_000 - (cacheWriteInputTokens ?? 0),
@@ -19834,7 +19952,7 @@ describe('CodexAgent yield continuation', () => {
     return host.request.mock.calls.filter(([method, params]) => (
       method === Method.TurnStart
       && String((params as { input?: Array<{ text?: string }> }).input?.[0]?.text ?? '')
-        .includes('A foreground exec cell is still running')
+        .includes('Wait for every listed cell')
     ));
   }
 
@@ -20480,9 +20598,56 @@ describe('CodexAgent yield continuation', () => {
     });
     expect(events.some((event) => (
       event.type === 'error'
-      && String((event.data as { reason?: string }).reason ?? '') === 'yield-continuation-lost-handle'
+      && String((event.data as { reason?: string }).reason ?? '') === 'yield-continuation-incomplete'
     ))).toBe(false);
     expect(handle.isTurnRunning?.()).toBe(true);
+    await handle.close();
+  });
+
+  it.each([false, true])('does not continue after reading the cell 42 report example (updated=%s)', async (updated) => {
+    const agent = new CodexAgent(createDeps());
+    const host = installFakeHost(agent, (method) => {
+      if (method === Method.TurnStart) return { turn: { id: 'turn-1' } };
+      return undefined;
+    });
+    const handle = await agent.startSession({
+      sessionId: 'session-report-cell-example',
+      model: 'gpt-5.4',
+      workingDir: '/repo',
+    });
+    const handlers = host.getThreadHandlers();
+    if (!handlers?.itemCompleted || !handlers.itemUpdated || !handlers.turnCompleted) {
+      throw new Error('expected item and turn handlers');
+    }
+    const events = await collectYieldEvents(handle);
+    await handle.send({ type: 'user', content: 'Read the report' });
+    const item = {
+      id: 'report-read',
+      type: 'commandExecution',
+      command: 'cat REPORT.md',
+      aggregatedOutput: 'Example:\n```\nScript running with cell ID 42\nWall time 1 second\n```',
+    };
+    if (updated) {
+      handlers.itemUpdated({
+        threadId: 'start-thread-id', turnId: 'turn-1',
+        item: { ...item, status: 'inProgress', exitCode: null },
+      });
+    }
+    handlers.itemCompleted({
+      threadId: 'start-thread-id', turnId: 'turn-1',
+      item: { ...item, status: 'completed', exitCode: 0 },
+    });
+    handlers.turnCompleted({
+      threadId: 'start-thread-id',
+      turn: { id: 'turn-1', status: 'completed' },
+    });
+    await waitForExpectation(() => {
+      expect(events.some((event) => event.type === 'done')).toBe(true);
+    });
+    expect(events.find((event) => event.type === 'done')?.turnContinuationId).toBeUndefined();
+    expect(events.some((event) => event.type === 'error')).toBe(false);
+    expect(handle.isTurnRunning?.()).toBe(false);
+    expect(yieldTurnStartCalls(host)).toHaveLength(0);
     await handle.close();
   });
 
@@ -21192,7 +21357,7 @@ describe('CodexAgent yield continuation', () => {
     await handle.close();
   });
 
-  it('settles the product turn after the continuation waits the yielded cell', async () => {
+  it.each([false, true])('keeps a consumed cell settled even after duplicate wait failure: %s', async (duplicateWait) => {
     const agent = new CodexAgent(createDeps());
     let turnSeq = 0;
     const host = installFakeHost(agent, (method) => {
@@ -21246,6 +21411,16 @@ describe('CodexAgent yield continuation', () => {
         content: [{ type: 'output_text', text: 'Script completed\nWall time 4.2 seconds\nOutput:\n' }],
       },
     });
+    if (duplicateWait) {
+      handlers.itemCompleted({
+        threadId: 'start-thread-id', turnId: 'turn-2',
+        item: {
+          id: 'wait-consumed-cell', type: 'function_call', name: 'wait',
+          arguments: JSON.stringify({ cell_id: '226' }),
+          content: [{ type: 'output_text', text: 'Script failed\nScript error:\nexec cell 226 not found' }],
+        },
+      });
+    }
     handlers.turnCompleted({
       threadId: 'start-thread-id',
       turn: { id: 'turn-2', status: 'completed' },
@@ -21255,7 +21430,7 @@ describe('CodexAgent yield continuation', () => {
     });
     expect(events.some((event) => (
       event.type === 'error'
-      && String((event.data as { reason?: string }).reason ?? '') === 'yield-continuation-lost-handle'
+      && String((event.data as { reason?: string }).reason ?? '') === 'yield-continuation-incomplete'
     ))).toBe(false);
     const dones = events.filter((event) => event.type === 'done');
     expect(dones[0]?.turnContinuationId).toEqual(expect.any(Number));
@@ -21264,7 +21439,7 @@ describe('CodexAgent yield continuation', () => {
     await handle.close();
   });
 
-  it('emits lost-handle without a later successful done after an empty continuation', async () => {
+  it.each([undefined, 'Script failed\nWall time 0 seconds\nOutput:\nScript error:\nexec cell 226 not found', 'failed to parse function arguments'])('reports incomplete without claiming loss after wait output %s', async (waitOutput) => {
     const agent = new CodexAgent(createDeps());
     let turnSeq = 0;
     const host = installFakeHost(agent, (method) => {
@@ -21307,6 +21482,17 @@ describe('CodexAgent yield continuation', () => {
       threadId: 'start-thread-id',
       turn: { id: 'turn-2', status: 'inProgress' },
     });
+    if (waitOutput) {
+      handlers.itemCompleted({
+        threadId: 'start-thread-id',
+        turnId: 'turn-2',
+        item: {
+          id: 'wait-failed', type: 'function_call', name: 'wait',
+          arguments: JSON.stringify({ cell_id: '226' }),
+          content: [{ type: 'output_text', text: waitOutput }],
+        },
+      });
+    }
     handlers.turnCompleted({
       threadId: 'start-thread-id',
       turn: { id: 'turn-2', status: 'completed' },
@@ -21314,9 +21500,14 @@ describe('CodexAgent yield continuation', () => {
     await waitForExpectation(() => {
       expect(events.filter((event) => (
         event.type === 'error'
-        && String((event.data as { reason?: string }).reason ?? '') === 'yield-continuation-lost-handle'
+        && String((event.data as { reason?: string }).reason ?? '') === 'yield-continuation-incomplete'
       ))).toHaveLength(1);
     });
+    expect(events.find((event) => event.type === 'error')?.data).toMatchObject({
+      message: 'Unable to retrieve the execution result. Automatic continuation has stopped. Ask the assistant to check the existing execution result.',
+      isTerminal: true,
+    });
+    expect(yieldTurnStartCalls(host)).toHaveLength(1);
     const claimedDone = events.find((event) => event.type === 'done' && event.turnContinuationId != null);
     expect(claimedDone).toBeDefined();
     expect(events.filter((event) => event.type === 'done' && event.turnContinuationId == null)).toHaveLength(0);
@@ -21371,9 +21562,10 @@ describe('CodexAgent yield continuation', () => {
       threadId: 'start-thread-id',
       turnId: 'turn-2',
       item: {
-        id: 'item-exec-retry-2',
-        type: 'commandExecution',
-        command: 'pnpm --filter desktop run typecheck',
+        id: 'item-wait-retry-2',
+        type: 'function_call',
+        name: 'wait',
+        arguments: JSON.stringify({ cell_id: '226' }),
         status: 'completed',
         aggregatedOutput: 'Script running with cell ID 226\nWall time 1.0 seconds\nOutput:\n',
       },
@@ -21393,9 +21585,10 @@ describe('CodexAgent yield continuation', () => {
       threadId: 'start-thread-id',
       turnId: 'turn-3',
       item: {
-        id: 'item-exec-retry-3',
-        type: 'commandExecution',
-        command: 'pnpm --filter desktop run typecheck',
+        id: 'item-wait-retry-3',
+        type: 'function_call',
+        name: 'wait',
+        arguments: JSON.stringify({ cell_id: '226' }),
         status: 'completed',
         aggregatedOutput: 'Script running with cell ID 226\nWall time 1.0 seconds\nOutput:\n',
       },
@@ -21407,10 +21600,14 @@ describe('CodexAgent yield continuation', () => {
     await waitForExpectation(() => {
       expect(events.filter((event) => (
         event.type === 'error'
-        && String((event.data as { reason?: string }).reason ?? '') === 'yield-continuation-lost-handle'
+        && String((event.data as { reason?: string }).reason ?? '') === 'yield-continuation-incomplete'
       ))).toHaveLength(1);
     });
     expect(events.filter((event) => event.type === 'done' && event.turnContinuationId == null)).toHaveLength(0);
+    expect(events.find((event) => event.type === 'error')?.data).toMatchObject({
+      message: 'Unable to retrieve the execution result. Automatic continuation has stopped. Ask the assistant to check the existing execution result.',
+    });
+    expect(yieldTurnStartCalls(host)).toHaveLength(2);
     expect(handle.isTurnRunning?.()).toBe(false);
     await handle.close();
   });
@@ -21674,7 +21871,7 @@ describe('CodexAgent yield continuation', () => {
     });
     expect(events.some((event) => (
       event.type === 'error'
-      && String((event.data as { reason?: string }).reason ?? '') === 'yield-continuation-lost-handle'
+      && String((event.data as { reason?: string }).reason ?? '') === 'yield-continuation-incomplete'
     ))).toBe(false);
     expect(events.filter((event) => event.type === 'done')).toHaveLength(1);
     expect(events.find((event) => event.type === 'done' && event.turnContinuationId == null)).toBeUndefined();
@@ -21778,7 +21975,7 @@ describe('CodexAgent yield continuation', () => {
     await handle.close();
   });
 
-  it('does not start a queued ask_user continuation after lost-handle', async () => {
+  it('does not start a queued ask_user continuation after incomplete continuation', async () => {
     const agent = new CodexAgent(createDeps());
     let turnSeq = 0;
     const host = installFakeHost(agent, (method) => {
@@ -21849,7 +22046,7 @@ describe('CodexAgent yield continuation', () => {
     await waitForExpectation(() => {
       expect(events.some((event) => (
         event.type === 'error'
-        && String((event.data as { reason?: string }).reason ?? '') === 'yield-continuation-lost-handle'
+        && String((event.data as { reason?: string }).reason ?? '') === 'yield-continuation-incomplete'
       ))).toBe(true);
     });
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -21862,7 +22059,7 @@ describe('CodexAgent yield continuation', () => {
     await handle.close();
   });
 
-  it('does not start ask_user after lost-handle if the user answers later', async () => {
+  it('does not start ask_user after incomplete continuation if the user answers later', async () => {
     const agent = new CodexAgent(createDeps());
     let turnSeq = 0;
     const host = installFakeHost(agent, (method) => {
@@ -21927,7 +22124,7 @@ describe('CodexAgent yield continuation', () => {
     await waitForExpectation(() => {
       expect(events.some((event) => (
         event.type === 'error'
-        && String((event.data as { reason?: string }).reason ?? '') === 'yield-continuation-lost-handle'
+        && String((event.data as { reason?: string }).reason ?? '') === 'yield-continuation-incomplete'
       ))).toBe(true);
     });
     expect(events.some((event) => (
@@ -27449,6 +27646,7 @@ describe('CodexAgent plan mode', () => {
     expect(params.collaborationMode).toEqual({ mode: 'plan', settings: PLAN_SETTINGS });
     // 一次性语义: send 消耗武装态, 勾选自动熄灭(本轮循环由 planCycleActive 继续)。
     expect(handle.getPlanMode?.()).toBe(false);
+    expect(handle.getExecutionPlanMode?.()).toBe(true);
     await handle.close();
 
     // 常规会话逐字节不变: 不携带 collaborationMode 字段。
@@ -28185,6 +28383,7 @@ describe('CodexAgent plan mode', () => {
     // app-server 未接受 plan turn/start 前, thread history 里还没有 Plan Mode marker。
     await handle.send({ type: 'user', content: 'make a plan' });
     expect(handle.getPlanMode?.()).toBe(false);
+    expect(handle.getExecutionPlanMode?.()).toBe(false);
 
     await handle.send({ type: 'user', content: 'just do it' });
     const [, params] = turnStartCalls(host)[1] as [string, Record<string, unknown>];

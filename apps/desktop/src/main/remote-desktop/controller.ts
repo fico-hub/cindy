@@ -133,9 +133,14 @@ export class RemoteDesktopController {
     this.deps.stopVideo();
     this.deps.changed();
   }
-
-  /** A refused native input revokes control, while preserving viewing and the
-   * peer-bound lease. Pending grants must not turn a failed helper back on. */
+  /**
+   * Input injection failed while the lease is still valid. Input belongs to the
+   * control bit, so release control and keep everything else: ending the lease
+   * here would tear down capture and media, and every phone tap would surface as
+   * a reconnect even though the desktop session itself is healthy. The viewer
+   * observes the new state on its next heartbeat or input attempt. A pending
+   * start is also cancelled so a failed helper cannot restore control later.
+   */
   releaseControl(): void {
     const active = this.active;
     if (!active || (!active.controlling && !this.inputStarting)) return;

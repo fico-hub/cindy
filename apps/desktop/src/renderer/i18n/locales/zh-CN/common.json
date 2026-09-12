@@ -2007,6 +2007,7 @@
       },
       "genericOAuth": {
         "subtitle": "订阅账号",
+        "reopenLoginPage": "重新打开登录页",
         "toast": {
           "loggedIn": "已登录 {{name}}",
           "loginFailed": "{{name}} 登录失败，请重试",
@@ -7182,6 +7183,7 @@
     }
   },
   "bots": {
+    "creationName": "名字",
     "settingsBack": "返回设置",
     "sidebar": {
       "newTaskWith": "和{{name}}开个新任务"
@@ -7189,28 +7191,7 @@
     "title": "伙伴",
     "add": "添加伙伴",
     "createWizard": {
-      "createFailed": "无法创建伙伴，请重试。",
-      "templates": {
-        "cindy": {
-          "title": "Cindy 助理",
-          "defaultName": "Cindy",
-          "defaultDescription": "我喜欢把忙乱的日子理顺，也爱听新鲜想法。写作、资料和日常琐事，都可以一起聊聊。"
-        },
-        "dash": {
-          "title": "Dash 公司 CEO",
-          "defaultName": "Dash",
-          "defaultDescription": "我对好产品和好生意充满好奇，聊到有意思的方向会很投入。喜欢把事情想透，再一起做决定。"
-        },
-        "lizi": {
-          "title": "LiZi 技术总监",
-          "defaultName": "LiZi",
-          "defaultDescription": "我喜欢拆解难题，也享受把想法做成作品的过程。遇到棘手的问题，我们就一起找答案。"
-        },
-        "custom": {
-          "title": "自定义"
-        }
-      },
-      "chooseTemplate": "邀请谁"
+      "createFailed": "无法创建伙伴，请重试。"
     },
     "homeFolder": {
       "title": "高级配置",
@@ -7356,7 +7337,15 @@
       "trackedTask": "独立运行并自动回传结果",
       "stopTask": "停止任务",
       "messageSent": "已向后台任务发送消息",
-      "watchWork": "看工作过程",
+      "watchWork": "打开任务",
+      "viewPr": "查看 PR",
+      "stale": "详情可能已过期，暂时无法更新",
+      "artifactCount": "{{count}} 个文件",
+      "prCount": "{{count}} 个 PR",
+      "artifactCount_one": "{{count}} 个文件",
+      "artifactCount_other": "{{count}} 个文件",
+      "prCount_one": "{{count}} 个 PR",
+      "prCount_other": "{{count}} 个 PR",
       "actionFailed": "没发出去，再试一次。",
       "retrying": "还没开始，正在重试…",
       "status": {
@@ -7435,6 +7424,47 @@
       "toolset": "内置工具",
       "unavailable": "不可用",
       "empty": "没有匹配的能力"
+    },
+    "guided": {
+      "title": "创建伙伴",
+      "reviewTitle": "你的新伙伴",
+      "question": "简单描述一下你的期待",
+      "placeholder": "比如，陪我练英语，能聊生活，也能认真纠正我的表达。",
+      "generate": "生成伙伴",
+      "generating": "正在构思伙伴…",
+      "generationFailed": "暂时没能生成，请保留你的想法再试一次。",
+      "modelRequired": "请先在 Cindy 中选择可用的默认模型。",
+      "cindyDescription": "我会帮你使用 Cindy、连接工具，也会和你一起把事情做完。",
+      "cindySummary": "打理 Cindy，连接工具，把事情做完。",
+      "openCindy": "打开 Cindy",
+      "addCindy": "添加 Cindy",
+      "done": "完成",
+      "editName": "编辑名字",
+      "duplicateName": "已有同名伙伴，换一个更容易分辨的名字吧。",
+      "introduction": "自我介绍",
+      "editIntroduction": "编辑自我介绍",
+      "refine": "调整伙伴",
+      "refinePlaceholder": "还想改哪里？比如，少一点客套，多一点幽默。",
+      "back": "返回",
+      "invite": "邀请伙伴",
+      "portrait": "头像 {{number}}",
+      "upload": "上传图片",
+      "generateAvatar": "生成头像",
+      "useAvatar": "使用这张",
+      "examples": {
+        "english": {
+          "label": "练习英语",
+          "prompt": "陪我练英语，从日常话题开始，耐心但不敷衍，认真纠正不自然的表达。"
+        },
+        "ideas": {
+          "label": "一起想点子",
+          "prompt": "一个有想象力也有主见的创作伙伴，陪我讨论写作和产品点子，帮我把想法变成具体方案。"
+        },
+        "life": {
+          "label": "聊聊生活",
+          "prompt": "一个温暖、幽默的伙伴，愿意听我说生活中的小事，不急着给建议。"
+        }
+      }
     }
   },
   "common": {
@@ -11525,6 +11555,7 @@
       "qrExpired": "二维码已过期，请重新开始",
       "registrationFailed": "创建失败，请稍后重试",
       "silentStopExhausted": "模型连续多次返回空响应，自动续跑已暂停。点击「继续」恢复任务。",
+      "executionResultUnavailable": "未能取回执行结果，已停止自动续接。可以让助手检查已有的执行结果。",
       "outputLimit": "模型已达到输出长度上限，本轮回复可能不完整。可以直接发送下一条消息继续。",
       "permissionTightenInterruptFailed": "收紧权限时未能停止正在运行的任务，它可能会继续免确认执行直到结束；如有需要请手动停止。",
       "codexAutoReviewUnavailable": "自动审批暂时不可用，当前操作已阻止并切换为默认权限。请重试，需要时会询问你。",
