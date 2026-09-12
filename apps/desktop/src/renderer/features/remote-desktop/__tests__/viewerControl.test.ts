@@ -42,6 +42,7 @@ async function fixture(firstControl?: Promise<{ controlling: boolean }>) {
     }),
     onActive: () => () => {},
     onLocale: () => () => {},
+    onCloseRequested: () => () => {},
     ice: async () => [],
     clipboard,
     close: async () => {},
@@ -56,6 +57,7 @@ async function fixture(firstControl?: Promise<{ controlling: boolean }>) {
             version: 1,
             enabled: true,
             canControl: true,
+            clipboardText: true,
             automaticReconnect: true,
             displays: [{ id: 'one', name: 'Display', width: 1280, height: 720 }],
           };
@@ -86,6 +88,53 @@ const present = () => runtime.post?.({ type: 'streaming', epoch: 'lease' });
 const inputEnabled = () =>
   runtime.receive.mock.calls.filter(([message]) => message.type === 'control').at(-1)?.[0]
     .enabled ?? false;
+
+it('orders quick copy/paste shortcuts and reports transfer failure without reconnecting', async () => {
+  const current = await fixture();
+  present();
+  const gate = deferred<void>();
+  current.clipboard.mockImplementationOnce(() => gate.promise);
+  runtime.post?.({ type: 'clipboard', action: 'copy', epoch: 'lease' });
+  runtime.post?.({ type: 'clipboard', action: 'paste', epoch: 'lease' });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(current.clipboard).toHaveBeenCalledExactlyOnceWith(1, 'copy');
+  gate.resolve();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(current.clipboard).toHaveBeenLastCalledWith(1, 'paste');
+  current.clipboard.mockRejectedValueOnce(new Error('CLIPBOARD_UNAVAILABLE'));
+  runtime.post?.({ type: 'clipboard', action: 'copy', epoch: 'lease' });
+  runtime.post?.({ type: 'clipboard', action: 'paste', epoch: 'lease' });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(current.clipboard).toHaveBeenCalledTimes(3);
+  expect(snapshot).toMatchObject({
+    clipboardError: true,
+    controlling: true,
+    ready: true,
+    error: null,
+  });
+  runtime.post?.({ type: 'clipboard', action: 'copy', epoch: 'lease' });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(snapshot.clipboardError).toBe(false);
+  expect(current.clipboard).toHaveBeenCalledTimes(4);
+});
+
+it('drops queued clipboard work after control is released and ignores stale shortcut epochs', async () => {
+  const current = await fixture();
+  present();
+  const gate = deferred<void>();
+  current.clipboard.mockImplementationOnce(() => gate.promise);
+  runtime.post?.({ type: 'clipboard', action: 'copy', epoch: 'old-lease' });
+  runtime.post?.({ type: 'clipboard', action: 'invalid', epoch: 'lease' });
+  expect(current.clipboard).not.toHaveBeenCalled();
+  runtime.post?.({ type: 'clipboard', action: 'copy', epoch: 'lease' });
+  runtime.post?.({ type: 'clipboard', action: 'paste', epoch: 'lease' });
+  await vi.advanceTimersByTimeAsync(0);
+  await controller.setControl(false);
+  await controller.setControl(true);
+  gate.resolve();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(current.clipboard).toHaveBeenCalledExactlyOnceWith(1, 'copy');
+});
 
 it.each([true, false])(
   'keeps actions and real input aligned when control finishes before video: %s',

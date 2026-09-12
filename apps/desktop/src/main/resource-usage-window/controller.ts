@@ -40,6 +40,7 @@ export interface ResourceUsageWindowControllerDeps {
   localeChannel?: string;
   prewarmWork?: boolean;
   onActivityChanged?: (window: BrowserWindow, active: boolean) => void;
+  onCloseRequested?: (window: BrowserWindow) => void;
   isOpenSender: (sender: WebContents) => boolean;
   /** 打开监视器的那扇应用窗；用于跟随显隐并在关闭监视器后恢复焦点。 */
   getOwnerWindow?: (sender: WebContents) => ResourceUsageOwnerWindow | null;
@@ -242,7 +243,8 @@ export class ResourceUsageWindowController {
     win.on('close', (event) => {
       if (this.destroyingWindow || this.disposed) return;
       event.preventDefault();
-      this.hideWindow(win);
+      if (this.deps.onCloseRequested) this.deps.onCloseRequested(win);
+      else this.hideWindow(win);
     });
     win.on('closed', () => this.onClosed(win));
     win.on('show', () => this.onNativeVisibilityChanged(win, true));

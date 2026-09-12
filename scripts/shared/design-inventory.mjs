@@ -776,10 +776,11 @@ export function catalogSurfaces() {
       platform: 'desktop',
       title: '远程桌面独立窗口',
       productionEntry: '`?remoteDesktopViewer=1` → renderer/remote-desktop-viewer-entry.tsx',
-      reachableComponents: ['RemoteDesktopViewerWindow', 'Select', 'Button', 'FormField'],
+      reachableComponents: ['RemoteDesktopViewerWindow', 'Select', 'Button', 'FormField', 'ConfirmDialog'],
       styleRoots: [
         'apps/desktop/src/renderer/remote-desktop-viewer-entry.tsx',
         'apps/desktop/src/renderer/features/remote-desktop/RemoteDesktopViewerWindow.tsx',
+        'apps/desktop/src/renderer/components/ui/confirm-dialog.tsx',
         'apps/desktop/src/renderer/components/ui/select.tsx',
         'apps/desktop/src/renderer/components/ui/button.tsx',
         'apps/desktop/src/renderer/components/ui/form-field.tsx',

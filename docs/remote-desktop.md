@@ -6,10 +6,25 @@ Desktop can open a same-account computer's remote desktop from its device card
 in Remote control settings, or the task-list machine menu's Remote desktop submenu.
 It opens a clean, independent window with native mouse/keyboard input and a small
 toolbar. Reopening the same target focuses its existing window. Full screen,
-view-only/control, display selection, sound, video settings and explicit text
-clipboard transfers are available. Resolution changes appear only for a capable
+view-only/control, display selection, sound, video settings and text
+clipboard shortcuts are available. Resolution changes appear only for a capable
 host and affect its actual monitor. Ctrl+Alt+Esc releases keyboard focus;
-Cmd/Ctrl+W closes this viewer, including while it owns keyboard focus.
+Cmd/Ctrl+W requests closing this viewer, including while it owns keyboard focus.
+The toolbar exit, native window close and close shortcut share a confirmation
+dialog; cancelling keeps the connection and control lease. Confirmation belongs
+to the current window generation and cannot close a later connection.
+
+While controlling, the local cursor is hidden inside the remote picture even
+when Windows embeds its cursor in the video rather than sending cursor metadata.
+Cursor hiding is scoped to the remote picture, not the system or window focus:
+moving outside it immediately restores the local cursor even if the viewer keeps
+focus. Local toolbar controls and dialogs retain their cursor. View-only mode
+also restores the local cursor inside the picture.
+With the picture focused, Cmd+C/V on macOS or Ctrl+C/V on Windows copies selected
+remote text to the local clipboard or pastes local text remotely. Transfers use
+the existing authorized Main bridge, are ordered and user-triggered, and report
+failure without reconnecting. There is no background clipboard monitoring or
+automatic context-menu synchronization; images, files and cut are not bridged.
 
 The window reuses the existing resource-usage auxiliary-window controller and
 factory for hidden prewarming, two-phase readiness, hide/reuse and bounded crash

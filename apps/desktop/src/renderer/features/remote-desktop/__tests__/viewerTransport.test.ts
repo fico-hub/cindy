@@ -24,6 +24,7 @@ beforeEach(async () => {
     }),
     onActive: () => () => {},
     onLocale: () => () => {},
+    onCloseRequested: () => () => {},
     ice: async () => [],
     clipboard: async () => {},
     close: async () => {},

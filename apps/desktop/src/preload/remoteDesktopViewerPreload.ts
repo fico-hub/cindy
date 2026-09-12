@@ -83,12 +83,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ice: (generation, attempt) => ipcRenderer.invoke(REMOTE_VIEWER.ICE, generation, attempt),
     clipboard: (generation, action) =>
       ipcRenderer.invoke(REMOTE_VIEWER.CLIPBOARD, generation, action),
-    close: () => ipcRenderer.invoke(REMOTE_VIEWER.CLOSE),
+    close: (generation) => ipcRenderer.invoke(REMOTE_VIEWER.CLOSE, generation),
     fullscreen: () => ipcRenderer.invoke(REMOTE_VIEWER.FULLSCREEN),
     rendererReady: () => ipcRenderer.invoke(REMOTE_VIEWER.READY),
     presentationReady: () => ipcRenderer.invoke(REMOTE_VIEWER.PRESENTED),
     onActive: (cb) => onPayload(REMOTE_VIEWER.ACTIVE, cb),
     onLocale: (cb) => onPayload(REMOTE_VIEWER.LOCALE, cb),
+    onCloseRequested: (cb) => onPayload(REMOTE_VIEWER.CLOSE_REQUESTED, cb),
     inputFocus: (generation, focused) =>
       ipcRenderer.invoke(REMOTE_VIEWER.INPUT_FOCUS, generation, focused),
   } satisfies RemoteDesktopViewerApi,

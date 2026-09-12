@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   Maximize2,
@@ -8,7 +8,6 @@ import {
   Settings2,
   LogOut,
   Monitor,
-  Clipboard,
   Eye,
   MousePointer2,
 } from 'lucide-react';
@@ -20,6 +19,7 @@ import { DesktopViewerController, type ViewerSnapshot } from './viewerController
 import { Select } from '@/components/ui/select';
 import { Button } from '@/components/ui/button';
 import { FormField } from '@/components/ui/form-field';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 
 /** A clean, standalone remote desktop surface. No App, router, agent or task providers. */
 export function RemoteDesktopViewerWindow() {
@@ -32,20 +32,26 @@ export function RemoteDesktopViewerWindow() {
   const [settings, setSettings] = useState(false),
     [selectOpen, setSelectOpen] = useState(false),
     [notice, setNotice] = useState<string | null>(null),
-    [clipboardBusy, setClipboardBusy] = useState(false);
+    [closeGeneration, setCloseGeneration] = useState<number | null>(null);
   const [modes, setModes] = useState<RemoteDesktopDisplayMode[]>([]);
   const generation = useRef(-1);
+  const requestClose = useCallback(() => {
+    controller.current?.releaseInput();
+    setSettings(false);
+    setSelectOpen(false);
+    setCloseGeneration(generation.current);
+  }, []);
   useEffect(() => {
     if (!root.current) return;
     controller.current = new DesktopViewerController(api, root.current, setState);
     const off = api.onActive((value) => {
+      if (value.generation !== generation.current || !value.active) setCloseGeneration(null);
       generation.current = value.generation;
       if (!value.active) {
         setSettings(false);
         setSelectOpen(false);
         setNotice(null);
         setModes([]);
-        setClipboardBusy(false);
         (document.activeElement as HTMLElement | null)?.blur();
       }
     });
@@ -53,6 +59,9 @@ export function RemoteDesktopViewerWindow() {
       // useTranslation's i18n wrapper changes with the locale. Keep the
       // connection lifetime independent of that presentation-only update.
       void i18n.changeLanguage(value);
+    });
+    const closeRequested = api.onCloseRequested((value) => {
+      if (value === generation.current) requestClose();
     });
     const blur = () => {
       controller.current?.releaseInput();
@@ -79,26 +88,13 @@ export function RemoteDesktopViewerWindow() {
     return () => {
       off();
       locale();
+      closeRequested();
       document.removeEventListener('focusin', focus);
       window.removeEventListener('blur', blur);
       controller.current?.dispose();
       controller.current = null;
     };
-  }, [api]);
-  const clipboard = async (action: 'copy' | 'paste') => {
-    if (clipboardBusy) return;
-    setClipboardBusy(true);
-    setNotice(null);
-    const current = generation.current;
-    try {
-      await controller.current?.clipboard(action);
-      if (current === generation.current) setNotice(t('remoteDesktop.viewer.clipboardDone'));
-    } catch {
-      if (current === generation.current) setNotice(t('remoteDesktop.viewer.clipboardFailed'));
-    } finally {
-      if (current === generation.current) setClipboardBusy(false);
-    }
-  };
+  }, [api, requestClose]);
   const toggleSettings = () => {
     controller.current?.releaseInput();
     setSettings((value) => !value);
@@ -217,11 +213,11 @@ export function RemoteDesktopViewerWindow() {
           variant="secondary"
           className={action}
           aria-label={t('remoteDesktop.disconnect')}
-          onClick={() => void api.close()}
+          onClick={requestClose}
         >
           <LogOut size={16} />
         </Button>
-        {!isMac && <WindowControls onClose={() => api.close()} />}
+        {!isMac && <WindowControls onClose={requestClose} />}
         {settings && (
           <aside className="remote-viewer-settings" aria-label={t('remoteDesktop.viewer.settings')}>
             <div className="flex items-center justify-between">
@@ -332,31 +328,6 @@ export function RemoteDesktopViewerWindow() {
                 </Button>
               </div>
             )}
-            {state?.caps?.clipboardText && (
-              <div className="flex flex-col gap-2">
-                <span className="flex items-center gap-2">
-                  <Clipboard size={16} />
-                  {t('remoteDesktop.viewer.clipboard')}
-                </span>
-                <p>{t('remoteDesktop.viewer.clipboardHint')}</p>
-                <Button
-                  variant="secondary"
-                  className={action}
-                  disabled={!state.controlling || state.controlPending || clipboardBusy}
-                  onClick={() => void clipboard('copy')}
-                >
-                  {t('remoteDesktop.viewer.copy')}
-                </Button>
-                <Button
-                  variant="secondary"
-                  className={action}
-                  disabled={!state.controlling || state.controlPending || clipboardBusy}
-                  onClick={() => void clipboard('paste')}
-                >
-                  {t('remoteDesktop.viewer.paste')}
-                </Button>
-              </div>
-            )}
             <Button
               variant="secondary"
               className={action}
@@ -384,6 +355,13 @@ export function RemoteDesktopViewerWindow() {
               {t('remoteDesktop.allWindows')}
             </Button>
             <p>{t('remoteDesktop.viewer.inputHint')}</p>
+            {state?.caps?.clipboardText && (
+              <p>
+                {t('remoteDesktop.viewer.clipboardShortcutHint', {
+                  modifier: isMac ? '⌘' : 'Ctrl',
+                })}
+              </p>
+            )}
             {state?.caps?.displayModes && <p>{t('remoteDesktop.viewer.resolutionHint')}</p>}
             {notice && <p role="status">{notice}</p>}
           </aside>
@@ -458,7 +436,30 @@ export function RemoteDesktopViewerWindow() {
           </div>
         )}
         {isFullscreen && network && <div className="remote-viewer-network-overlay">{network}</div>}
+        {state?.clipboardError && (
+          <div className="remote-viewer-notice" role="status">
+            {t('remoteDesktop.viewer.clipboardFailed')}
+          </div>
+        )}
       </div>
+      <ConfirmDialog
+        presentation="standard"
+        open={closeGeneration !== null}
+        onOpenChange={(open) => {
+          if (!open) setCloseGeneration(null);
+        }}
+        title={t('remoteDesktop.viewer.confirmDisconnect')}
+        description={t('remoteDesktop.viewer.confirmDisconnectHint')}
+        confirmText={t('remoteDesktop.disconnect')}
+        onConfirm={() => {
+          if (closeGeneration === null || closeGeneration !== generation.current) return;
+          void api.close(closeGeneration).catch(() => {
+            if (closeGeneration !== generation.current) return;
+            setNotice(t('remoteDesktop.viewer.disconnectFailed'));
+            setSettings(true);
+          });
+        }}
+      />
     </div>
   );
 }

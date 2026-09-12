@@ -78,6 +78,15 @@ export class RemoteDesktopViewerWindows {
     }
     this.entries.clear();
   }
+  private requestClose(entry: Entry): void {
+    const win = entry.window;
+    if (!win || win.isDestroyed()) return;
+    if (!entry.connection.active) {
+      entry.controller.close(win.webContents);
+      return;
+    }
+    win.webContents.send(REMOTE_VIEWER.CLOSE_REQUESTED, entry.connection.generation);
+  }
   private create(): Entry {
     const connection = new RemoteViewerConnection({
       owner: activeOwnerScopeKey,
@@ -120,6 +129,7 @@ export class RemoteDesktopViewerWindows {
       activityChannel: REMOTE_VIEWER.ACTIVE,
       activityPayload: () => connection.snapshot(),
       localeChannel: REMOTE_VIEWER.LOCALE,
+      onCloseRequested: () => this.requestClose(entry),
       resolveNativeTitle: () =>
         [connection.target?.name, t('remoteDesktop.title')].filter(Boolean).join(' · '),
       onActivityChanged: (win, active) => {
@@ -148,7 +158,7 @@ export class RemoteDesktopViewerWindows {
         win.webContents.on('before-input-event', (event, input) => {
           if (input.type === 'keyDown' && input.code === 'KeyW' && (input.meta || input.control)) {
             event.preventDefault();
-            entry.controller.close(win.webContents);
+            this.requestClose(entry);
           }
         });
         return win;
@@ -180,8 +190,10 @@ export class RemoteDesktopViewerWindows {
     ipcMain.handle(REMOTE_VIEWER.PRESENTED, (event) => {
       this.entry(event).controller.markPresentationReady(event.sender);
     });
-    ipcMain.handle(REMOTE_VIEWER.CLOSE, (event) => {
-      this.entry(event).controller.close(event.sender);
+    ipcMain.handle(REMOTE_VIEWER.CLOSE, (event, generation) => {
+      const entry = this.entry(event);
+      if (generation !== entry.connection.generation) return;
+      entry.controller.close(event.sender);
     });
     ipcMain.handle(REMOTE_VIEWER.REQUEST, async (event, generation, request, attempt) => {
       const result = await this.entry(event).connection.request(generation, request, attempt);

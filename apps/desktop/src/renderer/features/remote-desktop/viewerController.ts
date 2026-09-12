@@ -23,6 +23,7 @@ export interface ViewerSnapshot {
   target: RemoteViewerState['target'];
   status: string;
   error: string | null;
+  clipboardError?: boolean;
   controlling: boolean;
   controlPending: boolean;
   caps: RemoteDesktopCapabilities | null;
@@ -61,6 +62,9 @@ export class DesktopViewerController {
   private frameBusy: string | null = null;
   private heartbeatBusy: string | null = null;
   private streaming = false;
+  private clipboardQueue: Promise<void> = Promise.resolve();
+  private clipboardQueued = 0;
+  private clipboardRevision = 0;
   private session: RemoteDesktopViewerSession;
   private media: RemoteDesktopViewerMedia;
   private runtime: ReturnType<typeof mountRemoteDesktopViewer>;
@@ -143,6 +147,8 @@ export class DesktopViewerController {
   }
   private cancel(preserveFrame = false): void {
     this.epoch++;
+    this.clipboardQueue = Promise.resolve();
+    this.clipboardQueued = 0;
     this.opening = false;
     this.streaming = false;
     this.media.reset();
@@ -155,6 +161,7 @@ export class DesktopViewerController {
       ready: false,
       transport: '',
       latency: null,
+      clipboardError: false,
     });
   }
   private async connect(takeover = false): Promise<void> {
@@ -186,6 +193,11 @@ export class DesktopViewerController {
         fillHeight: false,
         trickleIce: caps.trickleIce === true,
         audio: caps.systemAudio && this.state.settings.audio,
+        clipboardShortcuts: caps.clipboardText === true,
+        clipboardModifier:
+          typeof window !== 'undefined' && window.electronAPI?.platform === 'darwin'
+            ? 'meta'
+            : 'control',
       });
       this.runtime.receive({ type: 'mode', mode: 'pointer' });
       if (caps.canControl && this.wantsControl) await this.setControl(true);
@@ -245,6 +257,7 @@ export class DesktopViewerController {
       !this.state.controlPending &&
       this.session.lease?.controlling === true;
     if (controlling === this.state.controlling) return;
+    this.clipboardRevision++;
     this.publish({ controlling });
     this.runtime.receive({ type: 'control', enabled: controlling });
   }
@@ -285,8 +298,30 @@ export class DesktopViewerController {
   }
   async clipboard(action: 'copy' | 'paste'): Promise<void> {
     if (!this.state.controlling) throw new Error('DESKTOP_VIEW_ONLY');
+    if (this.clipboardQueued >= 8) throw new Error('CLIPBOARD_BUSY');
+    const epoch = this.epoch;
+    const generation = this.scope.generation;
+    const revision = this.clipboardRevision;
+    if (this.clipboardQueued === 0) this.clipboardQueue = Promise.resolve();
+    this.clipboardQueued++;
     this.releaseInput();
-    await this.api.clipboard(this.scope.generation, action);
+    this.publish({ clipboardError: false });
+    const transfer = this.clipboardQueue.then(async () => {
+      if (
+        epoch !== this.epoch ||
+        revision !== this.clipboardRevision ||
+        this.disposed ||
+        !this.state.controlling
+      )
+        throw new Error('DESKTOP_STOPPED');
+      await this.api.clipboard(generation, action);
+    });
+    this.clipboardQueue = transfer;
+    try {
+      await transfer;
+    } finally {
+      if (epoch === this.epoch) this.clipboardQueued--;
+    }
   }
   async permissionGuide(): Promise<void> {
     await this.request({ op: 'permissions', action: 'guide' });
@@ -367,6 +402,19 @@ export class DesktopViewerController {
       return;
     }
     switch (message.type) {
+      case 'clipboard': {
+        if (
+          !this.state.controlling ||
+          !this.state.caps?.clipboardText ||
+          (message.action !== 'copy' && message.action !== 'paste')
+        )
+          break;
+        const epoch = this.epoch;
+        void this.clipboard(message.action).catch(() => {
+          if (epoch === this.epoch && !this.disposed) this.publish({ clipboardError: true });
+        });
+        break;
+      }
       case 'streaming':
         this.streaming = true;
         this.publish({ transport: 'video', latency: null });

@@ -112,6 +112,9 @@ export function mountRemoteDesktopViewer(root, postMessage, config) {
     fy = 0.5,
     mode = "pointer",
     control = false,
+    clipboardShortcuts = false,
+    clipboardModifier = "control",
+    deferredClipboardModifier = null,
     pc = null,
     dc = null,
     seq = 0,
@@ -157,6 +160,7 @@ export function mountRemoteDesktopViewer(root, postMessage, config) {
       return;
     }
     if (composing) return;
+    if (config.desktop && document.activeElement === keyboardInput) return;
     // Keep focus inside the native evaluateJavaScript call; WebKit can reject
     // keyboard presentation after requestAnimationFrame loses user activation.
     keyboardInput.blur();
@@ -426,7 +430,7 @@ export function mountRemoteDesktopViewer(root, postMessage, config) {
       cursor.style.display =
         !config.desktop && control && (mode === "pointer" || mode === "touch") ? "block" : "none";
     }
-    if (config.desktop) stage.style.cursor = control && remoteCursor?.visible ? "none" : "default";
+    if (config.desktop) stage.style.cursor = control ? "none" : "default";
   }
   // Literal source is required: Hermes function.toString() yields bytecode.
   function validCursor(v) {
@@ -488,6 +492,8 @@ export function mountRemoteDesktopViewer(root, postMessage, config) {
   }
   function queue(event) {
     if (!control) return;
+    if (config.desktop && (event.kind === "button" || event.kind === "scroll"))
+      flushClipboardModifier();
     // Remote visibility can remain hidden after synthetic mouse movement. Wake
     // the local touchpad cursor until the host reports a visible cursor again.
     if (event.kind === "move" && mode === "pointer") localCursorAwake = true;
@@ -540,6 +546,7 @@ export function mountRemoteDesktopViewer(root, postMessage, config) {
   }, 33);
   cleanups.push(() => clearInterval(inputTimer));
   function release() {
+    deferredClipboardModifier = null;
     clearTimeout(hold);
     if (gestureFrame !== null) cancelAnimationFrame(gestureFrame);
     gestureFrame = null;
@@ -960,6 +967,13 @@ export function mountRemoteDesktopViewer(root, postMessage, config) {
       ? code.replace(/Right$/, "Left")
       : code;
   const hardwareKeys = new Set();
+  function flushClipboardModifier() {
+    if (!deferredClipboardModifier) return;
+    const code = deferredClipboardModifier;
+    deferredClipboardModifier = null;
+    hardwareKeys.add(code);
+    queue({ kind: "key", code, down: true });
+  }
   listen(document, "keydown", (e) => {
     if (config.desktop) {
       if (e.ctrlKey && e.altKey && e.code === "Escape") {
@@ -977,6 +991,32 @@ export function mountRemoteDesktopViewer(root, postMessage, config) {
         return;
       if ((e.metaKey || e.ctrlKey) && e.code === "KeyW") return; // always retain a local close shortcut
       if (
+        control &&
+        clipboardShortcuts &&
+        normalizedKey(e.code) === (clipboardModifier === "meta" ? "MetaLeft" : "ControlLeft")
+      ) {
+        e.preventDefault();
+        if (!hardwareKeys.has(normalizedKey(e.code)))
+          deferredClipboardModifier = normalizedKey(e.code);
+        return;
+      }
+      if (
+        control &&
+        clipboardShortcuts &&
+        (clipboardModifier === "meta" ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey) &&
+        !e.altKey &&
+        !e.shiftKey &&
+        (e.code === "KeyC" || e.code === "KeyV")
+      ) {
+        e.preventDefault();
+        if (!e.repeat) {
+          release();
+          hardwareKeys.clear();
+          post({ type: "clipboard", action: e.code === "KeyC" ? "copy" : "paste" });
+        }
+        return;
+      }
+      if (
         !e.ctrlKey &&
         !e.metaKey &&
         !e.altKey &&
@@ -986,12 +1026,16 @@ export function mountRemoteDesktopViewer(root, postMessage, config) {
     }
     if (control && validKeys.has(normalizedKey(e.code))) {
       e.preventDefault();
+      flushClipboardModifier();
       hardwareKeys.add(normalizedKey(e.code));
       queue({ kind: "key", code: normalizedKey(e.code), down: true });
     }
   });
   listen(document, "keyup", (e) => {
     const code = normalizedKey(e.code);
+    if (config.desktop && control && deferredClipboardModifier === code) {
+      flushClipboardModifier();
+    }
     if (config.desktop && !hardwareKeys.delete(code)) return;
     if (control && validKeys.has(code)) {
       e.preventDefault();
@@ -1580,6 +1624,8 @@ export function mountRemoteDesktopViewer(root, postMessage, config) {
         sending = false;
         seq = 0;
         epoch = message.epoch;
+        clipboardShortcuts = config.desktop && message.clipboardShortcuts === true;
+        clipboardModifier = message.clipboardModifier === "meta" ? "meta" : "control";
         dw = message.width;
         dh = message.height;
         fillHeight = message.fillHeight === true;

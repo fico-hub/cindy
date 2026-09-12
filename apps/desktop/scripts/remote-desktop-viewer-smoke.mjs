@@ -21,7 +21,9 @@ try {
   await host.goto(origin.origin);
   await host.setContent('<canvas width="1280" height="720"></canvas>');
   const errors = [];
-  viewer.on('pageerror', (e) => errors.push(e.message));
+  viewer.on('pageerror', (error) => {
+    errors.push(error.message);
+  });
   const requests = [];
   let controlling = false;
   await viewer.exposeFunction('viewerRequest', async (request) => {
@@ -113,6 +115,8 @@ try {
       generation: 1,
       active: true,
     };
+    window.clipboardActions = [];
+    window.confirmedCloses = [];
     window.electronAPI = {
       platform: controllerPlatform,
       preferredSystemLocale: 'en',
@@ -145,9 +149,14 @@ try {
         request: (_generation, request) => window.viewerRequest(request),
         ice: async () => [],
         inputFocus: async () => {},
-        close: async () => {},
+        close: async (generation) => {
+          window.confirmedCloses.push(generation);
+        },
+        onCloseRequested: () => () => {},
         fullscreen: async () => {},
-        clipboard: async () => {},
+        clipboard: async (_generation, action) => {
+          window.clipboardActions.push(action);
+        },
       },
     };
   }, controllerPlatform);
@@ -160,6 +169,7 @@ try {
   await viewer.waitForFunction(() => document.querySelector('.remote-viewer-network') !== null);
   const stage = await viewer.locator('#stage').boundingBox();
   assert(stage);
+  assert.equal(await viewer.locator('#stage').evaluate((element) => element.style.cursor), 'none');
   await viewer.mouse.move(stage.x + 400, stage.y + 300);
   await host.waitForFunction(() => window.inputs.some((event) => event.kind === 'move'));
   await viewer.mouse.down();
@@ -222,13 +232,41 @@ try {
     ),
     'menu keyboard navigation never reaches the remote computer',
   );
+  const checkExitDialog = async (theme) => {
+    const labels = await viewer.evaluate(async () => {
+      const catalog = (await import('/i18n/index.ts')).default;
+      return {
+        exit: catalog.t('remoteDesktop.disconnect'),
+        cancel: catalog.t('commonUi.confirmDialog.cancel'),
+      };
+    });
+    await viewer.getByRole('button', { name: labels.exit, exact: true }).click();
+    const dialog = viewer.getByRole('alertdialog');
+    await dialog.waitFor();
+    assert.deepEqual(await viewer.evaluate(() => window.confirmedCloses), []);
+    await viewer.screenshot({
+      animations: 'disabled',
+      path: path.join(artifacts, 'exit-' + theme + '.png'),
+    });
+    await dialog.getByRole('button', { name: labels.cancel, exact: true }).click();
+    await dialog.waitFor({ state: 'hidden' });
+    assert.deepEqual(await viewer.evaluate(() => window.confirmedCloses), []);
+  };
   await viewer.screenshot({ animations: 'disabled', path: path.join(artifacts, 'light.png') });
+  await checkExitDialog('light');
+  await viewer.locator('#stage').click();
+  const modifier = controllerPlatform === 'darwin' ? 'Meta' : 'Control';
+  await viewer.keyboard.press(modifier + '+c');
+  await viewer.keyboard.press(modifier + '+v');
+  await viewer.waitForFunction(() => window.clipboardActions.length === 2);
+  assert.deepEqual(await viewer.evaluate(() => window.clipboardActions), ['copy', 'paste']);
   await viewer.evaluate(async () => {
     const { themeService } = await import('/themes/theme-service.ts');
     const { cindyDark } = await import('/themes/builtin/cindy-dark.ts');
     themeService.applyTheme(cindyDark);
   });
   await viewer.screenshot({ animations: 'disabled', path: path.join(artifacts, 'dark.png') });
+  await checkExitDialog('dark');
   await host.evaluate(() => window.peer.close());
   await viewer.waitForFunction(
     () =>
@@ -285,8 +323,8 @@ try {
     (await import('/i18n/index.ts')).default.t('remoteDesktop.releaseControl'),
   );
   await viewer.getByRole('button', { name: releaseLabel, exact: true }).click();
-  const copyButton = settings.getByRole('button', { name: '复制远端文字', exact: true });
-  assert(await copyButton.isDisabled(), 'view-only actions explain why control is required');
+  const desktopButton = settings.getByRole('button', { name: '桌面', exact: true });
+  assert(await desktopButton.isDisabled(), 'view-only actions explain why control is required');
   await settings.getByText('当前仅查看，取得控制权后可使用剪贴板和桌面操作。').waitFor();
   const takeLabel = await viewer.evaluate(async () =>
     (await import('/i18n/index.ts')).default.t('remoteDesktop.takeControl'),
@@ -294,7 +332,7 @@ try {
   await settings.getByRole('button', { name: takeLabel, exact: true }).click();
   await viewer.waitForFunction(() => {
     const button = [...document.querySelectorAll('aside button')].find(
-      (item) => item.textContent === '复制远端文字',
+      (item) => item.textContent === '桌面',
     );
     return button && !button.disabled;
   });
@@ -368,6 +406,8 @@ try {
       video: true,
       keyboard: true,
       mouse: true,
+      clipboardShortcuts: true,
+      exitConfirmation: true,
       controllerPlatform,
       mediaRecovery: true,
       chineseSettings: true,

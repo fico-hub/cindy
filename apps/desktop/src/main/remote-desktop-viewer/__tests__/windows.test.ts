@@ -95,6 +95,42 @@ afterEach(() => {
 const event = (win: any) => ({ sender: win.webContents, senderFrame: win.webContents.mainFrame });
 const call = (channel: string, win: any, ...args: unknown[]) =>
   fixture.handlers.get(channel)!(event(win), ...args);
+it('routes native close and the close shortcut to confirmation without ending the lease', () => {
+  const sender: any = { id: 100 };
+  manager = new RemoteDesktopViewerWindows((value) => value === sender);
+  manager.register();
+  manager.open(sender, { deviceId: 'a', name: 'A' });
+  const win = fixture.windows[0];
+  call(REMOTE_VIEWER.READY, win);
+  call(REMOTE_VIEWER.PRESENTED, win);
+  const state = call(REMOTE_VIEWER.STATE, win);
+  const preventDefault = vi.fn();
+  win.emit('close', { preventDefault });
+  win.webContents.emit(
+    'before-input-event',
+    { preventDefault },
+    {
+      type: 'keyDown',
+      code: 'KeyW',
+      control: true,
+    },
+  );
+  expect(preventDefault).toHaveBeenCalledTimes(2);
+  expect(win.webContents.send).toHaveBeenCalledWith(
+    REMOTE_VIEWER.CLOSE_REQUESTED,
+    state.generation,
+  );
+  expect(win.isVisible()).toBe(true);
+  expect(call(REMOTE_VIEWER.STATE, win).active).toBe(true);
+  call(REMOTE_VIEWER.CLOSE, win, state.generation - 1);
+  expect(win.isVisible()).toBe(true);
+  call(REMOTE_VIEWER.CLOSE, win, state.generation);
+  expect(win.isVisible()).toBe(false);
+  manager.open(sender, { deviceId: 'a', name: 'A' });
+  call(REMOTE_VIEWER.CLOSE, win, state.generation);
+  expect(call(REMOTE_VIEWER.STATE, win).active).toBe(true);
+  expect(win.isVisible()).toBe(true);
+});
 it('prewarms without network or focus, reuses the target window and cleans only its lease', async () => {
   const sender: any = { id: 100 };
   manager = new RemoteDesktopViewerWindows((value) => value === sender);
@@ -118,7 +154,7 @@ it('prewarms without network or focus, reuses the target window and cleans only 
   call(REMOTE_VIEWER.PRESENTED, b);
   const bState = call(REMOTE_VIEWER.STATE, b);
   await call(REMOTE_VIEWER.REQUEST, b, bState.generation, { op: 'start', displayId: 'screen' });
-  call(REMOTE_VIEWER.CLOSE, a);
+  call(REMOTE_VIEWER.CLOSE, a, aState.generation);
   await Promise.resolve();
   expect(call(REMOTE_VIEWER.STATE, b).active).toBe(true);
   expect(fixture.calls.filter((c) => c[2][0].op === 'stop').map((c) => c[0])).toEqual(['a']);

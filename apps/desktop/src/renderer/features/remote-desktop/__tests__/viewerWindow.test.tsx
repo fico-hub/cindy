@@ -33,6 +33,61 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+it('confirms toolbar and native exits, keeps cancellation connected, and discards stale confirmations', async () => {
+  await i18n.changeLanguage('zh-CN');
+  const close = vi.fn(async () => {});
+  let closeRequested!: (generation: number) => void;
+  let active!: (state: { generation: number; active: boolean }) => void;
+  Object.assign(window, {
+    electronAPI: {
+      remoteDesktopViewer: {
+        onActive: (listener: typeof active) => {
+          active = listener;
+          return () => {};
+        },
+        onLocale: () => () => {},
+        onCloseRequested: (listener: typeof closeRequested) => {
+          closeRequested = listener;
+          return () => {};
+        },
+        state: async () => ({ generation: 1 }),
+        rendererReady: async () => {},
+        presentationReady: async () => {},
+        inputFocus: async () => {},
+        close,
+      },
+    },
+  });
+  render(<RemoteDesktopViewerWindow />);
+  await act(async () => {});
+  fireEvent.click(screen.getByRole('button', { name: i18n.t('remoteDesktop.disconnect') }));
+  expect(close).not.toHaveBeenCalled();
+  expect(lifecycle.releaseInput).toHaveBeenCalled();
+  const dialog = within(screen.getByRole('alertdialog'));
+  const cancel = dialog.getByRole('button', { name: i18n.t('commonUi.confirmDialog.cancel') });
+  expect(document.activeElement).toBe(cancel);
+  fireEvent.click(cancel);
+  expect(close).not.toHaveBeenCalled();
+  expect(screen.queryByRole('alertdialog')).toBeNull();
+  act(() => {
+    closeRequested(1);
+    closeRequested(1);
+  });
+  expect(screen.getAllByRole('alertdialog')).toHaveLength(1);
+  fireEvent.click(
+    within(screen.getByRole('alertdialog')).getByRole('button', {
+      name: i18n.t('remoteDesktop.disconnect'),
+    }),
+  );
+  expect(close).toHaveBeenCalledExactlyOnceWith(1);
+  act(() => closeRequested(1));
+  act(() => active({ generation: 2, active: false }));
+  expect(screen.queryByRole('alertdialog')).toBeNull();
+  act(() => closeRequested(1));
+  expect(screen.queryByRole('alertdialog')).toBeNull();
+  expect(close).toHaveBeenCalledOnce();
+});
+
 it('explains view-only actions and enables the same actions when control is confirmed', async () => {
   await i18n.changeLanguage('zh-CN');
   Object.assign(window, {
@@ -40,6 +95,7 @@ it('explains view-only actions and enables the same actions when control is conf
       remoteDesktopViewer: {
         onActive: () => () => {},
         onLocale: () => () => {},
+        onCloseRequested: () => () => {},
         state: async () => ({ generation: 1 }),
         rendererReady: async () => {},
         presentationReady: async () => {},
@@ -72,17 +128,21 @@ it('explains view-only actions and enables the same actions when control is conf
   fireEvent.click(screen.getByRole('button', { name: '操作' }));
   const panel = within(screen.getByRole('complementary', { name: '操作' }));
   expect(panel.getByText(i18n.t('remoteDesktop.viewer.controlRequired'))).toBeDefined();
-  const copy = panel.getByRole('button', {
-    name: i18n.t('remoteDesktop.viewer.copy'),
+  expect(panel.queryByText('文字剪贴板')).toBeNull();
+  expect(
+    panel.getByText(i18n.t('remoteDesktop.viewer.clipboardShortcutHint', { modifier: '⌘' })),
+  ).toBeDefined();
+  const desktop = panel.getByRole('button', {
+    name: i18n.t('remoteDesktop.showDesktop'),
   }) as HTMLButtonElement;
-  expect(copy.disabled).toBe(true);
+  expect(desktop.disabled).toBe(true);
   fireEvent.click(panel.getByRole('button', { name: i18n.t('remoteDesktop.takeControl') }));
   expect(lifecycle.setControl).toHaveBeenCalledWith(true);
   await act(async () => lifecycle.update?.({ ...state, controlPending: true }));
   expect(panel.getByText(i18n.t('remoteDesktop.viewer.controlPending'))).toBeDefined();
-  expect(copy.disabled).toBe(true);
+  expect(desktop.disabled).toBe(true);
   await act(async () => lifecycle.update?.({ ...state, controlling: true }));
-  expect(copy.disabled).toBe(false);
+  expect(desktop.disabled).toBe(false);
   expect(panel.queryByText(i18n.t('remoteDesktop.viewer.controlRequired'))).toBeNull();
 });
 
@@ -97,6 +157,7 @@ it.each([
       remoteDesktopViewer: {
         onActive: () => () => {},
         onLocale: () => () => {},
+        onCloseRequested: () => () => {},
         state: async () => ({ generation: 1 }),
         rendererReady: async () => {},
         presentationReady: async () => {},
@@ -132,6 +193,7 @@ it('updates translated controls without ending or recreating the viewer connecti
     electronAPI: {
       remoteDesktopViewer: {
         onActive: () => () => {},
+        onCloseRequested: () => () => {},
         onLocale: (listener: (locale: string) => void) => {
           listeners.add(listener);
           return () => listeners.delete(listener);

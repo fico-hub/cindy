@@ -7,6 +7,7 @@ export const REMOTE_VIEWER = {
   ICE: 'remote-desktop-viewer:ice',
   CLIPBOARD: 'remote-desktop-viewer:clipboard',
   CLOSE: 'remote-desktop-viewer:close',
+  CLOSE_REQUESTED: 'remote-desktop-viewer:close-requested',
   READY: 'remote-desktop-viewer:ready',
   PRESENTED: 'remote-desktop-viewer:presented',
   ACTIVE: 'remote-desktop-viewer:active',
@@ -36,11 +37,12 @@ export interface RemoteDesktopViewerApi {
   ): Promise<unknown>;
   ice(generation: number, mediaAttempt: string): Promise<DesktopIceServer[]>;
   clipboard(generation: number, action: 'copy' | 'paste'): Promise<void>;
-  close(): Promise<void>;
+  close(generation: number): Promise<void>;
   fullscreen(): Promise<void>;
   rendererReady(): Promise<void>;
   presentationReady(): Promise<void>;
   onActive(listener: (state: RemoteViewerState) => void): () => void;
   onLocale(listener: (locale: string) => void): () => void;
+  onCloseRequested(listener: (generation: number) => void): () => void;
   inputFocus(generation: number, focused: boolean): Promise<void>;
 }
