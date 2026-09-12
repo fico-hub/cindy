@@ -1353,14 +1353,21 @@ function SessionGroupNode({
           'transition-colors hover:bg-sidebar-item-hover',
         )}
       >
-        {/* 灯语与 ProjectNode 表头同款:running → 呼吸橙(动画挂 wrapper)。 */}
+        {/* 灯语与 ProjectNode 表头同款:running → 呼吸橙(动画挂 wrapper)。
+            伙伴组头的 groupIcon 是 BotAvatar:头像自带内联身份色与文字色,不继承
+            wrapper 的 currentColor,呼吸也只是身份色头像在闪;reduce-motion 停掉动画后
+            就什么运行标记都没有(Codex review)。因此有 groupIcon 时另加一圈运行色
+            描边——静态、走 --status-bar-accent、与减弱动效无关;线条图标路径仍靠
+            currentColor,不需要描边。 */}
         <span
           className={cn(
             'inline-flex shrink-0',
             lamp?.running
               ? 'text-[var(--status-bar-accent)] session-status-breathing'
               : 'text-[var(--sidebar-list-muted)]',
+            lamp?.running && groupIcon && 'rounded-full ring-2 ring-[var(--status-bar-accent)]',
           )}
+          data-running-marker={lamp?.running ? (groupIcon ? 'ring' : 'icon') : undefined}
         >
           {groupIcon ?? <MessagesSquare size={15} strokeWidth={1.8} aria-hidden />}
         </span>

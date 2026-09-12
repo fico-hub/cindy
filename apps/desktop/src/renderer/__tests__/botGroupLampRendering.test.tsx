@@ -92,7 +92,13 @@ describe.each([false, true])('Bot groups with device grouping %s', (groupDevice)
     const header = screen.getByText('Demo Bot').closest('[role="button"]')!;
     if (phase === 'running') {
       expect(header.querySelector('.session-status-breathing')).not.toBeNull();
+      // 伙伴头像不吃 wrapper 的 currentColor,运行色必须以静态描边落在 wrapper 上,
+      // 减弱动效(动画被全局关掉)时仍可见(Codex review)。
+      const marker = header.querySelector('[data-running-marker]')!;
+      expect(marker.getAttribute('data-running-marker')).toBe('ring');
+      expect(marker.className).toContain('ring-[var(--status-bar-accent)]');
     } else {
+      expect(header.querySelector('[data-running-marker]')).toBeNull();
       const tone = phase === 'needs-interaction' ? 'awaiting' : phase === 'error' ? 'error' : 'done';
       expect(header.querySelector(`[class*="--card-status-${tone}"]`)).not.toBeNull();
     }
