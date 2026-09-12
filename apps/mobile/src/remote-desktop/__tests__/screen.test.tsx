@@ -338,6 +338,7 @@ beforeEach(() => {
           lockOnExit: fixture.lockSupported,
           trickleIce: fixture.trickleIce,
           automaticReconnect: true,
+          connectionTakeover: true,
           backgroundViewing: true,
           enabled: true,
           canControl: fixture.canControl,
@@ -1973,6 +1974,37 @@ describe("remote desktop controls", () => {
     expect(button("keyboard").disabled).toBe(true);
     await act(async () => button("viewOnly").click());
     expect(button("keyboard").disabled).toBe(false);
+  });
+  it("asks before taking over an existing remote desktop viewer", async () => {
+    const original = fixture.invoke.getMockImplementation()!;
+    let firstStart = true;
+    fixture.invoke.mockImplementation((...args) => {
+      const request = args[2][0];
+      if (request.op === "start" && firstStart) {
+        firstStart = false;
+        return Promise.reject(new Error("DESKTOP_BUSY"));
+      }
+      return original(...args);
+    });
+
+    await connect();
+
+    expect(fixture.alert).toHaveBeenCalledWith(
+      "remoteDesktop.connectionBusy",
+      "remoteDesktop.connectionBusyTakeover",
+      expect.any(Array),
+    );
+    const buttons = fixture.alert.mock.calls.at(-1)![2] as Array<{
+      onPress?: () => void;
+    }>;
+    await act(async () => {
+      buttons[1].onPress?.();
+    });
+    expect(requests()).toContainEqual({
+      op: "start",
+      displayId: "display",
+      takeover: true,
+    });
   });
   it("rotation preserves the viewer and control lease", async () => {
     await connect();

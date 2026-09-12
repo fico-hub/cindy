@@ -70,6 +70,16 @@ describe('remote desktop authority and lifecycle', () => {
     ).resolves.toEqual({ controlling: true });
     expect(h.deps.stopVideo).not.toHaveBeenCalled();
   });
+
+  it('expires abandoned leases when the host status is polled', async () => {
+    const h = harness();
+    await h.start();
+    h.advance(120_000);
+
+    expect(h.controller.state).toBeNull();
+    expect(h.deps.stopInput).toHaveBeenCalledOnce();
+    expect(h.deps.stopVideo).toHaveBeenCalledOnce();
+  });
   it('does not grant control after the native helper fails during startup', async () => {
     const h = harness(),
       lease = await h.start();
