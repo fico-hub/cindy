@@ -1,14 +1,20 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, render, screen, within } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import i18n from '@/i18n';
 import { RemoteDesktopViewerWindow } from '../RemoteDesktopViewerWindow';
+import type { ViewerSnapshot } from '../viewerController';
 
-const lifecycle = vi.hoisted(() => ({ created: vi.fn(), disposed: vi.fn() }));
+const lifecycle = vi.hoisted(() => ({
+  created: vi.fn(),
+  disposed: vi.fn(),
+  update: null as ((state: ViewerSnapshot) => void) | null,
+}));
 vi.mock('../viewerController', () => ({
   DesktopViewerController: class {
-    constructor() {
+    constructor(_api: unknown, _root: HTMLElement, update: typeof lifecycle.update) {
       lifecycle.created();
+      lifecycle.update = update;
     }
     dispose = lifecycle.disposed;
   },
@@ -21,6 +27,43 @@ vi.mock('@/components/title-bar/WindowControls', () => ({ WindowControls: () => 
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+});
+
+it.each([
+  ['direct', '电脑直连'],
+  ['relay', '服务器视频中转'],
+  ['screenshots', '服务器截图中转'],
+] as const)('shows %s beside control status in the toolbar', async (transport, label) => {
+  await i18n.changeLanguage('zh-CN');
+  Object.assign(window, {
+    electronAPI: {
+      remoteDesktopViewer: {
+        onActive: () => () => {},
+        onLocale: () => () => {},
+        state: async () => ({ generation: 1 }),
+        rendererReady: async () => {},
+        presentationReady: async () => {},
+      },
+    },
+  });
+  const view = render(<RemoteDesktopViewerWindow />);
+  await act(async () =>
+    lifecycle.update?.({
+      target: null,
+      ready: true,
+      controlling: true,
+      status: 'live',
+      error: null,
+      caps: null,
+      displayId: 'one',
+      transport,
+      latency: null,
+      settings: { fps: 30, bitrate: 0, audio: false },
+    }),
+  );
+  const toolbar = within(view.container.querySelector('header')!);
+  expect(toolbar.getByText('正在控制')).toBeDefined();
+  expect(toolbar.getByText(label)).toBeDefined();
 });
 
 it('updates translated controls without ending or recreating the viewer connection', async () => {

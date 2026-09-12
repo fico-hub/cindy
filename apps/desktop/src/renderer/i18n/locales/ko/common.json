@@ -67,6 +67,9 @@
     "connectionBusyTakeover": "다른 기기가 연결되어 있습니다. 연결을 넘겨받으면 해당 기기의 연결이 끊어집니다.",
     "remoteDisabled": "컴퓨터에서 원격 제어가 꺼져 있습니다.",
     "accessRevoked": "이 컴퓨터에 대한 접근 권한이 취소되었습니다.",
+    "directConnection": "컴퓨터에 직접 연결",
+    "videoRelay": "서버 영상 중계",
+    "screenshotRelay": "서버 스크린샷 중계",
     "viewer": {
       "settings": "조작",
       "sound": "소리",
@@ -86,9 +89,7 @@
       "clipboardFailed": "텍스트를 전송할 수 없습니다. 제어 권한을 확인하고 내용을 16,384자 이내로 줄이세요.",
       "settingsFailed": "디스플레이 설정을 변경할 수 없습니다.",
       "inputHint": "화면을 클릭하여 입력하세요. Ctrl+Alt+Esc로 키보드 포커스를 해제하고 Cmd/Ctrl+W로 이 창을 닫습니다.",
-      "resolutionHint": "해상도를 변경하면 원격 컴퓨터의 실제 모니터에 적용됩니다.",
-      "relay": "영상 중계",
-      "direct": "직접 연결"
+      "resolutionHint": "해상도를 변경하면 원격 컴퓨터의 실제 모니터에 적용됩니다."
     }
   },
   "ipcError": {

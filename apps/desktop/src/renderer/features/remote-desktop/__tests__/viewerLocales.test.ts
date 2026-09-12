@@ -19,6 +19,9 @@ describe('remote desktop settings copy survives file encoding', () => {
         ...catalog.remoteDesktop.viewer,
         remoteDisabled: catalog.remoteDesktop.remoteDisabled,
         accessRevoked: catalog.remoteDesktop.accessRevoked,
+        directConnection: catalog.remoteDesktop.directConnection,
+        videoRelay: catalog.remoteDesktop.videoRelay,
+        screenshotRelay: catalog.remoteDesktop.screenshotRelay,
       };
       expect(Object.keys(catalog.remoteDesktop.viewer)).toEqual(
         Object.keys(en.remoteDesktop.viewer),

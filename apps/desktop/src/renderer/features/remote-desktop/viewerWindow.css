@@ -20,17 +20,27 @@
 .remote-viewer-toolbar select {
   -webkit-app-region: no-drag;
 }
-.remote-viewer-title {
+.remote-viewer-heading {
   flex: 1;
-  min-width: 60px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.remote-viewer-title {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 13px;
 }
 .remote-viewer-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--text-12);
+  line-height: 1.4;
 }
 .remote-viewer-action {
   display: inline-flex;
@@ -130,16 +140,29 @@
   z-index: 4;
 }
 .remote-viewer-network {
+  color: var(--text-primary);
+  font-size: var(--text-12);
+  white-space: nowrap;
+}
+.remote-viewer-latency {
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.remote-viewer-network-overlay {
   position: absolute;
   bottom: 12px;
   left: 12px;
   padding: 4px 10px;
   border-radius: 9999px;
   background: var(--surface);
-  color: var(--text-secondary);
-  font-size: 11px;
+  border: 1px solid var(--border-default);
   pointer-events: none;
   z-index: 4;
+}
+@media (max-width: 900px) {
+  .remote-viewer-latency {
+    display: none;
+  }
 }
 .remote-viewer-settings {
   position: absolute;

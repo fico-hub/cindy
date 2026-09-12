@@ -104,6 +104,22 @@ export function RemoteDesktopViewerWindow() {
         .catch(() => setModes([]));
   };
   const action = 'remote-viewer-action';
+  const network = state?.ready && (
+    <span className="remote-viewer-network">
+      {t(
+        state.transport === 'screenshots'
+          ? 'remoteDesktop.screenshotRelay'
+          : state.transport === 'relay'
+            ? 'remoteDesktop.videoRelay'
+            : state.transport === 'direct'
+              ? 'remoteDesktop.directConnection'
+              : 'remoteDesktop.live',
+      )}
+      {state.latency !== null && (
+        <span className="remote-viewer-latency"> · {Math.round(state.latency)} ms</span>
+      )}
+    </span>
+  );
   return (
     <div className={`remote-viewer-window ${isFullscreen ? 'remote-viewer-fullscreen' : ''}`}>
       <header
@@ -111,14 +127,20 @@ export function RemoteDesktopViewerWindow() {
         style={{ paddingLeft: isMac && !isFullscreen ? 82 : 12 }}
       >
         <Monitor size={16} />
-        <span className="remote-viewer-title">
-          {state?.target?.name ?? t('remoteDesktop.title')}
-        </span>
-        <span className="remote-viewer-status">
-          {state?.ready
-            ? t(state.controlling ? 'remoteDesktop.controlling' : 'remoteDesktop.viewOnly')
-            : t('remoteDesktop.connecting')}
-        </span>
+        <div className="remote-viewer-heading">
+          <span className="remote-viewer-title">
+            {state?.target?.name ?? t('remoteDesktop.title')}
+          </span>
+          <div className="remote-viewer-status">
+            <span>
+              {state?.ready
+                ? t(state.controlling ? 'remoteDesktop.controlling' : 'remoteDesktop.viewOnly')
+                : t('remoteDesktop.connecting')}
+            </span>
+            {network && <span aria-hidden="true">·</span>}
+            {network}
+          </div>
+        </div>
         {(state?.caps?.displays.length ?? 0) > 1 && (
           <select
             aria-label={t('remoteDesktop.display')}
@@ -237,17 +259,8 @@ export function RemoteDesktopViewerWindow() {
             }}>{t('remoteDesktop.openGuideOnComputer')}</button>}
           </div>
         )}
-        {state?.ready && (
-          <div className="remote-viewer-network">
-            {state.transport === 'screenshots'
-              ? t('remoteDesktop.compatibility')
-              : state.transport === 'relay'
-                ? t('remoteDesktop.viewer.relay')
-                : state.transport === 'direct'
-                  ? t('remoteDesktop.viewer.direct')
-                  : t('remoteDesktop.live')}
-            {state.latency !== null ? ` · ${Math.round(state.latency)} ms` : ''}
-          </div>
+        {isFullscreen && network && (
+          <div className="remote-viewer-network-overlay">{network}</div>
         )}
       </div>
       {settings && (

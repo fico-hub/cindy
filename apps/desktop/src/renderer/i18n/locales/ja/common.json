@@ -67,6 +67,9 @@
     "connectionBusyTakeover": "別のデバイスが接続中です。接続を引き継ぐと、そのデバイスは切断されます。",
     "remoteDisabled": "コンピュータのリモート操作が無効になっています。",
     "accessRevoked": "このコンピュータへのアクセスが取り消されました。",
+    "directConnection": "パソコンに直接接続",
+    "videoRelay": "サーバー経由の映像",
+    "screenshotRelay": "サーバー経由のスクリーンショット",
     "viewer": {
       "settings": "操作",
       "sound": "音声",
@@ -86,9 +89,7 @@
       "clipboardFailed": "テキストを転送できません。操作権限を確認し、16,384 文字以内にしてください。",
       "settingsFailed": "表示設定を変更できませんでした。",
       "inputHint": "画面をクリックして入力します。Ctrl+Alt+Esc でキーボードのフォーカスを解除し、Cmd/Ctrl+W でこのウィンドウを閉じます。",
-      "resolutionHint": "解像度の変更はリモートの実際のモニターに反映されます。",
-      "relay": "映像中継",
-      "direct": "直接接続"
+      "resolutionHint": "解像度の変更はリモートの実際のモニターに反映されます。"
     }
   },
   "ipcError": {

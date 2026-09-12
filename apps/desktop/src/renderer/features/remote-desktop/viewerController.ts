@@ -26,7 +26,7 @@ export interface ViewerSnapshot {
   controlling: boolean;
   caps: RemoteDesktopCapabilities | null;
   displayId: string;
-  transport: string;
+  transport: '' | 'video' | 'direct' | 'relay' | 'screenshots';
   latency: number | null;
   settings: RemoteDesktopVideoSettings;
   ready: boolean;
@@ -344,24 +344,39 @@ export class DesktopViewerController {
     switch (message.type) {
       case 'streaming':
         this.streaming = true;
+        this.publish({ transport: 'video', latency: null });
         this.present('live');
         break;
       case 'framePresented':
+        if (this.streaming) break;
+        this.publish({ transport: 'screenshots', latency: null });
         this.present('compatibility');
         break;
       case 'fallback':
         this.streaming = false;
-        this.publish({ transport: 'screenshots', status: 'compatibility' });
+        this.publish({ transport: 'screenshots', status: 'compatibility', latency: null });
         break;
       case 'reconnecting':
         this.publish({ status: 'reconnecting' });
         break;
-      case 'network':
+      case 'network': {
+        const transport = message.transport;
+        // Only the presented video may supply its route/RTT. JPEG fallback
+        // must not inherit a previous video's route or latency.
+        if (
+          !this.streaming ||
+          (transport !== 'video' && transport !== 'direct' && transport !== 'relay')
+        ) break;
         this.publish({
-          transport: String(message.transport),
-          latency: typeof message.latencyMs === 'number' ? message.latencyMs : null,
+          transport,
+          latency:
+            typeof message.latencyMs === 'number' &&
+            Number.isFinite(message.latencyMs) &&
+            message.latencyMs >= 0
+              ? message.latencyMs : null,
         });
         break;
+      }
       case 'inputOverflow':
         void this.setControl(false);
         break;

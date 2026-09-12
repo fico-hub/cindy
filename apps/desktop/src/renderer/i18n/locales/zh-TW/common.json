@@ -67,6 +67,9 @@
     "connectionBusyTakeover": "已有其他裝置連線至此遠端桌面。接管連線後，上一台裝置會中斷。",
     "remoteDisabled": "電腦端已關閉遠端控制。",
     "accessRevoked": "對這台電腦的存取權已撤銷。",
+    "directConnection": "電腦直連",
+    "videoRelay": "伺服器影片中繼",
+    "screenshotRelay": "伺服器截圖中繼",
     "viewer": {
       "settings": "操作",
       "sound": "聲音",
@@ -86,9 +89,7 @@
       "clipboardFailed": "文字傳輸失敗，請確認已取得控制權，且內容不超過 16,384 字元。",
       "settingsFailed": "無法修改顯示設定。",
       "inputHint": "點擊畫面即可輸入。Ctrl+Alt+Esc 釋放鍵盤焦點；Cmd/Ctrl+W 關閉這個視窗。",
-      "resolutionHint": "解析度修改會影響遠端的實際顯示器。",
-      "relay": "視訊轉送",
-      "direct": "直接連線"
+      "resolutionHint": "解析度修改會影響遠端的實際顯示器。"
     }
   },
   "ipcError": {

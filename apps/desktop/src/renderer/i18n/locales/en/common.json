@@ -67,6 +67,9 @@
     "connectionBusyTakeover": "Another device is connected to this desktop. Taking over will disconnect that device.",
     "remoteDisabled": "Remote control is disabled on the computer.",
     "accessRevoked": "Access to this computer was revoked.",
+    "directConnection": "Direct to computer",
+    "videoRelay": "Server video relay",
+    "screenshotRelay": "Server screenshot relay",
     "viewer": {
       "settings": "Controls",
       "sound": "Sound",
@@ -86,9 +89,7 @@
       "clipboardFailed": "Could not transfer text. Check control access and keep text under 16,384 characters.",
       "settingsFailed": "Could not change the display setting.",
       "inputHint": "Click the picture to type. Ctrl+Alt+Esc releases keyboard focus; Cmd/Ctrl+W closes this window.",
-      "resolutionHint": "Resolution changes affect the actual remote monitor.",
-      "relay": "Video relay",
-      "direct": "Direct connection"
+      "resolutionHint": "Resolution changes affect the actual remote monitor."
     }
   },
   "ipcError": {

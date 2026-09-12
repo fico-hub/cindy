@@ -116,7 +116,10 @@ try {
       },
       theme: { applyVibrancy: noop },
       getFullscreenState: async () => false,
-      onFullscreenChange: off,
+      onFullscreenChange: (listener) => {
+        window.applyViewerFullscreen = listener;
+        return noop;
+      },
       windowMinimize: noop,
       windowMaximize: noop,
       windowClose: noop,
@@ -184,10 +187,19 @@ try {
   await viewer.screenshot({ path: path.join(artifacts, 'dark.png') });
   await host.evaluate(() => window.peer.close());
   await viewer.waitForFunction(
-    () => document.querySelector('.remote-viewer-network')?.textContent.includes('Compatibility'),
+    () =>
+      document
+        .querySelector('.remote-viewer-network')
+        ?.textContent.includes('Server screenshot relay'),
     {},
     { timeout: 12000 },
   );
+  assert.equal(
+    await viewer.locator('.remote-viewer-latency').count(),
+    0,
+    'screenshots do not inherit video RTT',
+  );
+  await viewer.screenshot({ path: path.join(artifacts, 'screenshot-relay.png') });
   await viewer.waitForFunction(
     () => document.querySelector('.remote-viewer-network')?.textContent.includes('Direct'),
     {},
@@ -219,6 +231,30 @@ try {
     1,
     'locale updates retain the desktop lease',
   );
+  const network = viewer.locator('header .remote-viewer-network');
+  assert(
+    (await network.innerText()).includes('电脑直连'),
+    'the toolbar identifies the active transport',
+  );
+  await viewer.setViewportSize({ width: 720, height: 420 });
+  const bounds = await network.boundingBox();
+  assert(
+    bounds && bounds.x >= 0 && bounds.x + bounds.width <= 720,
+    'transport remains visible at minimum window width',
+  );
+  await viewer.screenshot({ path: path.join(artifacts, 'transport-compact.png') });
+  if (controllerPlatform === 'darwin') {
+    await viewer.getByRole('button', { name: '关闭', exact: true }).click();
+    await viewer.locator('#stage').click({ position: { x: 100, y: 100 } });
+    await viewer.evaluate(() => window.applyViewerFullscreen(true));
+    const overlay = viewer.locator('.remote-viewer-network-overlay');
+    await overlay.waitFor();
+    await viewer.waitForFunction(
+      () => document.querySelector('.remote-viewer-toolbar').getBoundingClientRect().bottom <= 9,
+    );
+    assert((await overlay.innerText()).includes('电脑直连'), 'fullscreen retains the transport indicator');
+    await viewer.screenshot({ path: path.join(artifacts, 'transport-fullscreen.png') });
+  }
   assert.deepEqual(errors, []);
   console.log(
     JSON.stringify({
