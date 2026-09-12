@@ -326,12 +326,15 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
       sidebarUpperSource.indexOf('const visiblePinnedEntries'),
     );
     expect(pinnedProjectsBlock).toContain('hiddenProjectComparisonKeys');
-    expect(pinnedProjectsBlock).toContain('pinnedProjectKeys.has(project.projectKey)');
+    expect(pinnedProjectsBlock).toContain('pinnedProjectComparisonKeys');
+    expect(pinnedProjectsBlock).toContain('projectKeyComparisonSetHas');
     expect(pinnedProjectsBlock).not.toContain('vendorPredicate');
     expect(pinnedProjectsBlock).not.toContain('filter.projectsAsSet');
     expect(pinnedProjectsBlock).not.toContain('allowedProjects');
     // 「最近活跃」本就豁免:置顶取 allGroups(未经活跃时间收窄),不是 activityFilteredSessions。
-    expect(sidebarUpperSource).toContain('const allGroups = useProjectGroups(sidebarSessions');
+    expect(sidebarUpperSource).toMatch(
+      /const allGroups = useProjectGroups\(\s*sidebarSessions/,
+    );
   });
 
   // 2026-08-12 用户裁决:任务信息按用户勾选顺序显示(先勾时间再勾费用 → 时间在前)。
