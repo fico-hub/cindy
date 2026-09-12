@@ -1,5 +1,5 @@
 /** Real Chromium + production Desktop viewer, with a loopback synthetic host.
- * Usage: node apps/desktop/scripts/remote-desktop-viewer-smoke.mjs <Vite origin> <Chrome path>
+ * Usage: node apps/desktop/scripts/remote-desktop-viewer-smoke.mjs <Vite origin> <Chrome path> [win32|darwin]
  * No account, OS capture, credential, or remote input. Artifacts live in a unique OS temp dir.
  */
 import assert from 'node:assert/strict';
@@ -10,6 +10,8 @@ import { chromium } from 'playwright-core';
 
 const origin = new URL(process.argv[2]);
 assert(['localhost', '127.0.0.1'].includes(origin.hostname));
+const controllerPlatform = process.argv[4] ?? 'win32';
+assert(['win32', 'darwin'].includes(controllerPlatform));
 const artifacts = await fs.mkdtemp(path.join(os.tmpdir(), 'cindy-viewer-smoke-'));
 const browser = await chromium.launch({ executablePath: process.argv[3], headless: true });
 try {
@@ -29,6 +31,7 @@ try {
           version: 1,
           enabled: true,
           canControl: true,
+          clipboardText: true,
           automaticReconnect: true,
           videoSettings: true,
           platform: 'win32',
@@ -92,7 +95,7 @@ try {
         return {};
     }
   });
-  await viewer.addInitScript(() => {
+  await viewer.addInitScript((controllerPlatform) => {
     const noop = () => {},
       off = () => noop;
     const scope = {
@@ -101,13 +104,16 @@ try {
       active: true,
     };
     window.electronAPI = {
-      platform: 'win32',
+      platform: controllerPlatform,
       preferredSystemLocale: 'en',
       logToMain: noop,
       appearanceSettings: { getSync: () => null, onChanged: off },
       localThemes: { listSync: () => ({ success: true, themes: [], diagnostics: [] }) },
       authHasPersistedSessionHintSync: () => true,
-      appShortcuts: { getState: () => ({ overrides: {}, platform: 'win32' }), onChanged: off },
+      appShortcuts: {
+        getState: () => ({ overrides: {}, platform: controllerPlatform }),
+        onChanged: off,
+      },
       theme: { applyVibrancy: noop },
       getFullscreenState: async () => false,
       onFullscreenChange: off,
@@ -117,7 +123,10 @@ try {
       remoteDesktopViewer: {
         state: async () => scope,
         onActive: off,
-        onLocale: off,
+        onLocale: (listener) => {
+          window.applyViewerLocale = listener;
+          return noop;
+        },
         rendererReady: async () => {},
         presentationReady: async () => {},
         request: (_generation, request) => window.viewerRequest(request),
@@ -128,7 +137,7 @@ try {
         clipboard: async () => {},
       },
     };
-  });
+  }, controllerPlatform);
   await viewer.goto(new URL('/?remoteDesktopViewer=1', origin.origin).href);
   await viewer.waitForFunction(
     () => document.querySelector('video')?.videoWidth > 0,
@@ -136,7 +145,32 @@ try {
     { timeout: 25000 },
   );
   await viewer.waitForFunction(() => document.querySelector('.remote-viewer-network') !== null);
-  await viewer.locator('#stage').click({ position: { x: 400, y: 300 } });
+  const stage = await viewer.locator('#stage').boundingBox();
+  assert(stage);
+  await viewer.mouse.move(stage.x + 400, stage.y + 300);
+  await host.waitForFunction(() => window.inputs.some((event) => event.kind === 'move'));
+  await viewer.mouse.down();
+  await host.waitForFunction(() =>
+    window.inputs.some((event) => event.kind === 'button' && event.button === 0 && event.down),
+  );
+  await viewer.mouse.move(stage.x + 520, stage.y + 370, { steps: 5 });
+  await viewer.mouse.up();
+  await host.waitForFunction(() =>
+    window.inputs.some((event) => event.kind === 'button' && event.button === 0 && !event.down),
+  );
+  const mouseEvents = await host.evaluate(() => window.inputs);
+  const down = mouseEvents.findIndex((event) => event.kind === 'button' && event.down);
+  const up = mouseEvents.findIndex(
+    (event, index) => index > down && event.kind === 'button' && !event.down,
+  );
+  assert(
+    mouseEvents.slice(down + 1, up).some((event) => event.kind === 'move'),
+    'drag moves reach the host while the button is held',
+  );
+  assert(
+    !mouseEvents.slice(down + 1, up).some((event) => event.kind === 'release'),
+    'focus does not cancel a held mouse button',
+  );
   await viewer.keyboard.type('desktop');
   await host.waitForFunction(() =>
     window.inputs.some((event) => event.kind === 'text' && event.text.includes('d')),
@@ -165,11 +199,36 @@ try {
     'media recovery must retain its lease',
   );
   assert.deepEqual(errors, []);
+  await viewer.evaluate(() => window.applyViewerLocale('zh-CN'));
+  await viewer.getByRole('button', { name: '操作', exact: true }).click();
+  const settings = viewer.getByRole('complementary', { name: '操作' });
+  await settings.locator('label').filter({ hasText: '帧率' }).waitFor();
+  assert(
+    !/\?{2,}|\uFFFD/u.test(await settings.innerText()),
+    'Chinese settings must remain readable',
+  );
+  await viewer.screenshot({ path: path.join(artifacts, 'settings-zh-dark.png') });
+  await viewer.evaluate(async () => {
+    const { themeService } = await import('/themes/theme-service.ts');
+    const { cindyLight } = await import('/themes/builtin/cindy-light.ts');
+    themeService.applyTheme(cindyLight);
+  });
+  await viewer.screenshot({ path: path.join(artifacts, 'settings-zh-light.png') });
+  assert.equal(
+    requests.filter((op) => op === 'start').length,
+    1,
+    'locale updates retain the desktop lease',
+  );
+  assert.deepEqual(errors, []);
   console.log(
     JSON.stringify({
       video: true,
       keyboard: true,
+      mouse: true,
+      controllerPlatform,
       mediaRecovery: true,
+      chineseSettings: true,
+      localeKeepsLease: true,
       lightDarkArtifacts: artifacts,
     }),
   );

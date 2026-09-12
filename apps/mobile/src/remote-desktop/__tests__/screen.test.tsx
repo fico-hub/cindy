@@ -381,6 +381,47 @@ const connect = async () => {
 };
 
 describe("remote desktop controls", () => {
+  it("keeps the video when a fallback input is rejected because control was released", async () => {
+    await connect();
+    const original = fixture.invoke.getMockImplementation()!;
+    fixture.invoke.mockImplementation((...args) =>
+      args[2][0].op === "input"
+        ? Promise.reject(new Error("DESKTOP_VIEW_ONLY"))
+        : original(...args),
+    );
+    await act(async () => {
+      fixture.message!({
+        nativeEvent: {
+          data: JSON.stringify({
+            type: "input",
+            epoch: "lease",
+            sequence: 1,
+            events: [{ kind: "move", x: 0.5, y: 0.5 }],
+          }),
+        },
+      });
+    });
+    expect(sent()).toContainEqual({ type: "control", enabled: false });
+    expect(requests().filter((r) => r.op === "stop")).toHaveLength(0);
+    expect(requests().filter((r) => r.op === "start")).toHaveLength(1);
+  });
+  it("reflects a host-side input failure as view-only without replacing the video lease", async () => {
+    await connect();
+    const original = fixture.invoke.getMockImplementation()!;
+    fixture.invoke.mockImplementation((...args) =>
+      args[2][0].op === "heartbeat"
+        ? Promise.resolve({ controlling: false })
+        : original(...args),
+    );
+    await act(async () => vi.advanceTimersByTimeAsync(3100));
+    expect(
+      fixture.post.mock.calls.map(([json]) => JSON.parse(json)),
+    ).toContainEqual({ type: "control", enabled: false });
+    expect(requests().filter((r) => r.op === "start")).toHaveLength(1);
+    expect(requests().filter((r) => r.op === "stop")).toHaveLength(0);
+    act(() => button("operations").click());
+    expect(visibleInputHint()).toBe("remoteDesktop.viewOnlyHint");
+  });
   it("keeps iOS data detection disabled without passing its prop to Android", async () => {
     await act(async () => {});
     expect(fixture.webViewProps).toMatchObject({ dataDetectorTypes: "none" });

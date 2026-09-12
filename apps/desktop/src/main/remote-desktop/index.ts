@@ -121,7 +121,8 @@ let pending: {
   reject(error: Error): void;
   timer: ReturnType<typeof setTimeout>;
 } | null = null;
-const input = new DesktopInputHost(() => remoteDesktop.stop());
+// Input failure releases native keys and control, without tearing down video.
+const input = new DesktopInputHost(() => remoteDesktop.releaseControl());
 function stopVideo(): void {
   offerGeneration++;
   videoAttempt = undefined;

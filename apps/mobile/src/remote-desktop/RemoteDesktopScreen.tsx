@@ -285,6 +285,19 @@ export default function RemoteDesktopScreen() {
     (message: object) => webview.current?.postMessage(JSON.stringify(message)),
     [],
   );
+  const reflectViewOnly = useCallback(
+    (current: RemoteDesktopLease) => {
+      if (active.current !== current) return;
+      current.controlling = false;
+      wantsControl.current = false;
+      setLease({ ...current });
+      send({ type: "control", enabled: false });
+      heldKeys.current.clear();
+      setModifiers([]);
+      setKeyboard(false);
+    },
+    [send],
+  );
   useEffect(() => {
     const enabled =
       keyboard && !fullKeys && focused && Boolean(lease?.controlling);
@@ -768,7 +781,12 @@ export default function RemoteDesktopScreen() {
       )
         return;
       heartbeatBusy = current.lease;
-      void request({ op: "heartbeat", lease: current.lease })
+      const wasControlling = current.controlling;
+      void viewerSession.current
+        .heartbeat()
+        .then((result) => {
+          if (wasControlling && !result.controlling) reflectViewOnly(current);
+        })
         .catch((cause) => {
           // A missing reply does not prove renewal failed; the next interval
           // retries within the lease. Explicit host revocation still stops us.
@@ -868,7 +886,7 @@ export default function RemoteDesktopScreen() {
       clearInterval(metrics);
       stop();
     };
-  }, [request, fail, send, stop, pause]);
+  }, [request, fail, send, stop, pause, viewerSession, reflectViewOnly]);
   useEffect(() => {
     // Route blur means leaving this desktop (including a native back swipe).
     // App background/inactive events use pause() without the exit flag.
@@ -1067,6 +1085,13 @@ export default function RemoteDesktopScreen() {
           events: message.events,
         })
           .catch((cause) => {
+            if (
+              cause instanceof Error &&
+              cause.message.includes("DESKTOP_VIEW_ONLY")
+            ) {
+              reflectViewOnly(current);
+              return;
+            }
             if (active.current === current) fail(cause);
           })
           .finally(() => {

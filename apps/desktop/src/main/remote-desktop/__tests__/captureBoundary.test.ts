@@ -12,6 +12,8 @@ const h = vi.hoisted(() => ({
   owner: null as any,
   dispose: vi.fn(),
   stop: vi.fn(),
+  releaseControl: vi.fn(),
+  inputFailure: null as null | (() => void),
   nativeStop: vi.fn(),
   nativeFrame: vi.fn(async () => 'frame'),
   input: vi.fn(),
@@ -94,6 +96,7 @@ vi.mock('../controller', () => ({
       this.stop();
     }
     tick() {}
+    releaseControl = h.releaseControl;
     input = h.input;
     viewHeartbeat = h.viewHeartbeat;
   },
@@ -106,6 +109,9 @@ vi.mock('../nativeCapture', () => ({
 }));
 vi.mock('../inputHost', () => ({
   DesktopInputHost: class {
+    constructor(onFailure: () => void) {
+      h.inputFailure = onFailure;
+    }
     stop = vi.fn();
     input = vi.fn();
   },
@@ -158,6 +164,7 @@ beforeEach(() => {
   h.lease = 'lease';
   h.dispose.mockClear();
   h.stop.mockClear();
+  h.releaseControl.mockClear();
   h.nativeStop.mockClear();
   h.nativeFrame.mockClear();
   h.input.mockReset();
@@ -382,4 +389,10 @@ it('keeps replacement capture and its in-flight ICE exchange when revoked config
   const reply = { attemptId: 'attempt', candidates: [], next: 0, complete: true };
   h.handlers.get(DESKTOP_LOCAL.REPLY)(event(), exchange.id, reply);
   await expect(ice).resolves.toEqual(reply);
+});
+it('routes native input failure to control release rather than capture teardown', () => {
+  h.inputFailure?.();
+  expect(h.releaseControl).toHaveBeenCalledOnce();
+  expect(h.stop).not.toHaveBeenCalled();
+  expect(h.dispose).not.toHaveBeenCalled();
 });

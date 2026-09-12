@@ -108,6 +108,10 @@ export class RemoteDesktopViewerSession {
       lease: lease.lease,
     });
     if (this.active !== lease) throw new Error("DESKTOP_LEASE_EXPIRED");
+    // Older/malformed heartbeats without a control projection are not evidence
+    // that the host revoked control. Preserve the last confirmed state.
+    if (!result || typeof result.controlling !== "boolean")
+      return { controlling: lease.controlling };
     // A heartbeat sent before a control transition cannot acknowledge that transition.
     if (
       !pendingAtStart &&

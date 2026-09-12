@@ -36,3 +36,11 @@ it('stop cancels a pending start and cleans up the returned lease without reopen
   finish({lease:'late'});await expect(connection).rejects.toThrow('DESKTOP_VIDEO_STOPPED');
   expect(f.request.mock.calls.at(-1)?.[0]).toEqual({op:'stop',lease:'late'});
 });
+
+it("keeps confirmed control when an older heartbeat omits its projection", async () => {
+  const f = fixture();
+  await f.session.connect({ isCurrent: () => true });
+  await f.session.control(true);
+  f.request.mockResolvedValueOnce({});
+  expect(await f.session.heartbeat()).toEqual({ controlling: true });
+});

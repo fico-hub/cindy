@@ -15,11 +15,12 @@ import {
 import type { RemoteDesktopDisplayMode } from '@cindy/device-link';
 import { WindowControls } from '@/components/title-bar/WindowControls';
 import { useMacFullscreen } from '@/hooks/useMacFullscreen';
+import i18n from '@/i18n';
 import { DesktopViewerController, type ViewerSnapshot } from './viewerController';
 
 /** A clean, standalone remote desktop surface. No App, router, agent or task providers. */
 export function RemoteDesktopViewerWindow() {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const { isMac, isFullscreen } = useMacFullscreen();
   const api = window.electronAPI.remoteDesktopViewer;
   const root = useRef<HTMLDivElement>(null),
@@ -44,6 +45,8 @@ export function RemoteDesktopViewerWindow() {
       }
     });
     const locale = api.onLocale((value) => {
+      // useTranslation's i18n wrapper changes with the locale. Keep the
+      // connection lifetime independent of that presentation-only update.
       void i18n.changeLanguage(value);
     });
     const blur = () => {
@@ -76,7 +79,7 @@ export function RemoteDesktopViewerWindow() {
       controller.current?.dispose();
       controller.current = null;
     };
-  }, [api, i18n]);
+  }, [api]);
   const clipboard = async (action: 'copy' | 'paste') => {
     if (clipboardBusy) return;
     setClipboardBusy(true);

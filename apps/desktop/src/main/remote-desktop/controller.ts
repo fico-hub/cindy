@@ -133,6 +133,18 @@ export class RemoteDesktopController {
     this.deps.stopVideo();
     this.deps.changed();
   }
+
+  /** A refused native input revokes control, while preserving viewing and the
+   * peer-bound lease. Pending grants must not turn a failed helper back on. */
+  releaseControl(): void {
+    const active = this.active;
+    if (!active || (!active.controlling && !this.inputStarting)) return;
+    active.controlling = false;
+    this.controlGeneration++;
+    this.clipboardTransfer.reset();
+    this.deps.stopInput();
+    this.deps.changed();
+  }
   /** Explicit local disconnect must not be undone by the phone's recovery. */
   stopByUser(): void {
     const target = this.active ?? this.lastEnded;
