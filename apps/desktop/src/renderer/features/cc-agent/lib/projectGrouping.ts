@@ -97,9 +97,37 @@ export interface ProjectNode {
   persistentLocalKnownAgentKinds?: readonly string[];
 }
 
+/**
+ * 一个伙伴名下的全部任务。
+ *
+ * 与项目分组并列而不是嵌进去:**项目是磁盘上的实体目录,伙伴名是用户自己起的**,
+ * 两套键天然不冲突。同一个伙伴可以在多个项目里干活,同一个项目也可以有多个伙伴,
+ * 硬塞进一棵树只会两头都别扭。
+ */
+export interface BotGroupNode {
+  botId: string;
+  /** 用户给伙伴起的名字。 */
+  displayName: string;
+  avatar: string;
+  avatarColor: string;
+  /** 该伙伴名下所有任务,已按 status 然后 sortTime desc 排序。 */
+  sessions: Session[];
+  latestActivityAt: string;
+}
+
+/** 分组时用来认伙伴的最小信息。渲染层从 botStore 的会话投影现拼。 */
+export interface BotSessionOwner {
+  botId: string;
+  displayName: string;
+  avatar: string;
+  avatarColor: string;
+}
+
 export interface ProjectGroupsResult {
   pinned: Session[];
   dialogues: Session[];
+  /** 按伙伴分的组,按最近活动倒序。 */
+  bots: BotGroupNode[];
   unclassified: Session[];
   projects: ProjectNode[];
 }
@@ -113,10 +141,20 @@ export interface GroupSessionsOptions {
    * when every conversation inside it is pinned.
    */
   includePinnedInProjects?: boolean;
+  /** Resource catalogues include created project sessions even before their first message. */
+  includeDraftsInProjects?: boolean;
   /** 与会话生命周期解耦的本地项目目录，用于保留零会话项目。 */
   persistentLocalProjects?: readonly PersistentLocalProject[];
   /** 本地路径身份比较所需的平台；Windows 盘符与 UNC 路径忽略大小写。 */
   localPlatform?: string;
+  /**
+   * sessionId → 它属于哪个伙伴。
+   *
+   * 不给(或某条会话不在表里)时,伙伴任务按普通会话走原来的分组 —— 这是刻意的
+   * 降级:伙伴档案还没加载完的那一瞬间,宁可让任务落到未分类,也不能让它**整个
+   * 消失**。会话本身不带 botId,归属只有伙伴档案知道。
+   */
+  botOwnerBySessionId?: ReadonlyMap<string, BotSessionOwner>;
 }
 
 export interface PersistentLocalProject {
@@ -196,11 +234,6 @@ export function filterPersistentLocalProjectsByLastActivity(
   return projects.filter((project) => toMs(project.lastUsedAt) >= cutoffMs);
 }
 
-/**
- * vendor 过滤下，历史上存在其它 vendor 会话的项目不能伪装成空项目；真正零会话
- * 的目录不属于任何 vendor，仍保留创建入口。历史上存在目标 vendor 的项目也保留，
- * 即使它因为 status 过滤暂时没有可见会话。
- */
 export function persistentProjectMatchesVendor(
   project: Pick<ProjectNode, 'isPersistentLocal' | 'persistentLocalKnownAgentKinds'>,
   vendor: string,
@@ -367,8 +400,6 @@ function normalizeProjectAliases(
     const alias = typeof value === 'string' ? value.trim() : '';
     if (!projectKey || alias.length === 0) continue;
     const comparisonKey = projectKeyComparisonKey(projectKey, localPlatform) ?? projectKey;
-    // Alias rows arrive newest-first. Legacy Windows casing variants collapse
-    // to one identity without allowing an older duplicate to overwrite it.
     if (!out.has(comparisonKey)) out.set(comparisonKey, alias);
   }
   return out;
@@ -474,6 +505,25 @@ export function pinnedSessionIdsInDisplayOrder(sessions: readonly Session[]): st
  *   - 空数组 / 全 null → 各段返回空数组
  *   - workingDir 异常 → 归到 unclassified
  */
+/**
+ * 一组任务里"最近一次活动"。
+ *
+ * 取全员 sortTime 的最大值,不受组内 active-first 排序影响 —— 否则一个只剩归档
+ * 任务的组会被按它较旧的 active 时间下沉,与"最近用过的排前面"这个预期不符。
+ */
+function latestActivityOf(list: readonly Session[]): string {
+  let latestMs = 0;
+  let latestIso = '';
+  for (const s of list) {
+    const t = sortTimeMs(s);
+    if (t > latestMs) {
+      latestMs = t;
+      latestIso = sortTimeIso(s);
+    }
+  }
+  return latestIso;
+}
+
 export function groupSessions(
   sessions: readonly Session[],
   options: GroupSessionsOptions = {},
@@ -481,7 +531,7 @@ export function groupSessions(
   const localPlatform = options.localPlatform ?? '';
   const aliases = normalizeProjectAliases(options.projectAliases, localPlatform);
   if ((!sessions || sessions.length === 0) && !options.persistentLocalProjects?.length) {
-    return { pinned: [], dialogues: [], unclassified: [], projects: [] };
+    return { pinned: [], dialogues: [], bots: [], unclassified: [], projects: [] };
   }
 
   // 1. Pinned —— active 在 archived 之上，同状态按 pinnedAt desc
@@ -495,10 +545,6 @@ export function groupSessions(
     ? sessions
     : sessions.filter((s) => s.pinnedAt == null);
 
-  // 持久目录是本地 Project 的稳定代表身份。Windows 上会话 cwd 的 casing 可能
-  // 来自另一条 OS/API 链路；若让会话先占 key，最后一条会话删除前后会在两个
-  // casing 之间翻转，连带切断 filter / alias / pin / manual order。先固定代表，
-  // 有会话与零会话两态都复用同一个 projectKey + workingDir。
   const persistentRepresentativeByComparison = new Map<
     string,
     { projectKey: string; workingDir: string }
@@ -507,7 +553,7 @@ export function groupSessions(
     const workingDir = normalizeWorkingDir(project.workingDir);
     if (!workingDir) continue;
     const projectKey = projectIdentityKey('local', workingDir, null);
-    const comparisonKey = projectKeyComparisonKey(projectKey, options.localPlatform ?? '');
+    const comparisonKey = projectKeyComparisonKey(projectKey, localPlatform);
     if (comparisonKey && !persistentRepresentativeByComparison.has(comparisonKey)) {
       persistentRepresentativeByComparison.set(comparisonKey, { projectKey, workingDir });
     }
@@ -525,11 +571,23 @@ export function groupSessions(
   // 入口,创建时目录已经过用户授权,落项目分组是功能本身。
   const unclassified: Session[] = [];
   const dialogues: Session[] = [];
+  const botSessions = new Map<string, Session[]>();
+  const botOwners = new Map<string, BotSessionOwner>();
   const groups = new Map<string, Session[]>();
   const identityByKey = new Map<string, ProjectIdentity>();
   for (const s of remaining) {
     if (s.workspaceKind === 'dialogue') {
       dialogues.push(s);
+      continue;
+    }
+    // 伙伴的任务归伙伴,不按工作目录散进项目组 —— 一个伙伴可以在多个项目里干活,
+    // 按目录分只会把同一个伙伴的对话切碎到几个组里。
+    const owner = options.botOwnerBySessionId?.get(s.id);
+    if (owner) {
+      const arr = botSessions.get(owner.botId);
+      if (arr) arr.push(s);
+      else botSessions.set(owner.botId, [s]);
+      if (!botOwners.has(owner.botId)) botOwners.set(owner.botId, owner);
       continue;
     }
     const dir = normalizeWorkingDir(s.workingDir);
@@ -538,7 +596,11 @@ export function groupSessions(
     const isAutoPlacedSession = s.source === 'scheduler' || s.source === 'plugin';
     if (
       dir == null ||
-      (!isAutoPlacedSession && !isOrcaLead && s.userSendAt == null && noPhysicalMessages)
+      (!options.includeDraftsInProjects &&
+        !isAutoPlacedSession &&
+        !isOrcaLead &&
+        s.userSendAt == null &&
+        noPhysicalMessages)
     ) {
       unclassified.push(s);
     } else {
@@ -578,8 +640,6 @@ export function groupSessions(
     }
   }
 
-  // 4. 合入与会话生命周期解耦的本地项目目录。持久目录已在上一步主导本地
-  // Project 的稳定代表身份；这里补足零会话节点并聚合 activity/vendor 元数据。
   const persistentProjectKeys = new Set<string>();
   const persistentLastUsedByKey = new Map<string, string>();
   const persistentKnownAgentKindsByKey = new Map<string, Set<string>>();
@@ -620,11 +680,30 @@ export function groupSessions(
     for (const agentKind of project.knownAgentKinds) knownKinds.add(agentKind);
   }
 
-  // 5. unclassified 排序 —— active 在 archived 之上，同状态按 sortTime desc
+  // 4. unclassified 排序 —— active 在 archived 之上，同状态按 sortTime desc
   dialogues.sort(compareSessionsByStatusThenSortTimeDesc);
   unclassified.sort(compareSessionsByStatusThenSortTimeDesc);
 
-  // 6. 同名消歧 — "先创建优先"：在每个 basename 相同的 dir 集合里，按
+  // 4b. 伙伴组:组内与项目组同一套排序,组间按最近活动倒序。
+  const bots: BotGroupNode[] = [];
+  for (const [botId, list] of botSessions) {
+    const owner = botOwners.get(botId);
+    if (!owner) continue;
+    list.sort(compareSessionsByStatusThenSortTimeDesc);
+    bots.push({
+      botId,
+      displayName: owner.displayName,
+      avatar: owner.avatar,
+      avatarColor: owner.avatarColor,
+      sessions: list,
+      latestActivityAt: latestActivityOf(list),
+    });
+  }
+  bots.sort(
+    (a, b) => toMs(b.latestActivityAt) - toMs(a.latestActivityAt) || a.botId.localeCompare(b.botId),
+  );
+
+  // 5. 同名消歧 — "先创建优先"：在每个 basename 相同的 dir 集合里，按
   //    "该 dir 下最早 createdAt 的 Session 升序"排序，排序第一的获胜者保留纯
   //    basename（minSegments=1），其余强制 minSegments=2 触发 parent 追溯。
   //    createdAt 缺失时回退到 dir 字符串字典序，保证确定性。
@@ -634,7 +713,7 @@ export function groupSessions(
   );
   const minSegByDir = new Map<string, number>();
 
-  // 6a. 先按 basename 分桶
+  // 5a. 先按 basename 分桶
   const dirsByBasename = new Map<string, string[]>();
   for (const projectKey of allProjectKeys) {
     const identity = identityByKey.get(projectKey);
@@ -646,7 +725,7 @@ export function groupSessions(
     else dirsByBasename.set(basename, [projectKey]);
   }
 
-  // 6b. 每个 basename 桶内确定获胜者
+  // 5b. 每个 basename 桶内确定获胜者
   for (const [, dirsInBucket] of dirsByBasename) {
     if (dirsInBucket.length === 1) {
       // 唯一 basename，无需消歧；走默认 minSegments=1
@@ -679,7 +758,7 @@ export function groupSessions(
     }
   }
 
-  // 6c. 构造 ProjectNode
+  // 5c. 构造 ProjectNode
   //  - 获胜者 (minSeg=1)：即使 basename 与其他 dir 冲突也强制保留 1 段（先创建优先）
   //  - 非获胜者 (minSeg=2)：通过 extractDisplayName 走至少 2 段的消歧
   //  - 唯一 basename (minSeg=1)：走默认 1 段（无冲突自然 1 段返回）
@@ -745,8 +824,8 @@ export function groupSessions(
     });
   }
 
-  // 7. Project 间排序
+  // 6. Project 间排序
   projects.sort(compareProjectsByLatestSessionDesc);
 
-  return { pinned, dialogues, unclassified, projects };
+  return { pinned, dialogues, bots, unclassified, projects };
 }

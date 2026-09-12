@@ -38,12 +38,9 @@ describe('pinned project sidebar integration', () => {
   });
 
   it('exposes project pin toggling from the collapsed rail project menu', () => {
-    expect(sidebarSource).toContain('pinnedProjectComparisonKeys={pinnedProjectComparisonKeys}');
-    expect(sidebarSource).toContain('localPlatform={localPlatform}');
+    expect(sidebarSource).toContain('pinnedProjectKeys={pinnedProjectKeys}');
     expect(sidebarSource).toContain('onToggleProjectPin={handleToggleProjectPin}');
-    expect(sidebarSource).toContain(
-      'projectKeyComparisonSetHas(\n                        pinnedProjectComparisonKeys,\n                        menuTarget.projectKey,\n                        localPlatform,',
-    );
+    expect(sidebarSource).toContain('pinnedProjectKeys.has(menuTarget.projectKey)');
   });
 
   it('applies main-process pinned-order broadcasts to every mounted sidebar hook', () => {
@@ -53,23 +50,9 @@ describe('pinned project sidebar integration', () => {
     expect(filterHookSource).toContain('durablePinnedOrderRef.current = snapshot;');
   });
 
-  it('omits sessions belonging to pinned projects from date groups', () => {
-    const dateStart = sidebarSource.indexOf('const visibleDateSessions = useMemo(() => {');
-    const dateEnd = sidebarSource.indexOf('const [selectedSessionIds', dateStart);
-    const dateBlock = sidebarSource.slice(dateStart, dateEnd);
-
-    expect(dateStart).toBeGreaterThanOrEqual(0);
-    expect(dateEnd).toBeGreaterThan(dateStart);
-    expect(dateBlock).toContain(
-      'isSessionInProjectComparisonSet(s, pinnedProjectComparisonKeys, localPlatform)',
-    );
-    expect(dateBlock).toContain(
-      'isSessionInProjectComparisonSet(s, allowedProjectComparisonKeys, localPlatform)',
-    );
-    expect(dateBlock).toContain(
-      'allowedProjectComparisonKeys,\n    pinnedProjectComparisonKeys,\n    localPlatform,',
-    );
-  });
+  // (侧边栏重设计 D 期:按日期分组已删除,visibleDateSessions 的置顶项目剔除
+  //  断言随之下线;置顶项目剔除现由 visibleProjectsWithVendor 的
+  //  pinnedProjectKeys 过滤承担,上方断言已覆盖。)
 
   it('confirms before removing a project and keeps the rail open when cancelled', () => {
     const removeStart = sidebarSource.indexOf(
@@ -108,42 +91,6 @@ describe('pinned project sidebar integration', () => {
     expect(sidebarSource).toContain('ensureProjectIncluded: filter.ensureProjectIncluded,');
     expect(sidebarSource).toContain('localPlatform,');
     expect(sidebarSource).toContain('if (restored) return;');
-  });
-
-  it('uses comparison identity for Browse Files and Archive All action membership', () => {
-    const browseStart = sidebarSource.indexOf('const handleBrowseFiles = useCallback(');
-    const browseEnd = sidebarSource.indexOf('/* ---- Rename handler ---- */', browseStart);
-    const archiveStart = sidebarSource.indexOf('const handleArchiveAllInProject = useCallback(');
-    const archiveEnd = sidebarSource.indexOf('\n  return (', archiveStart);
-
-    expect(browseStart).toBeGreaterThanOrEqual(0);
-    expect(browseEnd).toBeGreaterThan(browseStart);
-    expect(archiveStart).toBeGreaterThanOrEqual(0);
-    expect(archiveEnd).toBeGreaterThan(archiveStart);
-    expect(sidebarSource.slice(browseStart, browseEnd)).toContain(
-      'isSessionInProject(s, targetProjectKey, localPlatform)',
-    );
-    expect(sidebarSource.slice(archiveStart, archiveEnd)).toContain(
-      'isSessionInProject(session, targetProjectKey, localPlatform)',
-    );
-  });
-
-  it('resolves a deep-link comparison match to the rendered project representative', () => {
-    const focusStart = sidebarSource.indexOf('const pendingFocus = usePendingProjectFocus();');
-    const focusEnd = sidebarSource.indexOf('/* ---- 自动展开', focusStart);
-    const focusBlock = sidebarSource.slice(focusStart, focusEnd);
-
-    expect(focusStart).toBeGreaterThanOrEqual(0);
-    expect(focusEnd).toBeGreaterThan(focusStart);
-    expect(focusBlock).toContain('const representativeKey = findProjectRepresentativeKey(');
-    expect(focusBlock).toContain('collapse.expand(representativeKey);');
-    expect(focusBlock).toContain('CSS.escape(representativeKey)');
-  });
-
-  it('builds persisted pinned ranks without letting later identity variants overwrite the first', () => {
-    expect(sidebarSource).toContain(
-      'const rank = buildPinnedSidebarRank(order, localPlatform);',
-    );
   });
 
   it('prunes hidden projects from filters in every renderer hook', () => {

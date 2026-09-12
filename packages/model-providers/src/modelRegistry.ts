@@ -1,6 +1,11 @@
+import {
+  registryEntryDefaults,
+  findBaseModel,
+  referencePricesForRoute,
+} from "./modelMetadataLayers.js";
 import { modelRegistryCanonicalJson } from "./modelRegistryCanonical.js";
 import type {
-  ModelAgent,
+  ModelAccessV2Agent,
   ModelPriceVariant,
   ModelReferencePrice,
   ModelRegistry,
@@ -9,16 +14,57 @@ import type {
 } from "./modelAccessBean.js";
 
 export type ModelRegistryRevisionRelation =
-  | "newer"
-  | "older"
-  | "same"
-  | "conflict"
-  | "invalid-incoming";
+  "newer" | "older" | "same" | "conflict" | "invalid-incoming";
+
+/** Explicit entries win, then the most specific rule for this exact provider route.
+ * Missing data stays unknown; a retired or explicitly unverified entry suppresses family rules.
+ */
+export function resolveModelNativeApi(
+  registry: ModelRegistry | undefined,
+  providerId: string,
+  modelId: string,
+): import("./modelAccessBean.js").ModelNativeApi | null | undefined {
+  if (!registry) return undefined;
+  const rawId = modelId.replace(/\[1m\]$/, "");
+  // Subscription bridges and Pi expose the same route with different wire prefixes.
+  // Normalize only these owned identities; never strip arbitrary Gateway namespaces.
+  const id =
+    providerId === "openai"
+      ? rawId.replace(/^chatgpt\//, "")
+      : providerId === "xai" && !rawId.startsWith("xai/")
+        ? `xai/${rawId}`
+        : rawId;
+  const entries = registry.models.filter((entry) =>
+    entry.routes.some(
+      (route) => route.providerId === providerId && route.modelId === id,
+    ),
+  );
+  if (
+    entries.some(
+      (entry) => entry.status === "retired" || entry.nativeApi === null,
+    )
+  )
+    return null;
+  if (registry.schemaVersion < 3) return undefined;
+  const explicit = [
+    ...new Set(
+      entries.flatMap((entry) => (entry.nativeApi ? [entry.nativeApi] : [])),
+    ),
+  ];
+  if (explicit.length) return explicit.length === 1 ? explicit[0] : null;
+  return registry.nativeApiRules
+    ?.filter(
+      (rule) =>
+        rule.providerId === providerId &&
+        id.startsWith(rule.modelIdPrefix) &&
+        !id.slice(rule.modelIdPrefix.length).includes("/"),
+    )
+    .sort((a, b) => b.modelIdPrefix.length - a.modelIdPrefix.length)[0]
+    ?.nativeApi;
+}
 
 export type ModelRegistrySnapshotDecision =
-  | "accept-incoming"
-  | "preserve-current"
-  | "preserve-current-conflict";
+  "accept-incoming" | "preserve-current" | "preserve-current-conflict";
 
 /**
  * Compares immutable Registry revisions by instant, then compares equal-revision content after
@@ -38,8 +84,14 @@ export function compareModelRegistryRevisions(
   if (incomingRevision > currentRevision) return "newer";
 
   const canonicalUpdatedAt = new Date(incomingRevision).toISOString();
-  const incomingDigest = modelRegistryCanonicalJson({ ...incoming, updatedAt: canonicalUpdatedAt });
-  const currentDigest = modelRegistryCanonicalJson({ ...current, updatedAt: canonicalUpdatedAt });
+  const incomingDigest = modelRegistryCanonicalJson({
+    ...incoming,
+    updatedAt: canonicalUpdatedAt,
+  });
+  const currentDigest = modelRegistryCanonicalJson({
+    ...current,
+    updatedAt: canonicalUpdatedAt,
+  });
   return incomingDigest === currentDigest ? "same" : "conflict";
 }
 
@@ -56,7 +108,8 @@ export function decideModelRegistrySnapshot(
   if (!incoming || !current) return "accept-incoming";
   const relation = compareModelRegistryRevisions(incoming, current);
   if (relation === "conflict") return "preserve-current-conflict";
-  if (relation === "older" || relation === "invalid-incoming") return "preserve-current";
+  if (relation === "older" || relation === "invalid-incoming")
+    return "preserve-current";
   return "accept-incoming";
 }
 
@@ -64,14 +117,23 @@ export interface ResolvedModelReferencePrice {
   entry: ModelRegistryEntry;
   route: ModelRegistryRoute;
   price: ModelReferencePrice;
+  prices: ModelReferencePrice[];
 }
 
-export interface ResolveModelReferencePriceOptions {
-  agent?: ModelAgent;
+export interface ModelReferencePriceSelection {
+  currency?: import("./modelAccessBean.js").ModelCurrency;
   inputTokens?: number;
   variant?: ModelPriceVariant;
   /** ISO date or Date; defaults to the current day. */
   at?: string | Date;
+}
+export interface ResolveBaseModelReferencePriceOptions extends ModelReferencePriceSelection {
+  priceGroup?: string;
+}
+export interface ResolveModelReferencePriceOptions extends ModelReferencePriceSelection {
+  /** Subscription value uses manufacturer tariffs even when a route has its own price. */
+  officialOnly?: boolean;
+  agent?: ModelAccessV2Agent;
 }
 
 function calendarDate(value: string | Date | undefined): string {
@@ -84,8 +146,14 @@ function calendarDate(value: string | Date | undefined): string {
 
 function routeModelCandidates(providerId: string, modelId: string): string[] {
   const ids = [modelId];
+  const withoutContextProfile = modelId.replace(/\[1m\]$/, "");
+  if (withoutContextProfile !== modelId) ids.push(withoutContextProfile);
   if (providerId === "openai" && modelId.startsWith("chatgpt/")) {
-    ids.push(modelId.slice("chatgpt/".length));
+    const stripped = modelId.slice("chatgpt/".length);
+    ids.push(stripped);
+    const strippedWithoutContextProfile = stripped.replace(/\[1m\]$/, "");
+    if (strippedWithoutContextProfile !== stripped)
+      ids.push(strippedWithoutContextProfile);
   }
   if (providerId === "anthropic") {
     const undatedModel = modelId.replace(/-\d{8}$/, "");
@@ -98,7 +166,7 @@ function matchingModelRegistryRoutes(
   registry: ModelRegistry | null | undefined,
   providerId: string,
   modelId: string,
-  agent?: ModelAgent,
+  agent?: ModelAccessV2Agent,
 ): Array<{ entry: ModelRegistryEntry; route: ModelRegistryRoute }> {
   if (!registry) return [];
   const normalizedProviderId = providerId.trim();
@@ -137,9 +205,23 @@ export function findModelRegistryRoute(
   registry: ModelRegistry | null | undefined,
   providerId: string,
   modelId: string,
-  agent?: ModelAgent,
+  agent?: ModelAccessV2Agent,
 ): { entry: ModelRegistryEntry; route: ModelRegistryRoute } | undefined {
-  return matchingModelRegistryRoutes(registry, providerId, modelId, agent)[0];
+  const matched = matchingModelRegistryRoutes(
+    registry,
+    providerId,
+    modelId,
+    agent,
+  )[0];
+  if (!matched || !registry || registry.schemaVersion < 4) return matched;
+  return {
+    route: matched.route,
+    entry: {
+      ...matched.entry,
+      ...registryEntryDefaults(registry, matched.entry, matched.route),
+      ...matched.route.forceOverrides,
+    } as ModelRegistryEntry,
+  };
 }
 
 /**
@@ -160,36 +242,65 @@ export function resolveModelReferencePrice(
     modelId,
     options.agent,
   );
+  if (!registry) return undefined;
+  for (const matched of matches) {
+    const prices = referencePricesForRoute(
+      registry,
+      matched.entry,
+      matched.route,
+      options.officialOnly,
+    );
+    const price = selectReferencePrice(prices, options);
+    if (price && prices) return { ...matched, price, prices };
+  }
+  return undefined;
+}
+
+/** Reads a manufacturer's price without requiring any supplier route or account. */
+export function resolveBaseModelReferencePrice(
+  registry: ModelRegistry | null | undefined,
+  modelId: string,
+  options: ResolveBaseModelReferencePriceOptions = {},
+) {
+  const model = findBaseModel(registry ?? undefined, modelId);
+  const groups =
+    model?.referencePriceGroups?.filter(
+      (group) =>
+        options.priceGroup === undefined || group.id === options.priceGroup,
+    ) ?? [];
+  const matches = groups.flatMap((group) => {
+    const price = selectReferencePrice(group.prices, options);
+    return price ? [{ model: model!, group, price, prices: group.prices }] : [];
+  });
+  // Market/currency ambiguity is unknown, never array order or a currency conversion.
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function selectReferencePrice(
+  prices: ModelReferencePrice[] | undefined,
+  options: ModelReferencePriceSelection,
+): ModelReferencePrice | undefined {
   const day = calendarDate(options.at);
   const inputTokens = options.inputTokens;
   const variant = options.variant ?? "standard";
-  for (const matched of matches) {
-    const prices = matched.route.referencePrices
-      ?.filter((price) => {
-        if (price.variant !== variant) return false;
-        if (day < price.effectiveFrom) return false;
-        if (price.effectiveUntil !== undefined && day >= price.effectiveUntil)
-          return false;
-        if (inputTokens === undefined) return (price.minInputTokens ?? 0) === 0;
-        if (
-          price.minInputTokens !== undefined &&
-          inputTokens < price.minInputTokens
-        )
-          return false;
-        if (
-          price.maxInputTokens !== undefined &&
-          inputTokens >= price.maxInputTokens
-        )
-          return false;
-        return true;
-      })
-      .sort(
-        (a, b) =>
-          b.effectiveFrom.localeCompare(a.effectiveFrom) ||
-          (b.minInputTokens ?? 0) - (a.minInputTokens ?? 0),
+  const matches =
+    prices?.filter((price) => {
+      if (
+        price.variant !== variant ||
+        (options.currency && price.currency !== options.currency)
+      )
+        return false;
+      if (
+        day < price.effectiveFrom ||
+        (price.effectiveUntil !== undefined && day >= price.effectiveUntil)
+      )
+        return false;
+      if (inputTokens === undefined) return (price.minInputTokens ?? 0) === 0;
+      return (
+        inputTokens >= (price.minInputTokens ?? 0) &&
+        (price.maxInputTokens === undefined ||
+          inputTokens < price.maxInputTokens)
       );
-    const price = prices?.[0];
-    if (price) return { ...matched, price };
-  }
-  return undefined;
+    }) ?? [];
+  return matches.length === 1 ? matches[0] : undefined;
 }

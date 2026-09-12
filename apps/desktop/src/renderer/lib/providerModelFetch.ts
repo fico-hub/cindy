@@ -1,4 +1,12 @@
-import { isLoopbackProviderUrl } from '@cindy/model-providers';
+import {
+  isAgentSelectableModel,
+  isLoopbackProviderUrl,
+  resolvePiModelRoute,
+  type AgentKind,
+  type PiModelApi,
+  type ProviderModelRouteConfig,
+  type ProviderWireProtocol,
+} from '@cindy/model-providers';
 
 export type CustomProviderAuthMode = 'apiKey' | 'oauth' | 'none';
 
@@ -11,8 +19,49 @@ export interface ProviderModelFetchSignatureFields {
 }
 
 export interface ProviderConnectionTestSignatureFields extends ProviderModelFetchSignatureFields {
-  wireProtocol: string;
-  models: ReadonlyArray<{ id: string }>;
+  wireProtocol: ProviderWireProtocol;
+  models: ReadonlyArray<{ id: string; mode?: string; discoveredMetadata?: { mode?: string }; piApi?: PiModelApi; route?: ProviderModelRouteConfig }>;
+}
+
+export function firstProviderChatModel<T extends { id: string; mode?: string; discoveredMetadata?: { mode?: string } }>(models: readonly T[]): T | undefined {
+  return models.find((model) => model.id.trim().length > 0 && isAgentSelectableModel(
+    { id: model.id, group: 'custom', mode: model.mode ?? model.discoveredMetadata?.mode },
+    { userProvider: true },
+  ));
+}
+
+type ProviderProbeAgent = Extract<AgentKind, 'claude-code' | 'codex' | 'pi'>;
+
+export interface ProviderConnectionProbeRoute {
+  baseUrl: string;
+  wireProtocol: ProviderWireProtocol;
+  requestPath?: string;
+}
+
+/** Resolve the first model's effective inference route using the same override order as runtime. */
+export function resolveProviderConnectionProbeRoute(
+  agent: ProviderProbeAgent,
+  fields: Pick<
+    ProviderConnectionTestSignatureFields,
+    'baseUrl' | 'requestPath' | 'wireProtocol' | 'models'
+  >,
+): ProviderConnectionProbeRoute | null {
+  const firstModel = firstProviderChatModel(fields.models);
+  if (agent === 'pi') {
+    const route = resolvePiModelRoute(firstModel, {
+      baseUrl: fields.baseUrl,
+      wireProtocol: fields.wireProtocol,
+    });
+    return route ? { baseUrl: route.baseUrl.trim(), wireProtocol: route.wireProtocol } : null;
+  }
+
+  const modelRoute = firstModel?.route;
+  const requestPath = (modelRoute?.requestPath ?? fields.requestPath).trim();
+  return {
+    baseUrl: (modelRoute?.baseUrl ?? fields.baseUrl).trim(),
+    wireProtocol: modelRoute?.wireProtocol ?? fields.wireProtocol,
+    ...(requestPath ? { requestPath } : {}),
+  };
 }
 
 export function stripCredentialHeaders(headers: Record<string, string>): Record<string, string> {
@@ -77,6 +126,17 @@ export interface SavedProviderProbeBaseline {
   authMode: CustomProviderAuthMode;
   apiKey: string;
   headers: ReadonlyArray<{ name: string; value: string }>;
+  modelPiApi?: string;
+  modelRoute?: ProviderModelRouteConfig;
+}
+
+function normalizedModelRoute(route: ProviderModelRouteConfig | undefined): object | null {
+  if (!route) return null;
+  return {
+    baseUrl: route.baseUrl.trim(),
+    wireProtocol: route.wireProtocol,
+    requestPath: route.requestPath?.trim() || null,
+  };
 }
 
 function normalizeHeaderRows(
@@ -183,6 +243,13 @@ export function connectionTestCanUseSaved(
   if (form.baseUrl.trim() !== baseline.baseUrl.trim()) return false;
   if (form.requestPath.trim() !== baseline.requestPath.trim()) return false;
   if (form.wireProtocol !== baseline.wireProtocol) return false;
+  const firstModel = firstProviderChatModel(form.models);
+  if ((firstModel?.piApi ?? null) !== (baseline.modelPiApi ?? null)) return false;
+  if (
+    JSON.stringify(normalizedModelRoute(firstModel?.route)) !==
+    JSON.stringify(normalizedModelRoute(baseline.modelRoute))
+  )
+    return false;
   if (authMode === 'apiKey' && form.apiKey.trim() !== baseline.apiKey.trim()) return false;
   return headerRowsEqual(form.headers, baseline.headers);
 }
@@ -195,6 +262,10 @@ export function providerConnectionTestRequestSignature(
   return JSON.stringify({
     request: providerModelFetchRequestSignature(fields, authMode),
     wireProtocol: fields.wireProtocol,
-    modelId: fields.models.map((model) => model.id.trim()).find(Boolean) ?? null,
+    modelId: firstProviderChatModel(fields.models)?.id.trim() ?? null,
+    modelPiApi: firstProviderChatModel(fields.models)?.piApi ?? null,
+    modelRoute: normalizedModelRoute(
+      firstProviderChatModel(fields.models)?.route,
+    ),
   });
 }

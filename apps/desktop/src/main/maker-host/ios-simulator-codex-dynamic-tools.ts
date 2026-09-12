@@ -7,6 +7,7 @@ import {
   registerIOSSimulatorTools,
   type IOSSimulatorMcpDeps,
 } from '@cindy/mcps';
+import { isFrozenBuiltinPluginAllowed } from '../mcp-integrations/codexBuiltinToolPolicy.js';
 
 const NAMESPACE = 'cindy_ios_simulator';
 const FLAT_TOOL_SEPARATOR = '__';
@@ -18,7 +19,7 @@ const TOOLS = [
     type: 'function',
     name: LIST_TOOLS_NAME,
     description:
-      "Discover Cindy's embedded iOS Simulator tools. Use this deterministic Host gateway for iOS app work instead of probing MCP resources or opening macOS Simulator.app. Every tool behind it acts on a simulated Apple device: never use it to browse the web, fetch HTTP data, or automate this Mac. Start with check_environment.",
+      "Discover Cindy's embedded iOS Simulator tools. Use this deterministic Host gateway when the embedded route is selected for iOS app work. Every tool behind it acts on a simulated Apple device: never use it to browse the web, fetch HTTP data, or automate this Mac. Start with check_environment.",
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -84,10 +85,28 @@ export function createIOSSimulatorCodexDynamicToolProvider(options: {
   deps: IOSSimulatorMcpDeps;
 }): CodexHostDynamicToolProvider {
   return {
-    listTools: () => (process.platform === 'darwin' ? TOOLS : []),
+    listTools: (context) => (
+      process.platform === 'darwin'
+      && isFrozenBuiltinPluginAllowed(context.vendorOptions, 'ios-simulator')
+        ? TOOLS
+        : []
+    ),
     callTool: async (params, context) => {
       const toolName = innerToolName(params);
       if (!toolName) return undefined;
+      if (!isFrozenBuiltinPluginAllowed(context.vendorOptions, 'ios-simulator')) {
+        return textResponse(
+          {
+            ok: false,
+            errorCode: 'IOS_SIMULATOR_DISABLED',
+            data: {
+              reason: 'disabled-by-bot-profile',
+              message: 'The embedded iOS Simulator is not enabled in this Bot runtime snapshot.',
+            },
+          },
+          false,
+        );
+      }
       if (process.platform !== 'darwin') {
         return textResponse(
           {

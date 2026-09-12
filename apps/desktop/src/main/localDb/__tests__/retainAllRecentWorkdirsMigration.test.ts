@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-const migration = require('../../../../drizzle/scripts/0090_retain_all_recent_workdirs.ts') as {
+const migration = require('../../../../drizzle/scripts/0106_retain_all_recent_workdirs.ts') as {
   run: (db: Database.Database) => void;
   runForPlatform: (db: Database.Database, platform: NodeJS.Platform) => void;
 };
@@ -63,7 +63,7 @@ function recentRows(): Array<{ path: string; last_used_at: number }> {
   }>;
 }
 
-describe('0090 retain all recent workdirs migration', () => {
+describe('0106 retain all recent workdirs migration', () => {
   it('backfills every local project without a ten-project cap, including deleted sessions', () => {
     for (let index = 0; index < 14; index += 1) {
       seedSession({
@@ -105,9 +105,7 @@ describe('0090 retain all recent workdirs migration', () => {
 
     migration.run(db);
 
-    expect(recentRows()).toEqual([
-      { path: '/workspace/plugin-project', last_used_at: 2_000 },
-    ]);
+    expect(recentRows()).toEqual([{ path: '/workspace/plugin-project', last_used_at: 2_000 }]);
   });
 
   it('normalizes duplicate path spellings and keeps the newest activity time', () => {
@@ -167,9 +165,7 @@ describe('0090 retain all recent workdirs migration', () => {
 
     migration.run(db);
 
-    expect(recentRows()).toEqual([
-      { path: '/workspace/already-retained', last_used_at: 3_000 },
-    ]);
+    expect(recentRows()).toEqual([{ path: '/workspace/already-retained', last_used_at: 3_000 }]);
   });
 
   it('deduplicates legacy Windows drive and UNC casing identities', () => {

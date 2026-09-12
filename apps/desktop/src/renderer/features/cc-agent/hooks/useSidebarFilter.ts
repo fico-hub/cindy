@@ -3,12 +3,13 @@
  * ---------------------------------------------------------------------------
  * 封装 Status × Project × Vendor × Last activity 筛选状态，以及主列表整理偏好：
  *   - status   : 'active' | 'archived' | 'all'   → 由后端通过 query 过滤
- *   - projects : 'all' | string[]                 → 客户端 render 阶段过滤
+ *   - projects : 'all' | string[]                 → 客户端 render 阶段过滤(含对话哨兵)
  *   - vendor   : 'all' | 'cc' | 'codex'           → 客户端 render 阶段过滤
  *   - lastActivity : 'all' | '1d' | ...           → 客户端 render 阶段过滤
- *   - groupBy  : 'project' | 'date'               → 客户端 render 阶段切换主列表分组
- *   - sortBy   : 'recency' | 'time' | ...         → 客户端 render 阶段切换主列表排序
- *   - manualProjectOrder : string[]               → Project 分组的手动排序偏好
+ *   - groupBy  : 'project' | 'flat'               → 客户端 render 阶段切换主列表分组
+ *   - sortBy   : 'recency' | 'created' | 'priority'           → 客户端 render 阶段切换任务排序
+ *   - projectOrder : 'activity' | 'custom'        → 按项目分组时的项目行顺序
+ *   - manualProjectOrder : string[]               → Project 分组的自定义顺序
  *
  * 持久化：
  *   - localStorage key `cc-agent.sidebar.filter.status`
@@ -17,6 +18,7 @@
  *   - localStorage key `cc-agent.sidebar.filter.groupBy`
  *   - localStorage key `cc-agent.sidebar.filter.lastActivity`
  *   - localStorage key `cc-agent.sidebar.filter.sortBy`
+ *   - localStorage key `cc-agent.sidebar.filter.projectOrder`
  *   - owner-scoped localStorage key derived from `cc-agent.sidebar.filter.manualProjectOrder`
  *
  * GC（mount 后由编排层在 sessions 首次加载完成时调用一次 `gc(activeWorkingDirs)`）：
@@ -29,7 +31,7 @@
  * 对外暴露：
  *   { status, projects, projectsAsSet, isFilterActive,
  *     setStatus, toggleProject, setProjectsAll, setVendor,
- *     setLastActivity, setGroupBy, setSortBy, setManualProjectOrder, gc }
+ *     setLastActivity, setGroupBy, setSortBy, setProjectOrder, setManualProjectOrder, gc }
  *
  * ADR 决策：
  *   - ADR-5：Status 走后端 query，Project 走前端过滤（混合策略）
@@ -46,28 +48,35 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { createLogger } from '@/lib/logger';
 import { isDataOwnerPushStampCurrent } from '@/contexts/dataOwnerGeneration';
 import type { DataOwnerPushStamp } from '../../../../shared/dataOwnerPush';
-import type {
-  SidebarPinnedOrderMutation,
-  SidebarSettingsSnapshot,
+import {
+  sidebarPinnedEntryComparisonKey,
+  type SidebarPinnedOrderMutation,
+  type SidebarSettingsSnapshot,
 } from '../../../../shared/sidebarSettings';
-import { pinnedSidebarEntryComparisonKey } from '../lib/pinnedSidebarOrder';
 
 import {
   loadStatus,
   loadProjects,
   loadVendor,
   loadGroupBy,
+  loadGroupDialogue,
+  loadGroupDevice,
   loadLastActivity,
   loadSortBy,
+  loadProjectOrder,
   loadManualProjectOrder,
+  migrateLegacyManualSort,
   loadManualPinnedOrder,
   finishManualPinnedOrderLegacyMigration,
   persistStatus,
   persistProjects,
   persistVendor,
   persistGroupBy,
+  persistGroupDialogue,
+  persistGroupDevice,
   persistLastActivity,
   persistSortBy,
+  persistProjectOrder,
   persistManualProjectOrder,
   persistManualPinnedOrder,
   nextProjectsAfterToggle,
@@ -82,6 +91,7 @@ import {
   type FilterGroupBy,
   type FilterLastActivity,
   type FilterSortBy,
+  type FilterProjectOrder,
 } from './helpers/sidebarFilterCore';
 
 export type {
@@ -91,6 +101,7 @@ export type {
   FilterGroupBy,
   FilterLastActivity,
   FilterSortBy,
+  FilterProjectOrder,
 } from './helpers/sidebarFilterCore';
 // Re-export storage keys for any caller that needs to clear / migrate them.
 export {
@@ -100,6 +111,8 @@ export {
   GROUP_BY_KEY,
   LAST_ACTIVITY_KEY,
   SORT_BY_KEY,
+  PROJECT_ORDER_KEY,
+  TASK_INFO_KEY,
   MANUAL_PROJECT_ORDER_KEY,
   MANUAL_PINNED_ORDER_KEY,
 } from './helpers/sidebarFilterCore';
@@ -119,11 +132,17 @@ export interface UseSidebarFilterReturn {
   vendor: FilterVendor;
   /** 最近活跃范围筛选。默认 'all'。 */
   lastActivity: FilterLastActivity;
-  /** Sidebar 主列表分组方式。默认 'project'，可切到 'date'。 */
+  /** Sidebar 主列表分组方式(D 期):'project' = 按项目分组;'flat' = 全平铺。 */
   groupBy: FilterGroupBy;
-  /** Sidebar 主列表排序方式。默认 'recency'。 */
+  /** 「对话归为一组」开关(D 期):true = 无项目任务收进「对话」组;默认 false 散排。 */
+  groupDialogue: boolean;
+  /** 「按设备分组」开关(E 期):默认 true;仅有远程设备连接时可见/生效。 */
+  groupDevice: boolean;
+  /** Sidebar 主列表任务排序。默认 'recency'。 */
   sortBy: FilterSortBy;
-  /** Project 分组手动排序顺序。元素为 normalized workingDir。 */
+  /** 按项目分组时的项目行顺序。默认 'activity'。 */
+  projectOrder: FilterProjectOrder;
+  /** Project 分组自定义顺序。元素为 normalized workingDir。 */
   manualProjectOrder: readonly string[];
   /** Pinned 段手动排序顺序。元素为 session id 或带前缀的 project entry id。 */
   manualPinnedOrder: readonly string[];
@@ -147,8 +166,16 @@ export interface UseSidebarFilterReturn {
   setLastActivity: (lastActivity: FilterLastActivity) => void;
   /** 设置主列表分组方式，持久化到 localStorage。 */
   setGroupBy: (groupBy: FilterGroupBy) => void;
-  /** 设置主列表排序方式，持久化到 localStorage。 */
+  /** 设置「对话归为一组」，持久化到 localStorage。 */
+  setGroupDialogue: (groupDialogue: boolean) => void;
+  /** 设置「按设备分组」，持久化到 localStorage。 */
+  setGroupDevice: (groupDevice: boolean) => void;
+  /** 设置主列表任务排序，持久化到 localStorage。 */
   setSortBy: (sortBy: FilterSortBy) => void;
+  /** 设置项目行顺序，持久化到 localStorage。 */
+  setProjectOrder: (projectOrder: FilterProjectOrder) => void;
+  /** 一键重置内容筛选（status/projects/vendor/lastActivity）回默认。 */
+  resetContentFilters: () => void;
   /** 直接替换 Project 手动排序顺序，持久化到 localStorage。 */
   setManualProjectOrder: (order: readonly string[], activeWorkingDirs: readonly string[]) => void;
   /** 直接替换 Pinned 手动排序顺序并持久化。
@@ -188,7 +215,6 @@ export function useSidebarFilter(
   hiddenProjectKeys: ReadonlySet<string>,
   initialSnapshot: SidebarSettingsSnapshot,
 ): UseSidebarFilterReturn {
-  const localPlatform = window.electronAPI.platform;
   const ownerId = initialSnapshot.dataOwnerId;
   const ownerStamp = useMemo<DataOwnerPushStamp>(
     () => ({
@@ -205,7 +231,15 @@ export function useSidebarFilter(
     loadLastActivity(),
   );
   const [groupBy, setGroupByState] = useState<FilterGroupBy>(() => loadGroupBy());
-  const [sortBy, setSortByState] = useState<FilterSortBy>(() => loadSortBy());
+  const [groupDialogue, setGroupDialogueState] = useState<boolean>(() => loadGroupDialogue());
+  const [groupDevice, setGroupDeviceState] = useState<boolean>(() => loadGroupDevice());
+  const [sortBy, setSortByState] = useState<FilterSortBy>(() => {
+    migrateLegacyManualSort();
+    return loadSortBy();
+  });
+  const [projectOrder, setProjectOrderState] = useState<FilterProjectOrder>(() =>
+    loadProjectOrder(),
+  );
   const [manualProjectOrder, setManualProjectOrderState] = useState<string[]>(() =>
     loadManualProjectOrder(ownerId),
   );
@@ -377,25 +411,25 @@ export function useSidebarFilter(
   const toggleProject = useCallback(
     (workingDir: string) => {
       setProjectsState((prev) => {
-        const next = nextProjectsAfterToggle(prev, workingDir, localPlatform);
+        const next = nextProjectsAfterToggle(prev, workingDir, window.electronAPI.platform);
         if (next === prev) return prev;
         persistProjects(next, ownerId);
         return next;
       });
     },
-    [localPlatform, ownerId],
+    [ownerId],
   );
 
   const ensureProjectIncluded = useCallback(
     (workingDir: string) => {
       setProjectsState((prev) => {
-        const next = includeProjectInFilter(prev, workingDir, localPlatform);
+        const next = includeProjectInFilter(prev, workingDir, window.electronAPI.platform);
         if (next === prev) return prev;
         persistProjects(next, ownerId);
         return next;
       });
     },
-    [localPlatform, ownerId],
+    [ownerId],
   );
 
   const setProjectsAll = useCallback(() => {
@@ -409,21 +443,25 @@ export function useSidebarFilter(
   const gc = useCallback(
     (activeWorkingDirs: readonly string[]) => {
       setProjectsState((prev) => {
-        const next = gcProjectsAgainstActive(prev, activeWorkingDirs, localPlatform);
+        const next = gcProjectsAgainstActive(prev, activeWorkingDirs, window.electronAPI.platform);
         if (next === prev) return prev;
         persistProjects(next, ownerId);
         return next;
       });
       setManualProjectOrderState((prev) => {
         if (prev.length === 0) return prev;
-        const next = normalizeManualProjectOrder(prev, activeWorkingDirs, localPlatform);
+        const next = normalizeManualProjectOrder(
+          prev,
+          activeWorkingDirs,
+          window.electronAPI.platform,
+        );
         if (next.length === prev.length && next.every((wd, index) => wd === prev[index]))
           return prev;
         persistManualProjectOrder(next, ownerId);
         return next;
       });
     },
-    [localPlatform, ownerId],
+    [ownerId],
   );
 
   const projectsAsSet = useMemo<Set<string> | null>(
@@ -446,22 +484,55 @@ export function useSidebarFilter(
     persistGroupBy(next);
   }, []);
 
+  const setGroupDialogue = useCallback((next: boolean) => {
+    setGroupDialogueState(next);
+    persistGroupDialogue(next);
+  }, []);
+
+  const setGroupDevice = useCallback((next: boolean) => {
+    setGroupDeviceState(next);
+    persistGroupDevice(next);
+  }, []);
+
   const setSortBy = useCallback((next: FilterSortBy) => {
     setSortByState(next);
     persistSortBy(next);
   }, []);
 
+  const setProjectOrder = useCallback((next: FilterProjectOrder) => {
+    setProjectOrderState(next);
+    persistProjectOrder(next);
+  }, []);
+
+  const resetContentFilters = useCallback(() => {
+    setStatusState('active');
+    persistStatus('active');
+    setProjectsState((prev) => {
+      if (prev === 'all') return prev;
+      persistProjects('all', ownerId);
+      return 'all';
+    });
+    setVendorState('all');
+    persistVendor('all');
+    setLastActivityState('all');
+    persistLastActivity('all');
+  }, [ownerId]);
+
   const setManualProjectOrder = useCallback(
     (order: readonly string[], activeWorkingDirs: readonly string[]) => {
       setManualProjectOrderState((prev) => {
-        const next = normalizeManualProjectOrder(order, activeWorkingDirs, localPlatform);
+        const next = normalizeManualProjectOrder(
+          order,
+          activeWorkingDirs,
+          window.electronAPI.platform,
+        );
         if (next.length === prev.length && next.every((wd, index) => wd === prev[index]))
           return prev;
         persistManualProjectOrder(next, ownerId);
         return next;
       });
     },
-    [localPlatform, ownerId],
+    [ownerId],
   );
 
   const setManualPinnedOrder = useCallback(
@@ -469,7 +540,7 @@ export function useSidebarFilter(
       updatePinnedOrder(
         () =>
           normalizeManualPinnedOrder(order, activeEntryIds, (entryId) =>
-            pinnedSidebarEntryComparisonKey(entryId, localPlatform),
+            sidebarPinnedEntryComparisonKey(entryId, window.electronAPI.platform),
           ),
         (_latestOrder, nextOrder) => ({
           kind: 'reorder',
@@ -477,39 +548,45 @@ export function useSidebarFilter(
           order: nextOrder,
         }),
       ),
-    [localPlatform, updatePinnedOrder],
+    [updatePinnedOrder],
   );
 
   const promotePin = useCallback(
     (entryId: string) =>
       updatePinnedOrder(
         (prev) => {
-          const identity = pinnedSidebarEntryComparisonKey(entryId, localPlatform);
-          const firstMatches =
-            pinnedSidebarEntryComparisonKey(prev[0] ?? '', localPlatform) === identity;
-          const remaining = prev.filter(
-            (id) => pinnedSidebarEntryComparisonKey(id, localPlatform) !== identity,
+          const identity = sidebarPinnedEntryComparisonKey(
+            entryId,
+            window.electronAPI.platform,
           );
-          if (firstMatches && remaining.length === prev.length - 1) return Array.from(prev);
-          return [firstMatches ? prev[0]! : entryId, ...remaining];
+          return [
+            entryId,
+            ...prev.filter(
+              (id) =>
+                sidebarPinnedEntryComparisonKey(id, window.electronAPI.platform) !== identity,
+            ),
+          ];
         },
         () => ({ kind: 'promote', entryId }),
       ),
-    [localPlatform, updatePinnedOrder],
+    [updatePinnedOrder],
   );
 
   const removePin = useCallback(
     (entryId: string) =>
       updatePinnedOrder(
         (prev) => {
-          const identity = pinnedSidebarEntryComparisonKey(entryId, localPlatform);
+          const identity = sidebarPinnedEntryComparisonKey(
+            entryId,
+            window.electronAPI.platform,
+          );
           return prev.filter(
-            (id) => pinnedSidebarEntryComparisonKey(id, localPlatform) !== identity,
+            (id) => sidebarPinnedEntryComparisonKey(id, window.electronAPI.platform) !== identity,
           );
         },
         () => ({ kind: 'remove', entryId }),
       ),
-    [localPlatform, updatePinnedOrder],
+    [updatePinnedOrder],
   );
 
   const isSessionContentFiltered =
@@ -526,7 +603,10 @@ export function useSidebarFilter(
     vendor,
     lastActivity,
     groupBy,
+    groupDialogue,
+    groupDevice,
     sortBy,
+    projectOrder,
     manualProjectOrder,
     manualPinnedOrder,
     setStatus,
@@ -537,7 +617,11 @@ export function useSidebarFilter(
     setVendor,
     setLastActivity,
     setGroupBy,
+    setGroupDialogue,
+    setGroupDevice,
     setSortBy,
+    setProjectOrder,
+    resetContentFilters,
     setManualProjectOrder,
     setManualPinnedOrder,
     promotePin,
