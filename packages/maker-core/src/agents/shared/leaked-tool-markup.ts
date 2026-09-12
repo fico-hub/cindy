@@ -34,10 +34,14 @@
  * 行首裸 invoke 开标记。缺失前导 `<` 即类 B 的损坏签名:完整的 `<invoke …>`
  * 是 SDK 能正常解析的形态,不属于本检测目标;行首要求同时天然排除
  * `\invoke`、`&lt;invoke` 之类的转义演示(它们行首是 `\` / `&`)。
+ *
+ * 签名内只允许**行内**空白(`[ \t]`,不用 `\s`):`\s` 会吞掉换行,把行首孤立的
+ * `invoke` / `parameter` 词与下一行的 `name="…">` 片段缝成一个"标记",让一段
+ * 零工具的普通讨论被判成泄漏、进入终态错误与自动续跑(Codex review)。
  */
-const BARE_INVOKE_LINE_RE = /^invoke\s+name="[^"\n]{1,128}"\s*>/m;
+const BARE_INVOKE_LINE_RE = /^invoke[ \t]+name="[^"\n]{1,128}"[ \t]*>/m;
 /** 行首 parameter 开标记(实测前导 `<` 保留或缺失均有,两种都认)。 */
-const PARAMETER_LINE_RE = /^<?parameter\s+name="[^"\n]{1,128}"\s*>/m;
+const PARAMETER_LINE_RE = /^<?parameter[ \t]+name="[^"\n]{1,128}"[ \t]*>/m;
 
 export interface LeakedToolMarkupHit {
   /** 命中类别,进结构化日志用;当前只有一类。 */

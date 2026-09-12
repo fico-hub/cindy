@@ -168,6 +168,30 @@ describe('detectLeakedToolCallMarkup (#2518, narrowed)', () => {
     ).toEqual({ category: 'invoke-with-parameter' });
   });
 
+  it('does not hit when a bare invoke word and a name= fragment sit on separate lines (Codex review)', () => {
+    // 行首孤立的 `invoke` / `parameter` 词，与下一行的 `name="…">` 片段拼在一起
+    // 不是一个标记：签名必须整体落在同一行，`\s` 跨行就会把它们缝成误报。
+    const split = [
+      'Two words to know here:',
+      'invoke',
+      'name="Bash"> is what the opener looks like once fixed.',
+      'And the second one:',
+      'parameter',
+      'name="command"> follows it.',
+    ].join('\n');
+    expect(detectLeakedToolCallMarkup(split)).toBeNull();
+  });
+
+  it('does not hit when only the closing ">" is pushed to the next line', () => {
+    const wrapped = ['invoke name="Bash"', '>', 'parameter name="command"', '>'].join('\n');
+    expect(detectLeakedToolCallMarkup(wrapped)).toBeNull();
+  });
+
+  it('still hits when the one-line signatures use tabs as the separator', () => {
+    const tabbed = ['invoke\tname="Bash">', 'parameter\tname="command">ls</parameter>'].join('\n');
+    expect(detectLeakedToolCallMarkup(tabbed)).toEqual({ category: 'invoke-with-parameter' });
+  });
+
   it('does not hit on very short text', () => {
     expect(detectLeakedToolCallMarkup('invoke n')).toBeNull();
   });
