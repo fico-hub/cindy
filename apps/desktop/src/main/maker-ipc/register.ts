@@ -1,5 +1,6 @@
 import { advanceRuntimeRecoveryNotice } from '../im/shared/runtimeRecoveryNotice.js';
 import { configureAppDefaultModelSelection } from './appDefaultModelControl.js';
+import type { BuiltinApiKeyBridgeDeps } from '../secrets/builtinApiKeyBridge.js';
 import { setBotInvitationWelcomeDispatch } from './botInvitation.js';
 import type { TurnUsageContext } from './turnUsageContext.js';
 import { retainProviderPresentationAfterAuthChange } from '../maker-host/provider-presentation-store.js';
@@ -4685,6 +4686,8 @@ async function confirmReviewExternalArtifacts(
 }
 
 export interface RegisterMakerIpcOptions {
+  /** Reuse the normal settings save notifications, including credential-generation invalidation. */
+  builtinApiKeyDeps: BuiltinApiKeyBridgeDeps;
   onAnySessionTurnKeepaliveChange?: (isRunning: boolean) => void;
   /** 由 bootstrap 注入，避免 maker-ipc → model-access → maker-host 的循环依赖。 */
   refreshXdGatewayModels(): Promise<void>;
@@ -5484,6 +5487,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       }
       return fetchProviderModels(spec);
     },
+    builtinApiKeyDeps: options.builtinApiKeyDeps,
     // 重新发现会用订阅凭证发起真实上游请求，限主页面 sender（子 frame / WebView 拒绝）。
     assertTrustedSender: (event) =>
       assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]),
@@ -5649,6 +5653,17 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           for (const agent of provider.agents) {
             if (!isCurrent()) break;
             const upstream = provider.routing[agent]?.upstream;
+            if (
+              oauth.modelsDiscoveryUrl &&
+              (!upstream ||
+                new URL(oauth.modelsDiscoveryUrl).origin !== new URL(upstream).origin)
+            ) {
+              // The descriptor is user/provider data, but the discovery request carries a
+              // Bearer token. Never let an explicit discovery URL collect credentials outside
+              // the runtime's own origin. Imported descriptors are rejected earlier; this is
+              // the same fail-closed guard for existing catalog entries.
+              continue;
+            }
             const url =
               oauth.modelsDiscoveryUrl ?? (upstream ? deriveModelsDiscoveryUrl(upstream) : null);
             if (!url) continue;
