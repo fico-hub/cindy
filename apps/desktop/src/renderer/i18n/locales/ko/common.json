@@ -1,7 +1,9 @@
 {
   "botExistingSessionDelivery": {
     "title": "기존 세션에 메시지 보내기",
-    "description": "아래 메시지를 이 컴퓨터의 지정된 세션에 보냅니다. 기존 모델과 권한으로 처리를 계속합니다."
+    "description": "아래 메시지를 지정한 세션에 보냅니다. 보내기 전에 실행 위치, 모델 및 권한을 확인하세요.",
+    "localTarget": "현재 컴퓨터",
+    "remoteTarget": "원격 호스트: {{hostId}}"
   },
   "remoteDesktop": {
     "windowsTitle": "잠금 화면 제어",

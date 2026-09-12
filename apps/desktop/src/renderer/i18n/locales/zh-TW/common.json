@@ -1,7 +1,9 @@
 {
   "botExistingSessionDelivery": {
     "title": "向現有任務傳送訊息",
-    "description": "將下方訊息傳送到這台電腦上的指定任務。該任務將使用現有模型與權限繼續處理。"
+    "description": "將下方訊息傳送到指定任務。傳送前請確認其執行位置、模型和權限。",
+    "localTarget": "目前電腦",
+    "remoteTarget": "遠端主機：{{hostId}}"
   },
   "remoteDesktop": {
     "windowsTitle": "鎖定畫面控制",

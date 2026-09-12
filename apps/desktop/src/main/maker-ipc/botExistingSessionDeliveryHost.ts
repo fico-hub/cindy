@@ -57,6 +57,7 @@ export function createDesktopBotExistingSessionDelivery(deps: HostDeps) {
           providerId: sessions.providerId, permissionMode: sessions.permissionMode,
           workingDir: sessions.workingDir, remoteHostId: sessions.remoteHostId,
           effort: sessions.effort, fastMode: sessions.fastMode,
+          planModeEnabled: sessions.planModeEnabled,
         }).from(sessions)
           .where(eq(sessions.id, input.targetSessionId)).limit(1);
         assertCaller();
@@ -66,9 +67,9 @@ export function createDesktopBotExistingSessionDelivery(deps: HostDeps) {
       };
       const original = await read();
       const fingerprint = (row: typeof original) => JSON.stringify([
-        row.owned.botId, row.target.id, row.target.source, row.target.status, row.target.clearedAt,
+        row.owned.botId, row.target.id, row.target.title, row.target.source, row.target.status, row.target.clearedAt,
         row.target.model, row.target.agentKind, row.target.providerId, row.target.permissionMode,
-        row.target.workingDir, row.target.remoteHostId, row.target.effort, row.target.fastMode,
+        row.target.workingDir, row.target.remoteHostId, row.target.effort, row.target.fastMode, row.target.planModeEnabled,
       ]);
       await deps.restoreQueue(input.targetSessionId);
       assertCaller();
@@ -99,7 +100,14 @@ export function createDesktopBotExistingSessionDelivery(deps: HostDeps) {
             kind: 'permission', requestId: randomUUID(), toolName: 'cindy.send_to_existing_session',
             title: t('botExistingSessionDelivery.title'),
             description: t('botExistingSessionDelivery.description'),
-            input: { session_id: input.targetSessionId, title: original.target.title, message: input.message },
+            input: {
+              session_id: input.targetSessionId, title: original.target.title, message: input.message,
+              execution_location: original.target.remoteHostId
+                ? t('botExistingSessionDelivery.remoteTarget').replace('{{hostId}}', () => original.target.remoteHostId!)
+                : t('botExistingSessionDelivery.localTarget'),
+              remote_host_id: original.target.remoteHostId,
+              working_directory: original.target.workingDir,
+            },
             metadata: { hostOwnedConfirmation: 'bot_existing_session_delivery' },
           };
           const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(8 * 60_000)]);
@@ -110,13 +118,28 @@ export function createDesktopBotExistingSessionDelivery(deps: HostDeps) {
         },
       };
     },
-    readAccepted: async (id, clientId) => {
+    readAccepted: async (id, clientId, callerSessionId) => {
       await deps.restoreQueue(id);
       const queued = deps.findQueued(id, clientId);
       if (queued) return queued;
-      const [persisted] = await getDbClient().drizzle.select({ content: messages.content })
+      const [persisted] = await getDbClient().drizzle.select({ content: messages.content, agentMeta: messages.agentMeta })
         .from(messages).where(and(eq(messages.sessionId, id), eq(messages.clientId, clientId))).limit(1);
-      if (persisted) return { message: persisted.content };
+      if (persisted) {
+        // Hooks may rewrite content. The Host-authored session origin retains the
+        // authorization body in both queue snapshots and the pre-dispatch message row.
+        if (persisted.agentMeta) {
+          let meta;
+          try { meta = JSON.parse(persisted.agentMeta); }
+          catch { throw new ExistingSessionDeliveryError('DELIVERY_UNVERIFIED', 'The existing receipt metadata is unreadable. Keep the same delivery key.'); }
+          const origin = meta?.origin;
+          if (origin) {
+            if (origin.kind !== 'session' || origin.senderSessionId !== callerSessionId || typeof origin.displayText !== 'string')
+              throw new ExistingSessionDeliveryError('DELIVERY_UNVERIFIED', 'The existing receipt origin cannot be verified. Keep the same delivery key.');
+            return { message: origin.displayText };
+          }
+        }
+        return { message: persisted.content };
+      }
       // The queue may have just completed/been removed before its transcript is queryable.
       // Never re-admit an ID whose previous outcome cannot be proven.
       if (deps.hasKnownInput(id, clientId)) throw new ExistingSessionDeliveryError('DELIVERY_UNVERIFIED', 'This delivery key is already known, but its message is not queryable. Do not use a new key to retry.');

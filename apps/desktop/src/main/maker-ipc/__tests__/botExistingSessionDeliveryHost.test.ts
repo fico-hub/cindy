@@ -13,7 +13,7 @@ vi.mock('../../appSessionState', () => ({
   isAppSessionBoundaryPending: () => state.pending,
 }));
 vi.mock('../../localDb/client/current', () => ({ getDbClient: () => state.client }));
-vi.mock('../../i18n', () => ({ t: (key: string) => key }));
+vi.mock('../../i18n', () => ({ t: (key: string) => key === 'botExistingSessionDelivery.remoteTarget' ? 'Remote host: {{hostId}}' : key }));
 const input = { callerSessionId: 'bot-main', targetSessionId: 'fable-original', message: 'Confirm receipt only.', idempotencyKey: 'test-once' };
 let db: Database.Database;
 beforeEach(() => {
@@ -22,12 +22,12 @@ beforeEach(() => {
   db.exec(`
     CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, source TEXT, status TEXT,
       cleared_at INTEGER, model TEXT, agent_kind TEXT, provider_id TEXT, permission_mode TEXT,
-      working_dir TEXT, remote_host_id TEXT, effort TEXT, fast_mode INTEGER);
+      working_dir TEXT, remote_host_id TEXT, effort TEXT, fast_mode INTEGER, plan_mode_enabled INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE bot_profiles (id TEXT PRIMARY KEY, status TEXT);
     CREATE TABLE bot_session_links (session_id TEXT, bot_id TEXT, role TEXT);
-    CREATE TABLE messages (session_id TEXT, client_id TEXT, content TEXT);
-    INSERT INTO sessions VALUES ('bot-main','Teammate','bot','active',NULL,'gpt','codex','openai','ask','/bot',NULL,'medium',0);
-    INSERT INTO sessions VALUES ('fable-original','Original Fable','chat','active',NULL,'fable','claude-code','anthropic','ask','/project',NULL,'high',0);
+    CREATE TABLE messages (session_id TEXT, client_id TEXT, content TEXT, agent_meta TEXT);
+    INSERT INTO sessions VALUES ('bot-main','Teammate','bot','active',NULL,'gpt','codex','openai','ask','/bot',NULL,'medium',0,0);
+    INSERT INTO sessions VALUES ('fable-original','Original Fable','chat','active',NULL,'fable','claude-code','anthropic','ask','/project',NULL,'high',0,0);
     INSERT INTO bot_profiles VALUES ('teammate','active');
     INSERT INTO bot_session_links VALUES ('bot-main','teammate','canonical');
   `);
@@ -92,30 +92,54 @@ describe('existing Session delivery Host authorization', () => {
     const h = harness(); expect(await h.service.send(input)).toMatchObject({ ok: false, errorCode: 'NOT_A_BOT_SESSION' });
     expect(h.approve).not.toHaveBeenCalled(); expect(h.enqueue).not.toHaveBeenCalled();
   });
+  it.each([null, 'ssh-original-host'])('shows the actual execution location before approval (remote=%s)', async remoteHostId => {
+    db.prepare('UPDATE sessions SET remote_host_id=? WHERE id=?').run(remoteHostId, input.targetSessionId);
+    const h = harness();
+    expect(await h.service.send(input)).toMatchObject({ ok: true });
+    expect(h.approve.mock.calls[0][0]).toMatchObject({ input: {
+      remote_host_id: remoteHostId, working_directory: '/project',
+      execution_location: remoteHostId ? `Remote host: ${remoteHostId}` : 'botExistingSessionDelivery.localTarget',
+    } });
+    expect(db.prepare('SELECT remote_host_id FROM sessions WHERE id=?').get(input.targetSessionId))
+      .toEqual({ remote_host_id: remoteHostId });
+  });
   it('does not accept a noncanonical caller even if its model can call the tool', async () => {
     db.prepare("UPDATE bot_session_links SET role='child'").run();
     const h = harness(); expect(await h.service.send(input)).toMatchObject({ ok: false, errorCode: 'NOT_A_BOT_SESSION' });
     expect(h.approve).not.toHaveBeenCalled();
   });
-  it.each(['owner', 'permission', 'cleared', 'model', 'stopped'])('rejects a late allow decision after %s changes', async kind => {
+  it.each(['owner', 'permission', 'cleared', 'model', 'remote', 'title', 'plan', 'stopped'])('rejects a late allow decision after %s changes', async kind => {
     const h = harness(); h.approve.mockImplementation(async () => {
       if (kind === 'owner') state.scope = 'owner:2';
       if (kind === 'permission') h.downgrade();
       if (kind === 'cleared') h.clearTarget();
       if (kind === 'model') db.prepare('UPDATE sessions SET model=? WHERE id=?').run('other',input.targetSessionId);
+      if (kind === 'remote') db.prepare('UPDATE sessions SET remote_host_id=? WHERE id=?').run('other-host',input.targetSessionId);
+      if (kind === 'title') db.prepare('UPDATE sessions SET title=? WHERE id=?').run('Renamed',input.targetSessionId);
+      if (kind === 'plan') db.prepare('UPDATE sessions SET plan_mode_enabled=1 WHERE id=?').run(input.targetSessionId);
       if (kind === 'stopped') h.stopCaller();
       return { kind: 'permission', behavior: 'allow' };
     });
     expect(await h.service.send(input)).toMatchObject({ ok: false }); expect(h.enqueue).not.toHaveBeenCalled();
   });
   it('reuses a persisted receipt after restart, including a transcript the user has cleared', async () => {
-    db.prepare('INSERT INTO messages VALUES (?,?,?)').run(input.targetSessionId, existingSessionDeliveryClientId(input), input.message);
+    db.prepare('INSERT INTO messages (session_id,client_id,content) VALUES (?,?,?)').run(input.targetSessionId, existingSessionDeliveryClientId(input), input.message);
     db.prepare('UPDATE sessions SET cleared_at=123 WHERE id=?').run(input.targetSessionId);
     const h = harness(); expect(await h.service.send(input)).toMatchObject({ ok: true, reused: true });
     expect(h.approve).not.toHaveBeenCalled(); expect(h.enqueue).not.toHaveBeenCalled();
   });
+  it('reuses the original authorization body after a hook rewrites the persisted message', async () => {
+    db.prepare('INSERT INTO messages VALUES (?,?,?,?)').run(input.targetSessionId,
+      existingSessionDeliveryClientId(input), 'Hook-rewritten message',
+      JSON.stringify({ origin: { kind: 'session', senderSessionId: input.callerSessionId, displayText: input.message } }));
+    const h = harness();
+    expect(await h.service.send(input)).toMatchObject({ ok: true, reused: true });
+    expect(await h.service.send({ ...input, message: 'Different instruction' }))
+      .toMatchObject({ ok: false, errorCode: 'IDEMPOTENCY_CONFLICT' });
+    expect(h.approve).not.toHaveBeenCalled(); expect(h.enqueue).not.toHaveBeenCalled();
+  });
   it('rejects a persisted key with a different body', async () => {
-    db.prepare('INSERT INTO messages VALUES (?,?,?)').run(input.targetSessionId, existingSessionDeliveryClientId(input), 'different');
+    db.prepare('INSERT INTO messages (session_id,client_id,content) VALUES (?,?,?)').run(input.targetSessionId, existingSessionDeliveryClientId(input), 'different');
     const h = harness(); expect(await h.service.send(input)).toMatchObject({ ok: false, errorCode: 'IDEMPOTENCY_CONFLICT' });
     expect(h.enqueue).not.toHaveBeenCalled();
   });

@@ -1,7 +1,9 @@
 {
   "botExistingSessionDelivery": {
     "title": "既存のセッションにメッセージを送信",
-    "description": "以下のメッセージをこのパソコンの指定したセッションに送信します。既存のモデルと権限で処理を続行します。"
+    "description": "以下のメッセージを指定したセッションに送信します。送信前に実行場所、モデル、権限を確認してください。",
+    "localTarget": "このコンピューター",
+    "remoteTarget": "リモートホスト：{{hostId}}"
   },
   "remoteDesktop": {
     "windowsTitle": "ロック画面の操作",

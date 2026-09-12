@@ -26,7 +26,7 @@ export interface ExistingSessionDeliveryDeps {
   capture(input: ExistingSessionDeliveryInput): Promise<ExistingSessionDeliveryContext>;
   withTargetLock<T>(targetSessionId: string, action: () => Promise<T>): Promise<T>;
   /** Reads the restored queue and persisted transcript, including cleared/rewound receipts. */
-  readAccepted(targetSessionId: string, clientId: string): Promise<{ message: string } | null>;
+  readAccepted(targetSessionId: string, clientId: string, callerSessionId: string): Promise<{ message: string } | null>;
   /** Prepare has no dispatch side effects. commit only appends to the existing target queue. */
   prepare(input: ExistingSessionDeliveryInput, clientId: string): Promise<() => void>;
   flush(targetSessionId: string): Promise<void>;
@@ -77,7 +77,7 @@ export function createBotExistingSessionDelivery(deps: ExistingSessionDeliveryDe
         }
         const lease = context;
         const accepted = async (): Promise<ExistingSessionDeliveryResult | null> => {
-          const receipt = await deps.readAccepted(input.targetSessionId, clientId);
+          const receipt = await deps.readAccepted(input.targetSessionId, clientId, input.callerSessionId);
           await lease.validate();
           lease.assertCurrent();
           if (!receipt) return null;

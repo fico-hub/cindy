@@ -72,6 +72,15 @@ describe('Bot delivery to an existing user-authorized Session', () => {
       expect(payload(await deliver(client))).toMatchObject({ ok: false });
     });
   });
+  it('uses the shared error payload so callers can read the refusal and recovery hint', async () => {
+    const send = vi.fn(async () => ({ ok: false as const, errorCode: 'DELIVERY_UNVERIFIED', message: 'Retry only with the same delivery key and message.' }));
+    await withClient(send, async client => {
+      const result = await deliver(client);
+      expect(result.isError).toBe(true);
+      expect(payload(result)).toEqual({ ok: false, errorCode: 'DELIVERY_UNVERIFIED',
+        data: { hint: 'Retry only with the same delivery key and message.' } });
+    });
+  });
 
   it.each(['default', 'restricted'] as const)('rechecks the surface after discovery changes to %s', async (next) => {
     let surface: 'bot' | 'default' | 'restricted' = 'bot';

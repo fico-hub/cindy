@@ -1,7 +1,9 @@
 {
   "botExistingSessionDelivery": {
     "title": "向已有任务发送消息",
-    "description": "将下方消息发送到这台电脑上的指定任务。该任务将使用现有模型和权限继续处理。"
+    "description": "将下方消息发送到指定任务。发送前请确认其执行位置、模型和权限。",
+    "localTarget": "当前电脑",
+    "remoteTarget": "远程主机：{{hostId}}"
   },
   "remoteDesktop": {
     "windowsTitle": "锁屏控制",

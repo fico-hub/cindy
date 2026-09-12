@@ -1,7 +1,9 @@
 {
   "botExistingSessionDelivery": {
     "title": "Send Message to Existing Session",
-    "description": "Send the message below to this session on this computer. It will continue with its existing model and permissions."
+    "description": "Send the message below to the specified task. Confirm its execution location, model and permissions before sending.",
+    "localTarget": "This computer",
+    "remoteTarget": "Remote host: {{hostId}}"
   },
   "remoteDesktop": {
     "windowsTitle": "Lock screen control",

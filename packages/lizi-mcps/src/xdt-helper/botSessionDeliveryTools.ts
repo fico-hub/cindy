@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { XdtHelperToolRegistry } from '../lizi_xdtHelperToolRegistry.js';
+import { errorPayload, okPayload } from './_payload.js';
 
 export interface BotSessionDeliveryCallbacks {
   /** Host validates live Bot ownership and target authorization before dispatch. */
@@ -15,8 +16,8 @@ export interface BotSessionDeliveryCallbacks {
 }
 
 function response(value: Record<string, unknown>) {
-  return { ...(value.ok === false ? { isError: true } : {}),
-    content: [{ type: 'text' as const, text: JSON.stringify(value) }] };
+  if (value.ok === false) return errorPayload(String(value.errorCode), String(value.message));
+  return okPayload(value);
 }
 
 /** Not a general handoff: no creation, execution overrides or caller-supplied authority. */
@@ -28,7 +29,7 @@ export function registerBotSessionDeliveryTools(
   registry.register({
     name: 'send_to_existing_session',
     category: 'bots',
-    description: 'Send one message to an existing Session on this Host, authorized through a target/message confirmation. Never creates or replaces a Session or changes its model. Reuse idempotency_key for the same delivery. A queued receipt does not prove the model consumed the message. Unauthorized targets are rejected; do not retry through other tools.',
+    description: 'Send one message to an existing Session managed by this Host, authorized through confirmation of the target, execution location and message. Never creates or replaces a Session or changes its model. Reuse idempotency_key for the same delivery. A queued receipt does not prove the model consumed the message. Unauthorized targets are rejected; do not retry through other tools.',
     inputShape: {
       target_session_id: z.string().min(1).max(128),
       message: z.string().trim().min(1).max(4_000),
