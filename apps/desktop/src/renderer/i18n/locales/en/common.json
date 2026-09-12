@@ -1,4 +1,8 @@
 {
+  "botExistingSessionDelivery": {
+    "title": "Send Message to Existing Session",
+    "description": "Send the message below to this session on this computer. It will continue with its existing model and permissions."
+  },
   "remoteDesktop": {
     "windowsTitle": "Lock screen control",
     "windowsready": "Enabled for this Cindy process. Restarting Cindy requires administrator authorization again.",

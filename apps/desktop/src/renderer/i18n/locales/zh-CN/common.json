@@ -1,4 +1,8 @@
 {
+  "botExistingSessionDelivery": {
+    "title": "向已有任务发送消息",
+    "description": "将下方消息发送到这台电脑上的指定任务。该任务将使用现有模型和权限继续处理。"
+  },
   "remoteDesktop": {
     "windowsTitle": "锁屏控制",
     "windowsready": "已为本次运行的 Cindy 开启。重新启动 Cindy 后需要再次由管理员授权。",

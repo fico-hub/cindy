@@ -1,4 +1,8 @@
 {
+  "botExistingSessionDelivery": {
+    "title": "既存のセッションにメッセージを送信",
+    "description": "以下のメッセージをこのパソコンの指定したセッションに送信します。既存のモデルと権限で処理を続行します。"
+  },
   "remoteDesktop": {
     "windowsTitle": "ロック画面の操作",
     "windowsready": "現在の Cindy で有効です。Cindy を再起動すると管理者の再承認が必要です。",
