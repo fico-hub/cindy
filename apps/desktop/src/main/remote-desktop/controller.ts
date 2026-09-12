@@ -80,6 +80,7 @@ export class RemoteDesktopController {
   private lastEnded: { peer: string; lease: string } | null = null;
   constructor(private readonly deps: DesktopControllerDeps) {}
   get state(): { peer: string; controlling: boolean } | null {
+    this.tick();
     return this.active ? { peer: this.active.peer, controlling: this.active.controlling } : null;
   }
   get displayId(): string | null {

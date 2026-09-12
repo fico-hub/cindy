@@ -62,6 +62,14 @@ when the host supports input, using the existing permission and ownership checks
 within this page. The computer always has a **Disconnect**
 button while being viewed or controlled.
 
+The host allows one active remote-desktop viewer at a time. Starting a new
+viewer checks and reserves that lease atomically; if another viewer is still
+connected, the controller shows a takeover confirmation. Confirming takeover
+ends the previous viewer's lease before creating the new one. The host status
+banner also expires abandoned viewers after the lease heartbeat timeout, so a
+phone that has already gone away does not keep the computer marked as viewed
+indefinitely.
+
 ## Interaction
 
 - The fullscreen viewport has four tools: All windows, Desktop, Keyboard, and

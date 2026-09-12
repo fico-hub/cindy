@@ -239,6 +239,8 @@ export default function RemoteDesktopScreen() {
     lockOnExitLoaded && lockOnExit && caps?.lockOnExit === true;
   const [status, setStatus] = useState("connecting");
   const [error, setError] = useState<string | null>(null);
+  const takeoverPromptOpen = useRef(false);
+  const takeoverAction = useRef<() => void>(() => {});
   const [frameReady, setFrameReady] = useState(false);
   const [controlReady, setControlReady] = useState(false);
   const connectionPending = !error && (!lease || !frameReady || !controlReady);
@@ -534,6 +536,35 @@ export default function RemoteDesktopScreen() {
       const blocked = remoteDesktopFailureKey(code ?? message);
       stop(!blocked);
       setError(blocked);
+      if (
+        blocked === "connectionBusy" &&
+        capsRef.current?.deviceId === deviceId &&
+        capsRef.current.value.connectionTakeover === true &&
+        !takeoverPromptOpen.current
+      ) {
+        takeoverPromptOpen.current = true;
+        Alert.alert(
+          t("remoteDesktop.connectionBusy"),
+          t("remoteDesktop.connectionBusyTakeover"),
+          [
+            {
+              text: t("remoteDesktop.close"),
+              style: "cancel",
+              onPress: () => {
+                takeoverPromptOpen.current = false;
+              },
+            },
+            {
+              text: t("remoteDesktop.takeoverConnection"),
+              style: "destructive",
+              onPress: () => {
+                takeoverPromptOpen.current = false;
+                takeoverAction.current();
+              },
+            },
+          ],
+        );
+      }
       if (blocked) recovery.current.enabled = false;
       else {
         recovery.current.at = Date.now() + recovery.current.delay;
@@ -541,7 +572,7 @@ export default function RemoteDesktopScreen() {
         setStatus("reconnecting");
       }
     },
-    [stop],
+    [deviceId, stop, t],
   );
   /**
    * The host owns the control bit. When it reports that this viewer no longer
@@ -802,6 +833,17 @@ export default function RemoteDesktopScreen() {
         undefined,
         error === "connectionBusy" && caps?.connectionTakeover === true,
       );
+  };
+  takeoverAction.current = () => {
+    securityRef.current.resetConnectionAttempt();
+    recovery.current.enabled = true;
+    recovery.current.at = Date.now();
+    recovery.current.delay = 1000;
+    recovery.current.resuming = false;
+    setError(null);
+    setStatus("reconnecting");
+    if (!ready.current) webview.current?.reload();
+    else void connectRef.current(undefined, true);
   };
   const restartViewer = () => {
     ready.current = false;
