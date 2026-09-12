@@ -1,4 +1,7 @@
 {
+  "appBadge": {
+    "attentionCount": "Tasks needing attention: {{count}}"
+  },
   "remoteDesktop": {
     "windowsTitle": "Lock screen control",
     "windowsready": "Enabled for this Cindy process. Restarting Cindy requires administrator authorization again.",
@@ -2596,6 +2599,7 @@
       }
     },
     "wecomBot": {
+      "serviceName": "WeCom",
       "title": "WeCom Intelligent Bot",
       "description": "Connect a WeCom intelligent bot and use {{appName}} from direct and group chats.",
       "status": {
@@ -2819,6 +2823,7 @@
       }
     },
     "dingtalkBot": {
+      "serviceName": "DingTalk",
       "title": "DingTalk Bot",
       "description": "Connect your own DingTalk bot and use {{appName}} in DMs and group chats through Stream mode.",
       "status": {
@@ -9103,6 +9108,12 @@
     },
     "threadContext": {
       "cindyFrom": "Cindy · from {{platform}}",
+      "attachedContext": "Context attached to this message",
+      "attachedContextCount": "Context attached to this message ({{count}})",
+      "groupBackgroundCount": "Group chat background ({{count}})",
+      "referencedMessages": "Referenced messages ({{count}})",
+      "referencedContext": "Referenced messages",
+      "groupBackground": "Group chat background",
       "viewThread": "View thread context ({{count}})"
     },
     "rewind": {

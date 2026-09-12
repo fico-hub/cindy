@@ -1,4 +1,7 @@
 {
+  "appBadge": {
+    "attentionCount": "需要關注的任務：{{count}}"
+  },
   "remoteDesktop": {
     "windowsTitle": "鎖定畫面控制",
     "windowsready": "已為本次執行的 Cindy 啟用。重新啟動 Cindy 後需要再次由管理員授權。",
@@ -2595,6 +2598,7 @@
       }
     },
     "wecomBot": {
+      "serviceName": "企業微信",
       "title": "企業微信智慧機器人",
       "description": "連線企業微信智慧機器人，在單聊和群聊中使用 {{appName}}。",
       "status": {
@@ -2818,6 +2822,7 @@
       }
     },
     "dingtalkBot": {
+      "serviceName": "釘釘",
       "title": "釘釘機器人",
       "description": "連線你自建的釘釘機器人，透過 Stream 模式在私聊和群聊中使用 {{appName}}。",
       "status": {
@@ -9096,6 +9101,12 @@
     },
     "threadContext": {
       "cindyFrom": "Cindy · 來自 {{platform}}",
+      "attachedContext": "這則訊息附帶的上下文",
+      "attachedContextCount": "這則訊息附帶的上下文（{{count}}）",
+      "groupBackgroundCount": "群組背景（{{count}}）",
+      "referencedMessages": "引用訊息（{{count}}）",
+      "referencedContext": "引用訊息",
+      "groupBackground": "群組背景",
       "viewThread": "檢視 thread 上下文 ({{count}})"
     },
     "rewind": {
