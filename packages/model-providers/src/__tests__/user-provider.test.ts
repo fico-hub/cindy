@@ -23,6 +23,36 @@ import {
 import type { CustomProviderConfig } from "../types.js";
 import type { ModelRegistry } from "../modelAccessBean.js";
 import { BUNDLED_CATALOG } from "../catalog.js";
+import { providerCatalogId } from "../provider-identity.js";
+
+describe('native subscription instances', () => {
+  it.each(['claude', 'xai'] as const)('%s shares definitions but keeps unique routing identity', native => {
+    const brand = native === 'claude' ? 'anthropic' : 'xai';
+    const make = (id: string) => buildUserProvider({ id, name: brand, auth: { method: 'oauth', native }, runtimes: native === 'claude'
+      ? { 'claude-code': { baseUrl: 'https://api.anthropic.com', wireProtocol: 'anthropic-messages', models: [] } }
+      : { codex: { baseUrl: 'https://api.x.ai/v1', wireProtocol: 'openai-responses', models: [] } } });
+    const a = make(`${brand}-a`);
+    const b = make(`${brand}-b`);
+    expect(a.id).not.toBe(b.id);
+    expect(providerCatalogId(a)).toBe(brand);
+    expect(a.agents).toEqual(expect.arrayContaining(['claude-code', 'codex', 'pi']));
+    expect(a.models).toEqual(b.models);
+    for (const agent of a.agents) expect(a.routing[agent]?.authStrategy).toBe('provider-oauth-header');
+    const builtin = BUNDLED_CATALOG.providers.find(provider => provider.id === brand)!;
+    for (const agent of a.agents) {
+      expect(a.routing[agent]).toEqual({
+        ...builtin.routing[agent],
+        authStrategy: 'provider-oauth-header',
+        ...(native === 'claude' && agent === 'claude-code' ? { headerDelete: ['x-api-key'] } : {}),
+      });
+    }
+    expect(a.auth.native).toBe(native);
+    expect(a.imageModels).toBeUndefined();
+    expect(a.imageDefaults).toBeUndefined();
+    expect(a.videoModels).toBeUndefined();
+    expect(a.videoDefaults).toBeUndefined();
+  });
+});
 
 // Preserve the pre-V4 contract explicitly; layered V4 behavior has independent cases below.
 const LEGACY_REGISTRY: ModelRegistry = {
@@ -47,6 +77,21 @@ const codexOnly: CustomProviderConfig = {
 };
 
 describe("buildUserProvider (per-runtime)", () => {
+  it("keeps native Codex accounts distinct while preserving bearer passthrough", () => {
+    const account: CustomProviderConfig = { id: 'openai-a', name: 'Personal', auth: { method: 'oauth', native: 'codex' },
+      runtimes: { codex: { baseUrl: 'https://chatgpt.com/backend-api/codex', models: [{ id: 'gpt-6-astra', name: 'Astra' }] } } };
+    const a = buildUserProvider(account);
+    const b = buildUserProvider({ ...account, id: 'openai-b', name: 'Work' });
+    expect(a.auth).toEqual({ method: 'oauth', native: 'codex' });
+    expect(a.agents).toEqual(['codex', 'claude-code', 'pi']);
+    expect(a.titleModel).toBeTruthy();
+    expect(a.models.pi?.length).toBeGreaterThan(0);
+    expect(a.imageModels?.every((model) => model.id.startsWith('openai-a/'))).toBe(true);
+    expect(a.routing.codex?.authStrategy).toBe('oauth-passthrough');
+    expect(a.routing.codex?.supportsResponsesCustomTools).not.toBe(false);
+    expect(a.id).not.toBe(b.id);
+    expect(a.models.codex?.[0].id).toBe(b.models.codex?.[0].id);
+  });
   it("projects a legacy custom xai row under a collision-free runtime id", () => {
     const provider = buildUserProvider({
       ...codexOnly,
@@ -1456,5 +1501,92 @@ describe("live preset defaults and discovery provenance", () => {
     config.runtimes.pi!.baseUrl = "https://different.example/v1";
     expect(current().contextWindow).toBe(DEFAULT_CUSTOM_CONTEXT_WINDOW);
     expect(current().supportsImageInput).toBeUndefined();
+  });
+});
+
+describe("official Pi catalog defaults for preset-marked sources (#4295)", () => {
+  const kimiRuntime = () => ({
+    piCatalogProviderId: "kimi-coding",
+    baseUrl: "https://api.kimi.com/coding",
+    wireProtocol: "anthropic-messages" as const,
+    models: [
+      // 2026-09-09 之前从预设创建的存量来源:没有 catalogPresetId,模型也没有 reasoning 字段。
+      { id: "k3-256k", name: "Kimi K3-256K", contextWindow: 262144 },
+      { id: "kimi-for-coding", name: "Kimi K2.7 Code", contextWindow: 262144 },
+    ],
+  });
+  const build = (config: CustomProviderConfig) =>
+    buildUserProvider(config, {
+      modelRegistry: { schemaVersion: 4, updatedAt: "2026-09-11T00:00:00.000Z", models: [] },
+    }).models.pi!;
+
+  it("projects reasoning efforts from the official Pi catalog when the stored model lacks them", () => {
+    const models = build({ id: "kimi-code", name: "Kimi Code", runtimes: { pi: kimiRuntime() } });
+    expect(models.find((m) => m.id === "k3-256k")).toMatchObject({
+      efforts: ["low", "high", "max"],
+      defaultEffort: "high",
+      supportsImageInput: true,
+      maxOutput: 131072,
+    });
+    // 官方目录对该模型只声明 reasoning 而无档位表:与 pi-host 运行期同样得到通用四档。
+    expect(models.find((m) => m.id === "kimi-for-coding")).toMatchObject({
+      efforts: ["minimal", "low", "medium", "high"],
+    });
+  });
+
+  it("merges the catalog under a preset that only declares context/image metadata", () => {
+    const presets = [
+      {
+        id: "moonshot-kimi-code",
+        name: "Kimi Code",
+        runtimes: {
+          pi: {
+            baseUrl: "https://api.kimi.com/coding",
+            wireProtocol: "anthropic-messages" as const,
+            piCatalogProviderId: "kimi-coding",
+            models: [
+              // 预设显式声明档位:预设优先于官方目录。
+              { id: "k3-256k", name: "Kimi K3-256K", contextWindow: 262144, reasoning: true, reasoningEfforts: ["low", "high"], reasoningDefaultEffort: "low" },
+              // 预设只声明 context/image:reasoning 由官方目录补齐,不被短路。
+              { id: "kimi-for-coding", name: "Kimi K2.7 Code", contextWindow: 262144, supportsImageInput: true },
+            ],
+          },
+        },
+      },
+    ];
+    const runtime = { ...kimiRuntime(), catalogPresetId: "moonshot-kimi-code" };
+    const models = buildUserProvider(
+      { id: "kimi-code", name: "Kimi Code", runtimes: { pi: runtime } },
+      { presets: presets as never, modelRegistry: { schemaVersion: 4, updatedAt: "2026-09-11T00:00:00.000Z", models: [] } },
+    ).models.pi!;
+    expect(models.find((m) => m.id === "k3-256k")).toMatchObject({ efforts: ["low", "high"], defaultEffort: "low" });
+    expect(models.find((m) => m.id === "kimi-for-coding")).toMatchObject({
+      efforts: ["minimal", "low", "medium", "high"],
+      supportsImageInput: true,
+    });
+  });
+
+  it("keeps explicit user reasoning settings ahead of the catalog defaults", () => {
+    const runtime = kimiRuntime();
+    runtime.models[0] = { ...runtime.models[0], reasoning: false } as never;
+    const models = build({ id: "kimi-code", name: "Kimi Code", runtimes: { pi: runtime } });
+    expect(models.find((m) => m.id === "k3-256k")).toMatchObject({ efforts: [], defaultEffort: null });
+  });
+
+  it("does not lend catalog capabilities to a hand-edited endpoint or protocol", () => {
+    const edited = kimiRuntime();
+    edited.baseUrl = "https://proxy.example/coding";
+    expect(
+      build({ id: "kimi-code", name: "Kimi Code", runtimes: { pi: edited } }).find((m) => m.id === "k3-256k"),
+    ).toMatchObject({ efforts: [] });
+    const otherProtocol = { ...kimiRuntime(), wireProtocol: "openai-chat" as const };
+    expect(
+      build({ id: "kimi-code", name: "Kimi Code", runtimes: { pi: otherProtocol } }).find((m) => m.id === "k3-256k"),
+    ).toMatchObject({ efforts: [] });
+    const unmarked = kimiRuntime();
+    delete (unmarked as { piCatalogProviderId?: string }).piCatalogProviderId;
+    expect(
+      build({ id: "kimi-code", name: "Kimi Code", runtimes: { pi: unmarked } }).find((m) => m.id === "k3-256k"),
+    ).toMatchObject({ efforts: [] });
   });
 });

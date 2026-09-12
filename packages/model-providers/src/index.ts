@@ -38,6 +38,7 @@ export type {
 } from "./types.js";
 
 export { PI_MODEL_APIS, PI_REASONING_EFFORTS } from "./types.js";
+export { isLocalOnlyProviderForAgent, isOpenAiSubscriptionProvider, providerCatalogId } from './provider-identity.js';
 
 export {
   effectivePiWireProtocol,
@@ -93,6 +94,7 @@ export {
   findModelRegistryRoute,
   resolveModelNativeApi,
   resolveModelReferencePrice,
+  resolveBaseModelReferencePrice,
 } from "./modelRegistry.js";
 export { modelRegistryCanonicalJson } from "./modelRegistryCanonical.js";
 export {
@@ -103,6 +105,8 @@ export {
 export type {
   ResolvedModelReferencePrice,
   ResolveModelReferencePriceOptions,
+  ResolveBaseModelReferencePriceOptions,
+  ModelReferencePriceSelection,
   ModelRegistryRevisionRelation,
   ModelRegistrySnapshotDecision,
 } from "./modelRegistry.js";
@@ -288,3 +292,5 @@ export { mergeDiscoveredRuntimeModels } from "./modelMetadataLayers.js";
 export type { DiscoveredModel } from "./modelMetadataLayers.js";
 
 export { runtimeUserModelMetadata } from "./modelMetadataLayers.js";
+
+export { PROVIDER_MEDIA_FIELDS, providerMediaField, projectProviderMediaModels } from "./providerMediaModels.js";

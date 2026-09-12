@@ -4,10 +4,14 @@ import type {
   ModelRegistryEntry,
   ModelRegistryRoute,
   ModelEffort,
+  ModelReferencePriceGroup,
 } from "./modelAccessBean.js";
 
 /** Data only. Membership, credentials, routing and billed prices never inherit. */
 export interface ModelMetadata {
+  mode?: string;
+  modalities?: { input: string[]; output: string[] };
+  officialDocs?: string;
   name?: string;
   description?: string;
   group?: string;
@@ -22,8 +26,13 @@ export interface BaseModel {
   id: string;
   aliases: string[];
   defaults: ModelMetadata;
+  /** V5 manufacturer reference tariffs; never actual account billing. */
+  referencePriceGroups?: ModelReferencePriceGroup[];
 }
 export const MODEL_METADATA_FIELDS = [
+  "mode",
+  "modalities",
+  "officialDocs",
   "name",
   "description",
   "group",
@@ -48,6 +57,34 @@ export function validModelMetadata(value: unknown): value is ModelMetadata {
   return Object.entries(value).every(([key, v]) => {
     if (!(MODEL_METADATA_FIELDS as readonly string[]).includes(key))
       return false;
+    if (key === "mode")
+      return typeof v === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(v);
+    if (key === "modalities") {
+      if (!v || typeof v !== "object" || Array.isArray(v)) return false;
+      const m = v as Record<string, unknown>;
+      return (
+        Object.keys(m).every((k) => k === "input" || k === "output") &&
+        [m.input, m.output].every(
+          (list) =>
+            Array.isArray(list) &&
+            list.length <= 16 &&
+            list.every(
+              (item) =>
+                typeof item === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(item),
+            ) &&
+            new Set(list).size === list.length,
+        )
+      );
+    }
+    if (key === "officialDocs") {
+      if (typeof v !== "string" || v.length > 2048) return false;
+      try {
+        const url = new URL(v);
+        return url.protocol === "https:" && !url.username && !url.password;
+      } catch {
+        return false;
+      }
+    }
     if (["name", "description", "group"].includes(key)) {
       const maxLength = key === "name" ? 256 : key === "group" ? 128 : 2000;
       return (
@@ -376,6 +413,11 @@ export function runtimeUserModelMetadata(
   m: import("./types.js").ProviderRuntimeModelConfig,
 ): ModelMetadata {
   return pickModelMetadata({
+    ...pickModelMetadata({
+      mode: m.mode,
+      modalities: m.modalities,
+      officialDocs: m.officialDocs,
+    }),
     ...(!m.discoveredMetadata || m.nameExplicit ? { name: m.name } : {}),
     ...(m.contextWindow !== undefined
       ? { contextWindow: m.contextWindow }
@@ -390,4 +432,23 @@ export function runtimeUserModelMetadata(
       ? { defaultEffort: m.reasoningDefaultEffort }
       : {}),
   });
+}
+
+/** Select a whole tariff; missing cache fields never borrow from another source. */
+export function referencePricesForRoute(
+  registry: ModelRegistry,
+  entry: ModelRegistryEntry,
+  route: ModelRegistryRoute,
+  officialOnly = false,
+) {
+  // Before V5 the official tariff lived on the route.
+  if (
+    registry.schemaVersion < 5 ||
+    (!officialOnly && route.referencePrices !== undefined)
+  )
+    return route.referencePrices;
+  if (!entry.modelRef || !route.referencePriceGroup) return undefined;
+  return findBaseModel(registry, entry.modelRef)?.referencePriceGroups?.find(
+    (group) => group.id === route.referencePriceGroup,
+  )?.prices;
 }

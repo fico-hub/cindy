@@ -116,7 +116,7 @@ import { shouldClearOperationErrorAfterSync, type SessionOperationError } from '
 import { createTransientTopicSubscriptionCoordinator } from '@/device-link/transientTopicSubscription';
 import { useMobileMakerTransport } from '@/device-link/useMobileMakerTransport';
 import { findRemoteHistoryView, useRemoteHistoryView } from '@/session/remoteHistoryView';
-import { HistoryViewHandoff, isHistoryViewUnavailable } from '@cindy/maker-shared/message-window';
+import { HistoryViewHandoff, historyViewLeaves, isHistoryViewUnavailable } from '@cindy/maker-shared/message-window';
 import { buildMobileHistoryRenderItems } from '@/session/mobileHistoryRender';
 import { createMobileMakerTransport } from '@/device-link/mobileMakerTransport';
 import { startFocusedTopicSubscription } from '@/device-link/focusedTopicSubscription';
@@ -336,10 +336,16 @@ import {
   type QueueEditTextState,
 } from '@/session/inputProjection';
 import {
-  appendPendingSendItems,
+  mergePendingSendItems,
   buildPendingSendItems,
   type MobilePendingSendActions,
 } from '@/session/pendingSendItems';
+import {
+  appendOptimisticUserMessage,
+  projectOptimisticUserMessages,
+  reconcileOptimisticUserMessages,
+  type OptimisticUserMessage,
+} from '@/session/optimisticUserMessages';
 import type { PendingSendBubbleActions } from '@/session/PendingSendBubble';
 import {
   acquireQueueEditLock,
@@ -1505,14 +1511,33 @@ export default function SessionScreen() {
   // 还没有答案(弱网可达数秒,且失败会回滚摘除气泡),徽标必须是转圈而不是「排入
   // 队尾」——后者是已确认入队的语义。成功 / 回滚 / 转失败任一落定即移除。
   const [sendingQueueClientIds, setSendingQueueClientIds] = useState<ReadonlySet<string>>(new Set());
-  const markQueueItemSending = useCallback((clientId: string) => {
+  const [optimisticUserState, setOptimisticUserState] = useState<{
+    sessionId: string;
+    items: readonly OptimisticUserMessage[];
+  }>(() => ({ sessionId, items: [] }));
+  if (optimisticUserState.sessionId !== sessionId) {
+    setOptimisticUserState({ sessionId, items: [] });
+  }
+  const markQueueItemSending = useCallback((queued: QueuedRemoteMessage) => {
+    const clientId = queued.clientId;
+    const projection = remoteSessionStore.getInputProjection(sessionId);
+    const source = remoteSessionStore.getMessages(sessionId);
+    // Match Desktop's idle-send placement. Busy follow-ups retain the existing
+    // pending tail until authoritative history supplies their transcript row.
+    const busy = projection.pendingQueue.length > 0 || projection.steeringQueueClientIds.length > 0
+      || projection.queueAbortPending || remoteSessionStore.isSessionRunning(sessionId)
+      || remoteSessionStore.getPendingInteractions(sessionId).length > 0
+      || currentTurnHasStreamingAssistant(source);
+    if (!busy) setOptimisticUserState((current) => current.sessionId !== sessionId ? current : {
+      sessionId, items: appendOptimisticUserMessage(current.items, source, queued, sessionId),
+    });
     setSendingQueueClientIds((current) => {
       if (current.has(clientId)) return current;
       const next = new Set(current);
       next.add(clientId);
       return next;
     });
-  }, []);
+  }, [sessionId]);
   const clearQueueItemSending = useCallback((clientId: string) => {
     setSendingQueueClientIds((current) => {
       if (!current.has(clientId)) return current;
@@ -1966,7 +1991,25 @@ export default function SessionScreen() {
     [sessionId, sessions],
   );
   const sessionManagedByHost = isHostManagedSession(currentSession);
-  const localCodexRateLimitControl = canUseLocalCodexRateLimitControl(currentSession);
+  const composerDeviceProviders = useDeviceProviders(deviceId || undefined);
+  const accountProvider = composerDeviceProviders.ready
+    ? composerDeviceProviders.providers.find((provider) => provider.id === currentSession?.providerId)
+    : undefined;
+  const localCodexRateLimitControl = canUseLocalCodexRateLimitControl(currentSession, accountProvider);
+  const accountProviderId = currentSession?.providerId ?? 'openai';
+  const accountControlScope = `${deviceId}\0${sessionId}\0${accountProviderId}`;
+  const accountControlScopeRef = useRef(accountControlScope);
+  accountControlScopeRef.current = accountControlScope;
+  const [storedAccountControlScope, setStoredAccountControlScope] = useState(accountControlScope);
+  // Reset during render, before a menu or reset callback can receive another account's offer.
+  // React rerenders this component before committing its children when its own state changes here.
+  if (storedAccountControlScope !== accountControlScope) {
+    setStoredAccountControlScope(accountControlScope);
+    setAccountUsage(null);
+    setCodexRateLimits(null);
+    setCodexResetBusy(false);
+    setCodexResetRetryKey(null);
+  }
   const isDeviceAccessRevoked = !!deviceId && revokedDevices.has(deviceId);
   // 熔断 open:被控电脑「进程活着但不回包」的半死态;relay status 恒 online,必须单独入参。
   const isDeviceUnresponsive = !!deviceId && unresponsiveDevices.has(deviceId);
@@ -2313,10 +2356,13 @@ export default function SessionScreen() {
   // 会话参数未就绪(缓存种入 / 新建在途)时队列行仍只读:取消 / 编辑 / 插队都是打到
   // 被控端队列的 RPC,会话在那边可能还不存在。暂时断线则与 Desktop 一致继续允许
   // 尝试,失败由 runQueueAction 报错,不把连接恢复职责转嫁给用户。
-  const queueInlineReadOnlyReason = collaborationReadOnlyReason
-    ?? cacheSeededReason
+  const queueAvailabilityReason = cacheSeededReason
     ?? pendingCreationReason
     ?? (sessionOperationLayout.showQueue ? null : composerDisabledReason);
+  const queueInlineReadOnlyReason = collaborationReadOnlyReason ?? queueAvailabilityReason;
+  // 重试/清错属于输入恢复：Lead 能发消息，也应能恢复失败输入。
+  // 队列编辑和恢复整组队列仍沿用协作编排只读规则。
+  const errorRecoveryReadOnlyReason = composerReadOnlyReason ?? queueAvailabilityReason;
   const showMessageHistory = sessionOperationLayout.messageHistoryMode === 'visible'
     || (sessionOperationLayout.messageHistoryMode === 'collapsed' && pendingHistoryExpanded);
   // 冷开即出壳:session 元信息还没回来,但不是真正不可用(离线/被撤销,看 remoteUnavailableReason)——
@@ -2393,7 +2439,6 @@ export default function SessionScreen() {
     [composerDisplayRuntimeOptions, composerDisplaySession, i18nInstance.language],
   );
   // 被控端供应商目录 → provider-aware 模型分段(与新建会话页同逻辑;0 供应商回退扁平 modelOptions)。
-  const composerDeviceProviders = useDeviceProviders(deviceId || undefined);
   const composerModelSections = useMemo(
     () => composerDisplaySession
       ? buildMobileModelSections({
@@ -3226,6 +3271,13 @@ export default function SessionScreen() {
     // 旧连接代的 in-flight load 若在尾部读 ref 的最新值,会把旧窗口数据标成新代已同步,
     // 抢在排队的 resync 之前放行回执。开始时捕获则旧 load 落的是旧代 key,门槛不放行。
     const readAckEpochAtStart = readAckEpochRef.current;
+    const reportSyncPhase = (phase: string, extra: { readMs?: number; commitMs?: number; outcome?: string } = {}) => {
+      if (syncRun.isStale() || !messageAuthorityCurrent()) return;
+      mobileDebugLog('debug', 'recovery', 'detail sync phase', {
+        startedAt: snapshotStartedAt, connection: readAckEpochAtStart, phase,
+        totalMs: Math.max(0, Date.now() - snapshotStartedAt), ...extra,
+      });
+    };
     const subscriptionIdentityAtStart = JSON.stringify([
       deviceId,
       sessionId,
@@ -3335,6 +3387,7 @@ export default function SessionScreen() {
     setLoading(true);
     try {
       await prepareLinkAndSubscription();
+      reportSyncPhase('link-ready');
       if (syncRun.isStale() || !messageAuthorityCurrent()) return;
       // Capture at the first snapshot read, after link-open. An ACK received while
       // opening the link is already covered; it must not force another full batch.
@@ -3401,22 +3454,34 @@ export default function SessionScreen() {
           }
         },
       });
-      const commitRead = <T,>(read: () => Promise<T>, commit: (value: T) => void) =>
-        runConnectionScopedSessionMetadataRead(() => retryRead(read), isCurrent, commit);
+      const commitRead = <T,>(phase: string, read: () => Promise<T>, commit: (value: T) => void) => {
+        const startedAt = Date.now();
+        return runConnectionScopedSessionMetadataRead(() => retryRead(read), isCurrent, (value) => {
+          const commitAt = Date.now();
+          commit(value);
+          reportSyncPhase(phase, { readMs: Math.max(0, commitAt - startedAt), commitMs: Math.max(0, Date.now() - commitAt), outcome: 'applied' });
+        }).catch((error) => {
+          reportSyncPhase(phase, { readMs: Math.max(0, Date.now() - startedAt), outcome: 'failed' });
+          throw error;
+        });
+      };
       // Only the control/read-receipt barrier waits for all resources. Each response
       // is applied independently, and a changed metadata response starts history
       // immediately rather than waiting for pending/projection/active.
       await waitForIndependentSnapshotReads([
-        messageRead,
-        commitRead(fetchPendingInteractions, (pendingInteractions) => {
+        messageRead.then(() => reportSyncPhase('history-settled')).catch((error) => {
+          reportSyncPhase('history', { outcome: 'failed' });
+          throw error;
+        }),
+        commitRead('pending', fetchPendingInteractions, (pendingInteractions) => {
           remoteSessionStore.setPendingInteractions(sessionId, Array.isArray(pendingInteractions) ? pendingInteractions : []);
         }),
-        commitRead(fetchProjection, (projectionResult) => {
+        commitRead('projection', fetchProjection, (projectionResult) => {
           remoteSessionStore.setInputProjectionIfCurrent(
             sessionId, projectionResult.projection, projectionResult.authorityEpochAtStart,
           );
         }),
-        commitRead(fetchActiveSessionSnapshot, (activeSessionSnapshot) => {
+        commitRead('active', fetchActiveSessionSnapshot, (activeSessionSnapshot) => {
           remoteSessionStore.setActiveSessionSnapshots(
             deviceId,
             Array.isArray(activeSessionSnapshot.activeSessions) ? activeSessionSnapshot.activeSessions : [],
@@ -3437,8 +3502,7 @@ export default function SessionScreen() {
       setContentSyncedKey(contentKeyAtStart);
       if (contentKeyAtStart !== null && contentRecoveryKeyRef.current === contentKeyAtStart) {
         syncRun.satisfy('subscription-acked');
-        console.debug('[device-link] recovery snapshot applied', { elapsedMs: Date.now() - snapshotStartedAt });
-        mobileDebugLog('debug', 'recovery', 'snapshot applied', { elapsedMs: Date.now() - snapshotStartedAt });
+        reportSyncPhase('complete');
       }
       // 已读回执门槛:本会话在当前连接代完成过整窗同步。sessionId / epoch / 门槛代号
       // 都取 sync 开始时的快照——原地切 session、重连、attention 上升沿之后,启动更早
@@ -4159,17 +4223,46 @@ export default function SessionScreen() {
     projectedMessageWindowRef.current = { projection, sessionId };
     return projection;
   }, [messageStructureChangedIndexes, messageStructureToken, messages, sessionId]);
-  const projectedMessages = projectedMessageWindow.projected;
-  const projectedMessageStructureChangedIndexes = projectedMessageWindow.changedIndexes;
-  const oldestLoadedMessageCursor = useMemo(
-    () => historyView.snapshot.ready ? historyView.snapshot.nextCursor : oldestMessageCursor(latestMessagesRef.current),
-    [messageStructureToken, historyView.snapshot],
-  );
   const previousRenderItemsRef = useRef<{
     sessionId: string;
     items: readonly MobileMessageRenderItem[];
     prefix: MobileStreamingRenderPrefixCache | null;
   } | null>(null);
+  const confirmedUserClientIds = useMemo(() => new Set(
+    (historyView.snapshot.ready
+      ? historyViewLeaves(historyView.snapshot.items).flatMap((item) => item.type === 'messages' ? item.messages : [])
+      : messages).filter((message) => message.role === 'user').map((message) => message.clientId),
+  ), [historyView.snapshot, messages]);
+  const optimisticUsers = useMemo(() => {
+    const activeIds = new Set([
+      ...inputProjection.pendingQueue.filter((item) => sendingQueueClientIds.has(item.clientId)).map((item) => item.clientId),
+      ...settlingItemsForRender.map((item) => item.clientId),
+    ]);
+    // Only the enqueue path can reserve a transcript position. A vanished
+    // busy queue has no reliable local turn boundary: history and projection
+    // can arrive in either order, across any number of committed renders.
+    return reconcileOptimisticUserMessages(
+      optimisticUserState.sessionId === sessionId ? optimisticUserState.items : [],
+      messages, activeIds, confirmedUserClientIds,
+    );
+  }, [optimisticUserState, sessionId, messages, inputProjection.pendingQueue,
+    sendingQueueClientIds, settlingItemsForRender, confirmedUserClientIds]);
+  if (optimisticUserState.sessionId === sessionId && optimisticUsers !== optimisticUserState.items) {
+    setOptimisticUserState({ sessionId, items: optimisticUsers });
+  }
+  const localUserClientIds = useMemo(() => new Set(optimisticUsers.map((entry) => entry.message.clientId)), [optimisticUsers]);
+  const optimisticClientIds = useMemo(() => new Set([...localUserClientIds].filter((id) => !queueHiddenClientIds.has(id))),
+    [localUserClientIds, queueHiddenClientIds]);
+  const projectedMessages = useMemo(() => projectOptimisticUserMessages(projectedMessageWindow.projected, optimisticUsers),
+    [projectedMessageWindow.projected, optimisticUsers]);
+  // Adding/removing a user boundary invalidates prefix grouping, even if no host
+  // message changed. Do not reuse source indexes after inserting local rows.
+  const renderMessageStructureToken = useMemo(() => ({}), [messageStructureToken, optimisticUsers]);
+  const projectedMessageStructureChangedIndexes = optimisticUsers.length > 0 ? undefined : projectedMessageWindow.changedIndexes;
+  const oldestLoadedMessageCursor = useMemo(
+    () => historyView.snapshot.ready ? historyView.snapshot.nextCursor : oldestMessageCursor(latestMessagesRef.current),
+    [messageStructureToken, historyView.snapshot],
+  );
   const streamingRenderPrefixRef = useRef<MobileStreamingRenderPrefixCache | null>(null);
   const renderWindow = useMemo(
     () => {
@@ -4177,9 +4270,10 @@ export default function SessionScreen() {
         cacheKey: i18nInstance.language,
         messages: projectedMessages,
         messageStructureChangedIndexes: projectedMessageStructureChangedIndexes,
-        messageStructureToken,
+        messageStructureToken: renderMessageStructureToken,
         options: {
           autoResumePending: inputProjection.autoResumePending,
+          preserveSourceOrder: optimisticUsers.length > 0,
           isSessionStreaming: isMessageListStreaming,
           renderOrphanTaskUpdates: makerTurnRunning,
           sessionId,
@@ -4190,7 +4284,7 @@ export default function SessionScreen() {
       const historyItems = historyView.snapshot.ready ? buildMobileHistoryRenderItems({
         view: historyView.view, snapshot: historyView.snapshot, messages: projectedMessages,
         streaming: isMessageListStreaming, sessionId, taskUpdates,
-        pendingHandoff: handoff.pending,
+        pendingHandoff: handoff.pending, localUserClientIds,
       }) : builtWindow.items;
       let items = insertMobileForkOriginItem(
         // 孤儿 agent_task 兜底用 maker status 驱动的权威 turn 边界 gate,与 store 的
@@ -4232,12 +4326,16 @@ export default function SessionScreen() {
         stablePrefixItemCount,
       };
     },
-    [historyView.snapshot, historyView.view, handoff.pending, errorTailClientId, forkOrigin, i18nInstance.language, inputProjection.autoResumePending, isMessageListStreaming, makerTurnRunning, messageStructureToken, projectedMessages, projectedMessageStructureChangedIndexes, sessionId, taskUpdates],
+    [optimisticUsers, localUserClientIds, renderMessageStructureToken, historyView.snapshot, historyView.view, handoff.pending, errorTailClientId, forkOrigin, i18nInstance.language, inputProjection.autoResumePending, isMessageListStreaming, makerTurnRunning, messageStructureToken, projectedMessages, projectedMessageStructureChangedIndexes, sessionId, taskUpdates],
   );
-  const renderItems = renderWindow.items;
+  // Search, media and sharing only see durable user rows. Local user boundaries
+  // still participate in grouping and in the message list below.
+  const renderItems = useMemo(() => optimisticClientIds.size === 0 ? renderWindow.items : renderWindow.items.filter((item) =>
+    !(item.type === 'message' && optimisticClientIds.has(item.message.source.clientId))),
+  [renderWindow.items, optimisticClientIds]);
   const renderItemsStructureKey = useMemo(
     () => ({}),
-    [historyView.snapshot, errorTailClientId, forkOrigin, i18nInstance.language, inputProjection.autoResumePending, isMessageListStreaming, makerTurnRunning, messageStructureToken, sessionId, taskUpdates],
+    [optimisticUsers, historyView.snapshot, errorTailClientId, forkOrigin, i18nInstance.language, inputProjection.autoResumePending, isMessageListStreaming, makerTurnRunning, messageStructureToken, sessionId, taskUpdates],
   );
   // Reconciliation must only use committed rows. Unlike the prefix cache above, a speculative
   // render-item baseline could leak rows from an abandoned render and destabilize tail memoization.
@@ -4247,14 +4345,14 @@ export default function SessionScreen() {
       && previousRenderItemsRef.current?.prefix !== renderWindow.prefix
       && streamingRenderPrefixRef.current === renderWindow.prefix
     ) {
-      commitMobileStreamingPrefixItems(renderWindow.prefix, renderItems);
+      commitMobileStreamingPrefixItems(renderWindow.prefix, renderWindow.items);
     }
     previousRenderItemsRef.current = {
       sessionId,
-      items: renderItems,
+      items: renderWindow.items,
       prefix: renderWindow.prefix,
     };
-  }, [renderItems, renderWindow.prefix, sessionId]);
+  }, [renderWindow.items, renderWindow.prefix, sessionId]);
   // Known stale entry content bypasses the quiet delay; routine sync stays subtle.
   const showSyncingIndicator = !showConnectionBanner && !showCachedHistoryNotice
     && (loading || historyView.snapshot.loading || status === 'connecting' || contentRecoveryState === 'syncing');
@@ -5429,6 +5527,7 @@ export default function SessionScreen() {
     // 乐观交接:进本地 pendingQueue 的同一同步段把条目移出 outbox,气泡原位从
     // 「发送中」变「排队中」不闪断;enqueue 成功后用权威 projection 覆盖 reconcile。
     const projectionBeforeSend = remoteSessionStore.getInputProjection(item.sessionId);
+    markQueueItemSending(queued);
     remoteSessionStore.setInputProjectionOptimistically(item.sessionId, {
       ...projectionBeforeSend,
       sessionId: projectionBeforeSend.sessionId || item.sessionId,
@@ -5446,7 +5545,6 @@ export default function SessionScreen() {
     );
     // outbox 气泡本来就在转圈:交接进 pendingQueue 后 enqueue 仍在途,徽标继续转圈,
     // 不要在这一帧闪成排队 icon 再回来(也不能谎报「已入队」)。
-    markQueueItemSending(queued.clientId);
     const projectionRemoteEpochAtRequestStart =
       remoteSessionStore.captureInputProjectionRemoteEpoch(item.sessionId);
     const projectionEpochAtRequestStart =
@@ -5680,12 +5778,12 @@ export default function SessionScreen() {
     ],
   );
   const messageListItems = useMemo(
-    () => appendPendingSendItems(renderItems, pendingSendItems),
-    [pendingSendItems, renderItems],
+    () => mergePendingSendItems(renderWindow.items, pendingSendItems, optimisticClientIds),
+    [pendingSendItems, renderWindow.items, optimisticClientIds],
   );
   const messageListStructureKey = useMemo(
     () => ({}),
-    [pendingSendItems, renderItemsStructureKey],
+    [pendingSendItems, renderItemsStructureKey, optimisticClientIds],
   );
   const shareExpandableBlockIds = useMemo(
     () => (shareSelectionActive ? collectConversationShareBlockIds(messageListItems) : []),
@@ -6424,6 +6522,7 @@ export default function SessionScreen() {
       // previews / mediaAssetAttachments 映射保留到成功后再清:它们不入消息体,失败
       // 恢复 attachments 时缩略图能原样回来。
       const projectionBeforeSend = remoteSessionStore.getInputProjection(sessionId);
+      markQueueItemSending(queued);
       remoteSessionStore.setInputProjectionOptimistically(sessionId, {
         ...projectionBeforeSend,
         sessionId: projectionBeforeSend.sessionId || sessionId,
@@ -6437,7 +6536,6 @@ export default function SessionScreen() {
       );
       // 乐观气泡此刻还没有「已入队」这个事实:徽标先给转圈,enqueue 落定后才交给
       // 排队 icon(或随回滚一起消失)。
-      markQueueItemSending(queued.clientId);
       const projectionRemoteEpochAtRequestStart =
         remoteSessionStore.captureInputProjectionRemoteEpoch(sessionId);
       setAttachments([]);
@@ -7241,10 +7339,12 @@ export default function SessionScreen() {
   }, [cancelQueueEdit, inputProjection.pendingQueue, queueEditing]);
 
   const retryQueueError = () => {
+    if (errorRecoveryReadOnlyReason || !inputProjection.errorRetryText) return;
     void runQueueAction(() => maker.input.retryLastError(sessionId));
   };
 
   const clearQueueError = () => {
+    if (errorRecoveryReadOnlyReason) return;
     void runQueueAction(() => maker.input.clearError(sessionId));
   };
 
@@ -8055,30 +8155,30 @@ export default function SessionScreen() {
       return;
     }
     try {
-      const snapshot = await maker.getCodexRateLimits();
+      const snapshot = await maker.getCodexRateLimits(accountProviderId === 'openai' ? undefined : accountProviderId);
       // 迟到结果仍按账号控制快照的会话归属校验。
-      if (contextUsageSessionRef.current !== sessionId) return;
+      if (accountControlScopeRef.current !== accountControlScope) return;
       setCodexRateLimits(snapshot);
       setAccountUsage(snapshot.rateLimits);
     } catch (err) {
-      if (contextUsageSessionRef.current !== sessionId) return;
+      if (accountControlScopeRef.current !== accountControlScope) return;
       // 权威控制面读取失败后只能降级为只读用量；旧 offer / retry key 不得继续可消费。
       setCodexRateLimits(null);
       setCodexResetRetryKey(null);
-      if (!shouldFallbackToLegacyCodexUsage(err)) {
+      if (accountProviderId !== 'openai' || !shouldFallbackToLegacyCodexUsage(err)) {
         // 账号切换期间 legacy cache 仍可能属于旧 workspace；等待下一次权威读取。
         setAccountUsage(null);
         return;
       }
       try {
-        const snapshot = await maker.getAccountUsage('codex');
-        if (contextUsageSessionRef.current !== sessionId) return;
+        const snapshot = await maker.getAccountUsage('codex', accountProviderId === 'openai' ? undefined : accountProviderId);
+        if (accountControlScopeRef.current !== accountControlScope) return;
         setAccountUsage(snapshot);
       } catch {
         // 静默:通道不支持 / 网络瞬断都不打扰用户。
       }
     }
-  }, [localCodexRateLimitControl, maker, sessionId]);
+  }, [localCodexRateLimitControl, maker, sessionId, accountProviderId, accountControlScope]);
 
   // reset 只接受 desktop read 签发的 UUID。网络等结果不明的失败保留同一幂等键；
   // Desktop 明确拒绝的 stale offer 则立即作废并刷新，避免反复提交已失效凭证。
@@ -8092,22 +8192,22 @@ export default function SessionScreen() {
       || (codexResetRetryKey !== null && offer.idempotencyKey !== codexResetRetryKey)) {
       setCodexResetRetryKey(null);
       await refreshAccountUsage();
-      if (contextUsageSessionRef.current !== sessionId) return;
+      if (accountControlScopeRef.current !== accountControlScope) return;
       Alert.alert(t('session.screen.resetReconfirmTitle'), t('session.screen.resetOfferExpired'));
       return;
     }
     setCodexResetRetryKey(idempotencyKey);
     setCodexResetBusy(true);
     try {
-      const result = await maker.resetCodexRateLimits(idempotencyKey);
-      if (contextUsageSessionRef.current !== sessionId) return;
+      const result = await maker.resetCodexRateLimits(idempotencyKey, accountProviderId === 'openai' ? undefined : accountProviderId);
+      if (accountControlScopeRef.current !== accountControlScope) return;
       setCodexResetRetryKey(null);
       if (result.rateLimits) {
         setCodexRateLimits(result.rateLimits);
         setAccountUsage(result.rateLimits.rateLimits);
       } else {
         await refreshAccountUsage();
-        if (contextUsageSessionRef.current !== sessionId) return;
+        if (accountControlScopeRef.current !== accountControlScope) return;
       }
       const message = {
         reset: t('session.screen.resetOutcomeReset'),
@@ -8117,12 +8217,12 @@ export default function SessionScreen() {
       }[result.outcome];
       Alert.alert(result.outcome === 'reset' ? t('session.screen.resetDoneTitle') : t('session.screen.resetResultTitle'), message);
     } catch (err) {
-      if (contextUsageSessionRef.current === sessionId) {
+      if (accountControlScopeRef.current === accountControlScope) {
         if (isPreconditionFailedRemoteError(err)) {
           setCodexResetRetryKey(null);
           setCodexRateLimits((current) => current ? { ...current, resetOffer: null } : null);
           await refreshAccountUsage();
-          if (contextUsageSessionRef.current === sessionId) {
+          if (accountControlScopeRef.current === accountControlScope) {
             Alert.alert(t('session.screen.resetReconfirmTitle'), humanizeRemoteError(err));
           }
         } else {
@@ -8130,9 +8230,9 @@ export default function SessionScreen() {
         }
       }
     } finally {
-      if (contextUsageSessionRef.current === sessionId) setCodexResetBusy(false);
+      if (accountControlScopeRef.current === accountControlScope) setCodexResetBusy(false);
     }
-  }, [codexRateLimits, codexResetBusy, codexResetRetryKey, maker, refreshAccountUsage, sessionId]);
+  }, [codexRateLimits, codexResetBusy, codexResetRetryKey, maker, refreshAccountUsage, sessionId, accountProviderId, accountControlScope]);
 
   const loadExtraDirBrowsePath = useCallback(async (targetPath: string) => {
     if (!deviceId || !currentSession || currentSession.workspaceKind !== 'project') return;
@@ -8868,6 +8968,7 @@ export default function SessionScreen() {
         {currentSession && !sessionManagedByHost ? (
           <SessionMenuSheet
             usageReader={maker}
+            accountProvider={accountProvider}
             accountUsage={localCodexRateLimitControl ? accountUsage : null}
             busy={controlBusy}
             codexRateLimits={localCodexRateLimitControl ? codexRateLimits : null}
@@ -9279,6 +9380,7 @@ export default function SessionScreen() {
                             不在这里,它们是消息流里的 pending_send 项。 */}
                         <InlineQueueSection
                           busy={queueBusy}
+                          errorRecoveryReadOnlyReason={errorRecoveryReadOnlyReason}
                           onClearError={clearQueueError}
                           onResume={resumeQueue}
                           onRetryError={retryQueueError}

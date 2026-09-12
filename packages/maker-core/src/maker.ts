@@ -22,7 +22,7 @@ import { clearTimeout as clearNodeTimeout, setTimeout as setNodeTimeout } from '
 
 import type { AgentKind } from './types/common.js';
 import type { Capabilities } from './types/capabilities.js';
-import type { ForkSdkSessionOptions, ForkSdkSessionResult } from './types/events.js';
+import type { AgentEvent, ForkSdkSessionOptions, ForkSdkSessionResult } from './types/events.js';
 import type {
   ScanAtResourcesOptions,
   ScanAtResourcesResult,
@@ -1160,12 +1160,19 @@ export class Maker {
   async closeSessionIfCurrent(
     session: Session,
     reason: Exclude<MakerSessionCloseReason, 'unexpected'> = 'requested',
-  ): Promise<void> {
+    opts?: { afterCurrentTurn?: boolean; failureEvent?: () => AgentEvent },
+  ): Promise<'closed' | 'deferred' | void> {
     if (this.activeSessions.get(session.id) !== session) return;
-    // First closer owns the cause. A later concurrent close must not relabel
-    // a user-requested close as an internal replacement (or vice versa).
-    if (!this.closeReasons.has(session)) this.closeReasons.set(session, reason);
+    // Deferred internal retirement is only intent. An explicit closer may
+    // take ownership until Session actually starts teardown; after that the
+    // cause stays fixed even if exit confirmation fails or another close races.
+    const previousReason = this.closeReasons.get(session);
+    if (previousReason === undefined || (
+      previousReason === 'runtime-refresh' && !opts?.afterCurrentTurn && !session.hasStartedClosing()
+    )) this.closeReasons.set(session, reason);
+    if (opts?.afterCurrentTurn) return session.closeAfterCurrentTurn(opts);
     await session.close();
+    return 'closed';
     // status listener 会自动清理 activeSessions 并 emit
   }
 
@@ -1481,16 +1488,17 @@ export class Maker {
   }
 
   /** Read account quota and banked reset credits through the selected agent runtime. */
-  async readAgentAccountRateLimits(agentKind: AgentKind) {
-    return this.requireAgent(agentKind).readAccountRateLimits();
+  async readAgentAccountRateLimits(agentKind: AgentKind, providerId?: string) {
+    return this.requireAgent(agentKind).readAccountRateLimits(providerId);
   }
 
   /** Consume one banked account reset credit through the selected agent runtime. */
   async consumeAgentAccountRateLimitResetCredit(
     agentKind: AgentKind,
     params: ConsumeAccountRateLimitResetCreditParams,
+    providerId?: string,
   ) {
-    return this.requireAgent(agentKind).consumeAccountRateLimitResetCredit(params);
+    return this.requireAgent(agentKind).consumeAccountRateLimitResetCredit(params, providerId);
   }
 
   /** Codex 浏览器登录中途取消; Claude 之类同步弹窗式登录调到底层 no-op。 */

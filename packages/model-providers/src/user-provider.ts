@@ -1,11 +1,18 @@
+import { BUILTIN_PROVIDERS } from './builtin.js';
+import { providerMediaField } from "./providerMediaModels.js";
 import {
   expandedRegistryEntries,
   resolveModelMetadata,
   applyModelMetadata,
+  mergeModelMetadata,
   pickModelMetadata,
   runtimeUserModelMetadata,
   type ModelMetadata,
 } from "./modelMetadataLayers.js";
+import {
+  piNativeCatalogModelDefaults,
+  piNativeCatalogRouteMatches,
+} from "./piNativeCatalog.js";
 /**
  * 用户自定义供应商：把 `CustomProviderConfig` 展开成标准 `Provider`（纯逻辑，零依赖）。
  *
@@ -284,6 +291,7 @@ function toCatalogModel(
   agent: AgentKind,
   modelRegistry: ModelRegistry | null | undefined,
   providerDefaults?: ModelMetadata,
+  metadataProviderId = providerId,
 ): CatalogModel {
   // 显式 runtime 能力优先：reasoning:true 才导出 efforts；false = 明确无思考档。
   // 字段缺省才走历史 fallback（Pi 空档 / 其它自定义 Provider 的 CUSTOM_EFFORTS）。
@@ -296,11 +304,11 @@ function toCatalogModel(
           ? []
           : (CUSTOM_EFFORTS[agent] ?? []);
   const registryEfforts =
-    m.reasoning !== undefined || modelRegistry?.schemaVersion === 4
+    m.reasoning !== undefined || (modelRegistry?.schemaVersion ?? 0) >= 4
       ? undefined
       : registryEffortMetadata(modelRegistry, m.id, agent);
   const supportsFastMode =
-    modelRegistry?.schemaVersion !== 4 &&
+    (modelRegistry?.schemaVersion ?? 0) < 4 &&
     registrySupportsFastMode(modelRegistry, m.id, agent);
   const effectiveEfforts = registryEfforts?.efforts ?? efforts;
   const defaultEffort =
@@ -339,12 +347,12 @@ function toCatalogModel(
   };
   const user = runtimeUserModelMetadata(m);
   const resolved =
-    modelRegistry?.schemaVersion === 4 ||
+    (modelRegistry?.schemaVersion ?? 0) >= 4 ||
     m.discoveredMetadata ||
     providerDefaults
       ? resolveModelMetadata(
           modelRegistry ?? undefined,
-          providerId,
+          metadataProviderId,
           m.id,
           m.discoveredMetadata,
           pickModelMetadata(user),
@@ -371,7 +379,7 @@ function toRouting(
   requestPath: string | undefined,
   headers: Record<string, string> | undefined,
   headersState: "configured" | "unknown" | undefined,
-  strategy: "api-key-header" | "oauth-token" | "none",
+  strategy: "api-key-header" | "oauth-token" | "oauth-passthrough" | "provider-oauth-header" | "none",
   modelsUrl?: string,
   wireProtocol?: "anthropic-messages" | "openai-responses" | "openai-chat",
   piCatalogProviderId?: string,
@@ -380,7 +388,7 @@ function toRouting(
   const r: RoutingDescriptor = {
     upstream: baseUrl,
     authStrategy: strategy,
-    ...(agent === "codex" &&
+    ...(agent === "codex" && strategy !== "oauth-passthrough" &&
     (wireProtocol ?? defaultWireProtocol(agent)) === "openai-responses"
       ? { supportsResponsesCustomTools: false }
       : {}),
@@ -427,9 +435,11 @@ export function buildUserProvider(
   const runtimeProviderId = runtimeCustomProviderId(config.id);
   // OAuth 形态路由走 Runner Bearer；none 明确走无鉴权且由 host 剥凭证；缺省保持历史 API key。
   const oauth = config.auth?.method === "oauth" ? config.auth.oauth : undefined;
-  const isOAuth = oauth !== undefined;
+  const nativeCodex = config.auth?.method === "oauth" && config.auth.native === "codex";
+  const native = config.auth?.method === "oauth" ? config.auth.native : undefined;
+  const isOAuth = oauth !== undefined || !!native;
   const noAuth = config.auth?.method === "none";
-  const strategy = isOAuth ? "oauth-token" : noAuth ? "none" : "api-key-header";
+  const strategy = nativeCodex ? "oauth-passthrough" : native ? "provider-oauth-header" : isOAuth ? "oauth-token" : noAuth ? "none" : "api-key-header";
   const routing: Partial<Record<AgentKind, RoutingDescriptor>> = {};
   const models: Partial<Record<AgentKind, CatalogModel[]>> = {};
   const agents: AgentKind[] = [];
@@ -468,7 +478,7 @@ export function buildUserProvider(
         m.route?.baseUrl === presetModel?.route?.baseUrl &&
         m.route?.wireProtocol === presetModel?.route?.wireProtocol &&
         m.route?.requestPath === presetModel?.route?.requestPath;
-      const defaults =
+      const presetDefaults =
         presetModel && sameRoute
           ? pickModelMetadata({
               ...presetModel,
@@ -479,6 +489,20 @@ export function buildUserProvider(
               defaultEffort: presetModel.reasoningDefaultEffort,
             })
           : undefined;
+      // Pi 来源带 piCatalogProviderId 且仍走官方路由时,pi-host 运行期会整条套用官方 Pi
+      // 目录;没有 catalogPresetId(#4108 之前创建)的存量来源在这里没有预设默认,存储
+      // 模型又缺 reasoning 字段,目录投影就成了空档位,Orca 创建 Worker 时把合法的
+      // max 拒成「valid: none」(#4295)。按同一份官方目录补默认:预设按字段覆盖官方
+      // 目录(预设只声明 context/image 时 reasoning 仍由目录补),用户显式配置仍优先。
+      const catalogDefaults =
+        agent === "pi" && rt.piCatalogProviderId && !m.route &&
+        piNativeCatalogRouteMatches(rt.piCatalogProviderId, rt.baseUrl, rt.wireProtocol)
+          ? piNativeCatalogModelDefaults(rt.piCatalogProviderId, m.id)
+          : undefined;
+      const defaults =
+        catalogDefaults || presetDefaults
+          ? mergeModelMetadata(catalogDefaults, presetDefaults)
+          : undefined;
       return {
         ...toCatalogModel(
           m,
@@ -486,18 +510,81 @@ export function buildUserProvider(
           agent,
           options.modelRegistry,
           defaults,
+          nativeCodex ? 'openai' : undefined,
         ),
         ...(rt.catalogPresetId ? { catalogPresetId: rt.catalogPresetId } : {}),
       };
     });
   }
+  if (native === 'claude' || native === 'xai') {
+    const identity = BUILTIN_PROVIDERS.find((provider) => provider.id === (native === 'claude' ? 'anthropic' : 'xai'))!;
+    return {
+      ...identity,
+      id: runtimeProviderId,
+      name: config.name,
+      source: 'user',
+      auth: { method: 'oauth', native },
+      routing: Object.fromEntries(Object.entries(identity.routing).map(([agent, route]) => [
+        agent, {
+          ...route,
+          authStrategy: 'provider-oauth-header',
+          // Claude subscription requests must not carry a CLI placeholder API key alongside OAuth.
+          ...(native === 'claude' && agent === 'claude-code'
+            ? { headerDelete: [...new Set([...(route.headerDelete ?? []), 'x-api-key'])] }
+            : {}),
+        },
+      ])),
+      // Media remains explicitly bound to the original provider until it supports account selection.
+      imageModels: undefined,
+      imageDefaults: undefined,
+      videoModels: undefined,
+      videoDefaults: undefined,
+    };
+  }
+  if (nativeCodex) {
+    const identity = BUILTIN_PROVIDERS.find((provider) => provider.id === 'openai')!;
+    return {
+      ...identity,
+      id: runtimeProviderId,
+      name: config.name,
+      source: 'user',
+      auth: { method: 'oauth', native: 'codex' },
+      models: { ...identity.models, codex: models.codex ?? [] },
+      imageModels: identity.imageModels?.map((model) => ({ ...model, id: model.id.replace(/^openai\//, `${runtimeProviderId}/`) })),
+    };
+  }
+  const mediaLists: Partial<
+    Pick<
+      Provider,
+      "imageModels" | "videoModels" | "audioModels" | "embeddingModels"
+    >
+  > = {};
+  for (const [agent, list] of Object.entries(models)) {
+    for (const model of list ?? []) {
+      const field = providerMediaField(model.mode);
+      if (!field) continue;
+      const items = (mediaLists[field] ??= []);
+      if (!items.some((item) => item.id === model.id))
+        items.push({
+          ...pickModelMetadata(model),
+          id: model.id,
+          name: model.name,
+          mode: model.mode,
+          discoveredMetadata: model.discoveredMetadata,
+          sourceAgent: agent as AgentKind,
+          ...(model.modalities ? { modalities: model.modalities } : {}),
+          ...(model.description ? { description: model.description } : {}),
+        });
+    }
+  }
   return {
+    ...mediaLists,
     id: runtimeProviderId,
     name: config.name,
     source: "user",
     agents,
     auth: isOAuth
-      ? { method: "oauth", oauth }
+      ? { method: "oauth", ...(nativeCodex ? { native: "codex" as const } : { oauth }) }
       : noAuth
         ? { method: "none" }
         : { method: "apiKey" },

@@ -24,6 +24,11 @@ vi.mock('../features/cc-agent/hooks/useRemoteHostProjectOrders', () => ({
 vi.mock('../features/cc-agent/sidebar/MainListScopeHeader', () => ({ MainListScopeHeader: ({ fold }: { fold: { label: string; onClick: () => void } | null }) => fold ? <button onClick={fold.onClick}>{fold.label}</button> : null }));
 vi.mock('@/components/sidebar/SortableList', () => ({ SortableList: () => null }));
 vi.mock('../features/cc-agent/sidebar/sections/ProjectNode', () => ({ ProjectNode: () => null }));
+// main 633e27c76 起设备段头包了远程桌面快捷入口(挂 device-link presence 订阅,需要
+// preload 桥);本文件只验证段头灯语与折叠豁免,段头壳层直接透传子节点。
+vi.mock('../features/cc-agent/sidebar/DeviceSectionHeader', () => ({
+  DeviceSectionHeader: ({ children }: { children: ReactNode }) => <>{children}</>,
+}));
 vi.mock('../features/cc-agent/sidebar/sections/UnclassifiedSection', () => ({ UnclassifiedSection: () => null }));
 vi.mock('@/features/bots/BotAvatar', () => ({ BotAvatar: () => <span>Bot avatar</span> }));
 // Keep ProjectsSection, its private SessionGroupNode, SessionEntryList, collapse model,
@@ -65,6 +70,12 @@ function props(groupDevice: boolean): ProjectsSectionProps {
 beforeEach(() => {
   localStorage.clear();
   localStorage.setItem('sidebar.collapse.projectSessionLimit', '1');
+  // ProjectsSection 渲染时读 window.electronAPI.platform 做项目键比较(main 897de9031);
+  // jsdom 没有 preload 桥,这里只补 platform 字段,与 windowCloseBehavior 用例同法。
+  Object.defineProperty(window, 'electronAPI', {
+    configurable: true,
+    value: { platform: 'darwin' } as unknown as Window['electronAPI'],
+  });
 });
 afterEach(() => { cleanup(); resetSessionStartingStoreForTests(); vi.useRealTimers(); clearRemoteSessionActivity(); localStorage.clear(); });
 

@@ -66,6 +66,8 @@ import { HomeChromeFrost } from '@/session/HomeChromeFrost';
 import { HomeGlassMenuPanel, HomeMenuScrim } from '@/session/HomeGlassMenuPanel';
 import { HomeHeaderGlassButton } from '@/session/HomeHeaderGlassButton';
 import { HomeSearchBar } from '@/session/HomeSearchBar';
+import { HomeProjectMachineLabel } from '@/session/HomeProjectMachineLabel';
+import { buildHomeProjectMachineIdentities, type HomeProjectMachineIdentity } from '@/session/homeProjectMachineIdentity';
 import {
   HomeNativeStackHeader,
   NativePullDownMenu,
@@ -203,7 +205,6 @@ import {
 import { serializeNewSessionDeviceOptions } from '@/session/newSession';
 import {
   buildRemoteSessionCardPreview,
-  buildSessionMessagePreviewIndex,
   formatRemoteSessionSidebarTime,
   getRemoteSessionPreviewCollapse,
   type RemoteAutomationSessionGroup,
@@ -386,7 +387,6 @@ function HomeScreenContent() {
   const syncInFlightRef = useRef<Promise<void> | null>(null);
   const syncQueuedRef = useRef<{ visible?: boolean } | null>(null);
   const loadHomeRef = useRef<(options?: { visible?: boolean }) => Promise<void>>(async () => undefined);
-  const homePreviewCacheRef = useRef(new Map<string, { messages: readonly unknown[]; preview?: string }>());
   const homePendingCacheRef = useRef(new Map<string, { pending: readonly unknown[]; count: number }>());
   const homeLiveActivityIndexRef = useRef(new Map<string, RemoteSessionLiveActivity>());
   const devicesRef = useRef<DeviceView[]>([]);
@@ -626,15 +626,23 @@ function HomeScreenContent() {
     return result;
   }, []);
 
-  const softInvalidateDeviceMirror = useCallback((deviceId: string) => {
+  // 批量软失效:同一波(REST 快照整批 offline)只让两个 store 各 notify 一次。
+  // 逐台通知时设备数超过 React 嵌套更新上限即致命退出(2026-09-10 Android)。
+  const softInvalidateDeviceMirrors = useCallback((deviceIds: readonly string[]) => {
+    const idSet = new Set(deviceIds);
+    if (idSet.size === 0) return;
     const sessionIds = remoteSessionStore.getSessions()
-      .filter((session) => session.deviceLinkDeviceId === deviceId)
+      .filter((session) => !!session.deviceLinkDeviceId && idSet.has(session.deviceLinkDeviceId))
       .map((session) => session.id);
-    invalidateScheduleIndexForDevice(deviceId);
-    remoteScheduleEventStore.invalidateDeviceMirror(deviceId);
-    remoteSessionStore.markDeviceOffline(deviceId);
+    for (const deviceId of idSet) invalidateScheduleIndexForDevice(deviceId);
+    remoteScheduleEventStore.invalidateDeviceMirrors([...idSet]);
+    remoteSessionStore.markDevicesOffline([...idSet]);
     setScheduleIndex((current) => invalidateRunningSessionScheduleEntries(current, sessionIds));
   }, []);
+
+  const softInvalidateDeviceMirror = useCallback((deviceId: string) => {
+    softInvalidateDeviceMirrors([deviceId]);
+  }, [softInvalidateDeviceMirrors]);
 
   const markDeviceOffline = useCallback((deviceId: string) => {
     // 普通离线是可恢复的传输状态:保留 session/messages,只清 live 投影并失效
@@ -964,9 +972,11 @@ function HomeScreenContent() {
       ));
       // 单次 REST 快照里的 offline 只是可恢复状态,不能硬删刚同步的会话/消息;
       // 显式关闭远控或撤权才是权限终态,继续清敏感镜像。
+      // soft 处先收拢成一批再失效:整批 offline 时逐台通知会击穿 React 嵌套上限。
+      const softInvalidateIds: string[] = [];
       for (const item of deviceRows) {
         const disposition = deviceMirrorCleanupDisposition(item.state);
-        if (disposition === 'soft') softInvalidateDeviceMirror(item.device.deviceId);
+        if (disposition === 'soft') softInvalidateIds.push(item.device.deviceId);
         if (disposition === 'hard') {
           invalidateScheduleIndexForDevice(item.device.deviceId);
           remoteScheduleEventStore.clearDevice(item.device.deviceId);
@@ -974,6 +984,7 @@ function HomeScreenContent() {
           remoteSessionStore.removeDevice(item.device.deviceId);
         }
       }
+      if (softInvalidateIds.length > 0) softInvalidateDeviceMirrors(softInvalidateIds);
       // 整表对账:REST 全量清单对“设备是否仍绑定”是权威。冷启动从缓存种入、
       // 随后被解绑(完全不在清单里)的设备不会出现在状态分类里,按差集硬清 shard;
       // 这与短暂 offline 不同,否则幽灵项会被快照回写无限续存。
@@ -1643,24 +1654,7 @@ function HomeScreenContent() {
   const messagePreviewIndexRaw = useMemo(() => {
     // 普通首页的预览由可见行按 session 订阅。只有搜索需要跨全部任务建立消息索引。
     if (!normalizedSearchQuery) return new Map<string, string>();
-    const next = new Map<string, string>();
-    const activeIds = new Set<string>();
-    for (const session of sessions) {
-      activeIds.add(session.id);
-      const messages = remoteSessionStore.getMessages(session.id);
-      const cached = homePreviewCacheRef.current.get(session.id);
-      if (cached?.messages === messages) {
-        if (cached.preview) next.set(session.id, cached.preview);
-        continue;
-      }
-      const preview = buildSessionMessagePreviewIndex([session.id], () => messages).get(session.id);
-      homePreviewCacheRef.current.set(session.id, { messages, preview });
-      if (preview) next.set(session.id, preview);
-    }
-    for (const sessionId of homePreviewCacheRef.current.keys()) {
-      if (!activeIds.has(sessionId)) homePreviewCacheRef.current.delete(sessionId);
-    }
-    return next;
+    return remoteSessionStore.getSessionListMessagePreviewIndex(sessions);
   }, [messageSearchVersion, normalizedSearchQuery, sessions]);
   const messagePreviewIndex = useStableValue(messagePreviewIndexRaw, mapContentEqual);
   const pendingInteractionIndexRaw = useMemo(() => {
@@ -1718,6 +1712,10 @@ function HomeScreenContent() {
       unnamedLabel: t('session.menu.unnamedTitle'),
     }),
     [deviceModels, liveActivityIndex, messagePreviewIndex, pendingInteractionIndex, scheduleIndex, searchQuery, selectedDeviceId, homeSessions, statusFilter, t],
+  );
+  const projectMachineIdentities = useMemo(
+    () => buildHomeProjectMachineIdentities(home, deviceConnectionStates),
+    [home, deviceConnectionStates],
   );
   const runningSessionIds = useMemo(() => {
     const ids = new Set<string>();
@@ -2307,6 +2305,7 @@ function HomeScreenContent() {
       expandedAutomationGroups={expandedAutomationGroups}
       isLastPinnedRow={section.key === 'pinned' && index === section.data.length - 1 && sections.length > 1}
       item={item}
+      machineIdentity={item.kind === 'project' ? projectMachineIdentities.get(item.project.key) : undefined}
       nextIsBlock={isBlockHomeRow(section.data[index + 1])}
       onArchive={archiveSession}
       onOpenAutomationGroup={openAutomationGroup}
@@ -2355,6 +2354,7 @@ function HomeScreenContent() {
     toggleSessionPinned,
     homeScrollY,
     screenHeight,
+    projectMachineIdentities,
   ]);
 
   // 底部边到边:列表填满到物理屏底(内容滚到 home indicator 下方),用 inset 兜底而非靠 SafeAreaView 留白带。
@@ -3330,6 +3330,7 @@ function ProjectRow({
   expandedAutomationGroups,
   headerRefs,
   kind = 'project',
+  machineIdentity,
   onDragEnd,
   onDragMove,
   onDragStart,
@@ -3350,6 +3351,7 @@ function ProjectRow({
   expandedAutomationGroups: readonly string[];
   headerRefs?: MutableRefObject<Map<string, View>>;
   kind?: 'project' | 'dialogue';
+  machineIdentity?: HomeProjectMachineIdentity;
   onDragEnd?: () => void;
   onDragMove?: (absoluteY: number) => void;
   onDragStart?: (input: { absoluteY: number; count: number; key: string; title: string }) => void;
@@ -3440,6 +3442,9 @@ function ProjectRow({
   const groupTestID = kind === 'dialogue' ? 'home.dialogueGroup' : 'home.projectGroup';
   const rowTestID = kind === 'dialogue' ? 'home.dialogueRow' : 'home.projectRow';
   const childTestID = kind === 'dialogue' ? 'home.chatRow' : 'home.projectSessionRow';
+  const displayTitle = machineIdentity && !machineIdentity.hideLabel
+    ? `${project.title} (${machineIdentity.displayLabel})`
+    : project.title;
   const reorderable = kind === 'project' && !!onDragStart && !!onDragMove && !!onDragEnd;
   const dragGesture = useMemo(() => {
     if (!onDragStart || !onDragMove || !onDragEnd || kind !== 'project') return null;
@@ -3453,7 +3458,7 @@ function ProjectRow({
           absoluteY: event.absoluteY,
           count: project.sessionCount,
           key: project.key,
-          title: project.title,
+          title: displayTitle,
         });
       })
       .onUpdate((event) => {
@@ -3462,13 +3467,13 @@ function ProjectRow({
       .onFinalize(() => {
         runOnJS(finish)();
       });
-  }, [kind, onDragEnd, onDragMove, onDragStart, project.key, project.sessionCount, project.title]);
+  }, [displayTitle, kind, onDragEnd, onDragMove, onDragStart, project.key, project.sessionCount]);
   const header = (
     <Pressable
       accessibilityHint={reorderable ? t('devices.list.menu.projectOrderManualTip') : undefined}
       accessibilityLabel={kind === 'dialogue'
         ? t('devices.list.a11y.dialogue')
-        : t('devices.list.a11y.project', { title: project.title })}
+        : t('devices.list.a11y.project', { title: displayTitle })}
       accessibilityRole="button"
       accessibilityState={{ expanded: !collapsed }}
       onLayout={(event) => {
@@ -3500,7 +3505,10 @@ function ProjectRow({
       ) : (
         <FolderOpen color={colors.textSecondary} size={iconSize.xl} strokeWidth={iconStroke.thin} />
       )}
-      <Text style={styles.projectTitle} numberOfLines={1}>{project.title}</Text>
+      <View style={styles.projectLabel}>
+        <Text style={[styles.projectTitle, styles.projectFolderTitle]} numberOfLines={1}>{project.title}</Text>
+        {machineIdentity ? <HomeProjectMachineLabel identity={machineIdentity} /> : null}
+      </View>
       <Text style={styles.projectCount} numberOfLines={1}>{project.sessionCount}</Text>
     </Pressable>
   );
@@ -3648,6 +3656,7 @@ function HomeListRowInner({
   expandedAutomationGroups,
   isLastPinnedRow,
   item,
+  machineIdentity,
   nextIsBlock,
   onArchive,
   onOpenAutomationGroup,
@@ -3675,6 +3684,7 @@ function HomeListRowInner({
   /** 置顶组展开态:行进入置顶卡片内的缩进/描边形态(CINDY list 视觉)。 */
   isLastPinnedRow: boolean;
   item: HomeRow;
+  machineIdentity?: HomeProjectMachineIdentity;
   nextIsBlock: boolean;
   onArchive(session: RemoteSession): void;
   onOpenAutomationGroup(group: RemoteAutomationSessionGroup): void;
@@ -3706,6 +3716,7 @@ function HomeListRowInner({
         expandedAutomationGroups={expandedAutomationGroups}
         headerRefs={projectHeaderRefs}
         kind={item.kind}
+        machineIdentity={machineIdentity}
         onDragEnd={item.kind === 'project' ? onProjectDragEnd : undefined}
         onDragMove={item.kind === 'project' ? onProjectDragMove : undefined}
         onDragStart={item.kind === 'project' ? onProjectDragStart : undefined}
@@ -4669,6 +4680,13 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
     paddingRight: spacing.lg,
     paddingVertical: spacing.sm,
   },
+  projectLabel: {
+    alignItems: 'center',
+    flex: 1,
+    flexDirection: 'row',
+    gap: 6, // Desktop ProjectNode name / remote icon / machine label gap-1.5.
+    minWidth: 0,
+  },
   projectTitle: {
     color: colors.textPrimary,
     flex: 1,
@@ -4676,6 +4694,10 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
     fontWeight: fontWeight.medium,
     lineHeight: lineHeight.listTitle,
     minWidth: 0,
+  },
+  projectFolderTitle: {
+    flex: 0,
+    flexShrink: 1,
   },
   projectCount: {
     color: colors.textTertiary,

@@ -141,8 +141,6 @@ interface RightSidebarSessionDeclarationOptions {
 
 const applicationMenuLog = createLogger('ApplicationMenu');
 const log = createLogger('MainLayout');
-// Keep in sync with single-segment static routes under /cc-agent in router.tsx.
-const CC_AGENT_STATIC_SEGMENTS = ['boot', 'files', 'new', 'new-dialogue', 'orca', 'scheduled'];
 
 function getInitialCollapsed(): boolean {
   // 「在新窗口打开」的副窗口默认折叠侧栏 —— 多开盯多个会话时,每个窗口都铺一条
@@ -189,13 +187,6 @@ function isZoomShortcutBlockedTarget(target: EventTarget | null): boolean {
       '[contenteditable="true"], .ProseMirror, .cm-editor, .cm-content, .cm-scroller, [role="textbox"]',
     ),
   );
-}
-
-function hasInlineControlledBannerPath(pathname: string): boolean {
-  const parts = pathname.split('/').filter(Boolean);
-  if (parts[0] !== 'cc-agent') return false;
-  if (parts.length === 2) return !CC_AGENT_STATIC_SEGMENTS.includes(parts[1]);
-  return parts.length === 3 && parts[1] === 'orca' && parts[2] !== 'new';
 }
 
 /**
@@ -398,7 +389,6 @@ export function MainLayout() {
   }, []);
 
   const isSettingsRoute = location.pathname === '/settings';
-  const hasInlineControlledBanner = hasInlineControlledBannerPath(location.pathname);
 
   // 完全隐藏态 hover 临时浮出(peek)状态机 —— hover 折叠按钮抽屉滑出预览,
   // 点击/⌘B 固定展开(pin)。rail 态(isCollapsed=false)不触发。见 useSidebarPeek。
@@ -619,6 +609,7 @@ export function MainLayout() {
         | { type: 'project'; workingDir: string }
         | { type: 'new-session'; workingDir: string }
         | { type: 'share-import'; filePath: string }
+        | { type: 'provider-import'; importId: string }
         | { type: 'settings'; tab: 'voice-input' | 'providers'; connect?: string },
     ) => {
       if (payload.type === 'session') {
@@ -643,6 +634,10 @@ export function MainLayout() {
         openShareImport(payload.filePath);
         return;
       }
+      if (payload.type === 'provider-import') {
+        navigate(`/settings?tab=providers&import=${encodeURIComponent(payload.importId)}`);
+        return;
+      }
       if (payload.type === 'settings') {
         // connect 透传给 ProvidersSection 已有的 ?connect=<providerId> 消费逻辑
         // (可指向内置 provider 或 preset;providers 就绪后一次性消费、消费即从
@@ -657,13 +652,23 @@ export function MainLayout() {
     [navigate, navigateToSession, openShareImport],
   );
   useEffect(() => {
-    const unsubscribe = window.electronAPI.onDeepLinkNavigate(handleDeepLinkPayload);
+    const unsubscribe = window.electronAPI.onDeepLinkNavigate((payload) => {
+      if (payload.type !== 'provider-import') {
+        handleDeepLinkPayload(payload);
+        return;
+      }
+      // Main retains imports through login. Both this wake-up and the mount pull
+      // use the same atomic take, so either ordering navigates only once.
+      void window.electronAPI.takePendingDeepLink().then((pending) => {
+        if (pending) handleDeepLinkPayload(pending);
+      });
+    });
     return unsubscribe;
   }, [handleDeepLinkPayload]);
 
   // pull-on-mount:冷启动期间 (mainWindow 未 ready / renderer 未挂 listener)
   // 缓存在 main 端的 deep link / --open-folder payload, MainLayout 第一次 mount
-  // 时拉一次消费。已运行场景始终返回 null,no-op。
+  // 时拉一次消费。导入唤醒事件也会 take，两者只有先到者拿到 payload。
   //
   // 关键场景:未登录用户右键 "通过 Cindy 打开" → 冷启动 → LoginPage 接管 →
   // 用户走完 Feishu OAuth → MainLayout (在 ProtectedRoute 之内) 第一次 mount →
@@ -1637,8 +1642,8 @@ export function MainLayout() {
           单例 + vanilla DOM,这里只挂一个空 React 节点,Phase 6 maximize 时
           会在这里加 layout 控制。 */}
       <BrowserWebviewPool />
-      {/* 被控端可见性:主聊天页在输入区内联渲染;其它页面保留全局兜底。 */}
-      {!hasInlineControlledBanner && <ControlledBanner />}
+      {/* 实际存在内联提示（含伙伴 / 折叠态）时组件自行退让，其余页面保留兜底。 */}
+      <ControlledBanner />
     </FeatureSidebarSlotProvider>
   );
 }

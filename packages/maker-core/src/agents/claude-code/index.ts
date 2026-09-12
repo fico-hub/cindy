@@ -74,7 +74,7 @@ import {
   CONTACTS_RULES_ENABLED,
 } from '../../contacts/system-prompt.js';
 import { MemoryFlushController } from '../../memory/flush-controller.js';
-import { buildMemoryScopeKey } from '../../memory/storage.js';
+import { resolveMemoryScopeKey } from '../../memory/scope-resolver.js';
 import type {
   Capabilities,
   EffortDescriptor,
@@ -964,7 +964,9 @@ export class ClaudeCodeAgent extends BaseAgent {
    */
   private async refreshSubscriptionTokenInPlace(env: Record<string, string>): Promise<string | null> {
     try {
-      const fresh = await this.deps.auth.getFreshSubscriptionToken!(env.CLAUDE_CODE_OAUTH_TOKEN);
+      const fresh = env.CINDY_CLAUDE_ACCOUNT_PROVIDER_ID
+        ? await this.deps.auth.getFreshSubscriptionToken!(env.CLAUDE_CODE_OAUTH_TOKEN, env.CINDY_CLAUDE_ACCOUNT_PROVIDER_ID)
+        : await this.deps.auth.getFreshSubscriptionToken!(env.CLAUDE_CODE_OAUTH_TOKEN);
       if (fresh) env.CLAUDE_CODE_OAUTH_TOKEN = fresh;
       return fresh ?? null;
     } catch (e) {
@@ -1213,7 +1215,12 @@ export class ClaudeCodeAgent extends BaseAgent {
             providerId: opts.providerId,
             model: opts.model,
           });
-    const authOptions = credentialMode ? { credentialMode } : undefined;
+    const authOptions = credentialMode
+      ? {
+          credentialMode,
+          ...(credentialMode !== 'gateway-key' && opts.providerId ? { providerId: opts.providerId } : {}),
+        }
+      : undefined;
     const authState = await this.deps.auth.getState(authOptions);
     if (!authState.authenticated) {
       throw new AgentNotAuthenticatedError(
@@ -1492,10 +1499,13 @@ export class ClaudeCodeAgent extends BaseAgent {
       : opts.makerMemoryEnabled ?? this.deps.runtimeConfig.makerMemoryEnabled ?? false;
     const makerMemory = this.deps.makerMemory;
     const makerMemoryEnabled = makerMemoryFlag === true && !!makerMemory;
-    // SSH remote 的 workingDir 是远端路径 — store 定位统一经 scope key,
-    // 键规则与理由见 buildMemoryScopeKey (memory/storage.ts)。
-    const memoryScopeKey =
-      opts.makerMemoryScopeKey ?? buildMemoryScopeKey(opts.workingDir, opts.remoteHostId);
+    // SSH remote 的 workingDir 是远端路径 — store 定位统一经 scope key;
+    // 本地会话额外做 git worktree 归一化 (#2379)。已注入的 makerMemoryScopeKey
+    // (含 bot:) 原样透传。Maker Memory 关闭时跳过 git 探测 (Codex #2399 P1):
+    // 解析结果本就不会被用, 失败还能空耗 3s timeout。
+    const memoryScopeKey = makerMemoryEnabled
+      ? (opts.makerMemoryScopeKey ?? (await resolveMemoryScopeKey(opts.workingDir, opts.remoteHostId)))
+      : (opts.makerMemoryScopeKey ?? opts.workingDir);
     // This per-session injection flag must not mutate the shared manager.
     if (makerMemoryEnabled && makerMemory) {
       try {
@@ -1612,7 +1622,7 @@ export class ClaudeCodeAgent extends BaseAgent {
       const context: McpProviderContext = {
         agentKind: 'claude-code' as const,
         workingDir: opts.workingDir,
-        ...(opts.makerMemoryScopeKey ? { memoryScopeKey: opts.makerMemoryScopeKey } : {}),
+        ...((makerMemoryEnabled || opts.makerMemoryScopeKey) ? { memoryScopeKey } : {}),
         vendorOptions: vo,
         // business sessionId 由 maker.createSession 通过 opts.sessionId 注入
         // (见 maker.ts: agent.startSession({...opts, sessionId: id}))。MCP server
@@ -1853,8 +1863,8 @@ export class ClaudeCodeAgent extends BaseAgent {
       kind: InteractionRequest['kind'];
       resolve: (d: InteractionDecision) => void;
       settled: boolean;
-      /** prompt-each-time 高风险审批: 切到宽松模式时也不接受 dismissAllPending('allow')。 */
-      forcePrompt?: boolean;
+      /** 本轮来源/执行范围约束独立于 MCP 的逐次审批偏好。 */
+      turnPolicyForcePrompt?: boolean;
       /** Auto 审阅故障降级来的确认:系统收口不能当成用户点了拒绝。 */
       unavailableHandoff?: boolean;
       /** 目录授权变化会使这次文件读写审批的根快照失效。 */
@@ -1874,7 +1884,7 @@ export class ClaudeCodeAgent extends BaseAgent {
      */
     async function dispatchInteraction(
       req: InteractionRequest,
-      opts?: { forcePrompt?: boolean; directorySensitive?: boolean },
+      opts?: { turnPolicyForcePrompt?: boolean; directorySensitive?: boolean },
     ): Promise<InteractionDecision> {
       if (!interactionResolver) {
         return safeDefaultDecision(req.kind, 'no_resolver_attached');
@@ -1885,7 +1895,7 @@ export class ClaudeCodeAgent extends BaseAgent {
           kind: req.kind,
           resolve,
           settled: false,
-          ...(opts?.forcePrompt ? { forcePrompt: true } : {}),
+          ...(opts?.turnPolicyForcePrompt ? { turnPolicyForcePrompt: true } : {}),
           ...(opts?.directorySensitive ? { directorySensitive: true } : {}),
           ...(req.kind === 'permission' && isAutoReviewUnavailableMetadata(req.metadata)
             ? { unavailableHandoff: true }
@@ -1918,12 +1928,7 @@ export class ClaudeCodeAgent extends BaseAgent {
       const entries = Array.from(pendingInteractions.entries());
       for (const [requestId, entry] of entries) {
         if (entry.settled) continue;
-        // forcePrompt(prompt-each-time 高风险审批)不接受"切到宽松模式"的批量放行 ——
-        // 没拿到用户对这一次调用的明确确认就 fail-closed 拒绝, 与 Codex 侧同名逻辑
-        // 一致。否则用户在 pending 期间切到 auto / bypassPermissions, 一个破坏性的
-        // contacts 调用就被自动 allow 了。
-        const effectiveResolveAs: 'allow' | 'deny' =
-          resolveAs === 'allow' && entry.forcePrompt === true ? 'deny' : resolveAs;
+        const effectiveResolveAs = resolveAs === 'allow' && entry.turnPolicyForcePrompt ? 'deny' : resolveAs;
         const decision = effectiveResolveAs === 'allow' && entry.kind !== 'ask_user_question'
           ? ({ kind: entry.kind, behavior: 'allow' } as InteractionDecision)
           : safeDefaultDecision(entry.kind, reason);
@@ -1965,31 +1970,16 @@ export class ClaudeCodeAgent extends BaseAgent {
      * "Codex 静默执行 / Claude 每次调用都弹窗"的分叉(浏览器自动化这类高频 server
      * 一次调研能攒出上百个权限请求)。
      *   auto-approve      → 静默放行, 不打扰用户
-     *   prompt-each-time  → 照常弹窗, 且全程禁止持久化授权(suggestion 不下发、
-     *                       decision 带回来的 permissionUpdates 也丢弃、切到宽松
-     *                       模式时 pending 请求 fail-closed)
+     *   prompt-each-time  → Ask 逐次确认且不持久化授权；Auto 交统一审阅器；
+     *                       Full access 不弹窗，已挂起的普通审批也随新档位结算
      *   prompt / 未注入   → 完全维持原有权限链
      * 策略抛错或返回非法值时按最保守的 prompt-each-time 处理(与 Codex 侧一致)。
      *
      * 本地 canUseTool 与远端 onApprovalRequest 都走这里 —— 否则同一套 MCP 配置在
      * SSH 会话里又会退回"逐次弹窗 + 没有 forced prompt 保护"的老行为。
      *
-     * **已知差异(bypassPermissions)**: 该档位下 SDK 直接跳过全部权限检查
-     * (allowDangerouslySkipPermissions, 见 SDK PermissionMode 文档), canUseTool 根本
-     * 不会被调用, 所以这里的 prompt-each-time 拦不住 Full access 会话 —— 那是该档位
-     * 本身的语义("Accepts all permissions"), 不是本函数的兜底范围。Codex 侧的
-     * forcePrompt 走自己的 approval 通道, 在 Full access 下仍会弹, 两端在这一档不等价。
-     *
-     * 抹平它的两条路都不便宜(结论来自 cc 2.1.219 的 cli.js 权限判定 `zd8`):
-     *  - PreToolUse hook: hook 无条件执行(先于权限判定), 且 hook 返回 deny 会在 `zd8`
-     *    首个分支直接阻断、不看 permissionMode —— 所以 hook 能在 Full access 下**拒绝**;
-     *    但 hook 返回 ask 会落到正常权限管线, 而该管线在 bypass 下就是放行, 所以做不到
-     *    Codex 那样的"仍然弹窗询问"。只能把高风险 action 变成硬拒绝, 用户在自己选了
-     *    Full access 之后反而做不了这些操作, 体验上不可接受。
-     *  - 让 Full access 停在可回调档(default) + canUseTool 里模拟放行普通工具: 能拿到
-     *    真 parity, 但 Full access 的判定语义会整体改变(settings 的 deny 规则、沙箱网络
-     *    等不经 canUseTool 的检查都会重新生效), 必须实机验证后才能上。
-     * 因此本轮如实保留差异, 不做半吊子拦截。
+     * SDK 的 bypassPermissions 原生跳过操作审批；Host 回调同样遵循当前档位，
+     * 不通过 hook 或 MCP 风险分类重新引入 Full access 特殊审批。
      */
     const classifyMcpApprovalPolicy = (
       toolName: string,
@@ -2174,6 +2164,12 @@ export class ClaudeCodeAgent extends BaseAgent {
             : 'This downstream source was not selected.',
         };
       }
+      if (isPlanToolBlocked(toolName)) {
+        return { behavior: 'deny', message: 'The current Plan turn is read-only.' };
+      }
+      if (mutablePermissionMode === 'bypassPermissions' && !forceTurnConfirmation(toolName, input)) {
+        return { behavior: 'allow', updatedInput: input };
+      }
       // Auto can resolve allow/block without a UI. Other modes retain the
       // existing fail-closed behavior when no interaction surface is attached.
       const canReviewWithoutUi = mutablePermissionMode === 'auto';
@@ -2241,7 +2237,13 @@ export class ClaudeCodeAgent extends BaseAgent {
         // cast 破 TS 收窄:TS 不建模 await 期间经 setPermissionMode 闭包的重赋值,会把此处
         // mutablePermissionMode 仍视为 'auto';运行期它确实可能已变,故按 union 类型现读。
         const modeAfterReview = mutablePermissionMode as PermissionMode;
+        if (isPlanToolBlocked(toolName)) {
+          return { behavior: 'deny', message: 'The current Plan turn is read-only.' };
+        }
         if (modeAfterReview === 'bypassPermissions') {
+          if (turnPolicyForcePrompt) {
+            return { behavior: 'deny', message: 'Permission mode changed; retry within the authorized turn scope.' };
+          }
           return { behavior: 'allow', updatedInput: executionInput };
         }
         if (modeAfterReview !== 'auto') {
@@ -2296,9 +2298,12 @@ export class ClaudeCodeAgent extends BaseAgent {
         unavailableHandoff
           ? annotatePermissionRequestForUnavailableReview(permissionRequest)
           : permissionRequest,
-        { forcePrompt, directorySensitive: directorySensitivePermission },
+        { turnPolicyForcePrompt, directorySensitive: directorySensitivePermission },
       );
       notifyIfAutoReviewConfirmUndelivered(unavailableHandoff, decision);
+      if (isPlanToolBlocked(toolName)) {
+        return { behavior: 'deny', message: 'The current Plan turn is read-only.' };
+      }
       if (decision.kind !== 'permission') {
         log.warn('permission got mismatched decision', { tool: toolName, decKind: decision.kind });
         return { behavior: 'deny', message: 'resolver kind mismatch' };
@@ -2608,6 +2613,12 @@ export class ClaudeCodeAgent extends BaseAgent {
      */
     const currentTurnSdkPermissionMode = (): SdkPermissionMode =>
       planTurnActive ? 'plan' : toSdkPermissionMode(mutablePermissionMode);
+    // Only the current SDK/turn state applies here; arming the next message must
+    // not turn an ordinary in-flight turn into a Plan turn. Keep other modes on
+    // their existing SDK/MCP approval path; Full Access is not a Plan override.
+    const isPlanToolBlocked = (toolName: string): boolean =>
+      mutablePermissionMode === 'bypassPermissions'
+      && (planTurnActive || sdkInPlanMode) && !isReadOnlyClaudeTool(toolName);
     // Fast 模式运行时态:启动取 opts.fastMode 快照,setFastMode 覆盖。buildSettings 每次读最新值;
     // host 只在「该 model 支持 + 走官方供应商」时才传 true(renderer 配置门控),agent 忠实消费。
     let mutableFastMode = opts.fastMode === true;
@@ -2632,9 +2643,10 @@ export class ClaudeCodeAgent extends BaseAgent {
     // ── Usage tracker (Stage 2 B') ──────────────────────────────────────────
     // 单 session 共享的 mutable usage state. translator 通过 ctx 注入访问.
     // handle.getUsageSnapshot 也读它, 形成"SDK 原始 usage → tracker → status event / handle snapshot"
-    // 单一可信源. 窗口跟白名单同一份实时目录,不冻启动快照。
+    // 单一可信源。预算跟随已应用的进程配置；设置变更等待重建后才反映到用量。
+    let appliedContextWindow = resolveModelContextWindow(mutableModel);
     const usageTracker = new UsageTracker();
-    usageTracker.setContextWindow(resolveModelContextWindow(mutableModel) ?? 0);
+    usageTracker.setContextWindow(appliedContextWindow ?? 0);
 
     // ── 跨 turn 共享状态 ───────────────────────────────────────────────────
     let configuredResumeSessionId: string | undefined = opts.resumeSessionId;
@@ -2880,7 +2892,9 @@ export class ClaudeCodeAgent extends BaseAgent {
               `已自动中断当前 turn 防止卡死。可以直接发下一条消息继续 ` +
               `(已完成的 tool result 都保留)。`,
             isTerminal: true,
-            reason: 'upstream_response_idle_timeout',
+            // The bridge precedes the user's input, which is cleared below.
+            // It is not an accepted user turn that can receive CONTINUE.
+            reason: 'bridge_upstream_response_idle_timeout',
             idleMs,
             sdkSessionId,
             lastEventType: upstreamResponseLastEventType,
@@ -2904,7 +2918,7 @@ export class ClaudeCodeAgent extends BaseAgent {
         turnState.interruptRequested = false;
         pendingToolIds.clear();
         preserveBridgeRetryTarget(timedOutBridgeKind, timedOutRewindResumeAt);
-        emitTurnBoundary('upstream_response_idle_timeout', suppressedDoneData);
+        emitTurnBoundary('bridge_upstream_response_idle_timeout', suppressedDoneData);
         return;
       }
       eventQueue.push({
@@ -3056,6 +3070,7 @@ export class ClaudeCodeAgent extends BaseAgent {
     }): Promise<Query> => {
       const currentSdkModel = sdkModelFor(mutableModel);
       const workingWindow = resolveModelContextWindow(mutableModel);
+      appliedContextWindow = workingWindow;
       applyClaudeContextWindow(env, workingWindow, this.deps.runtimeConfig.autoCompactThresholdPct);
       if (remoteEnv) applyClaudeContextWindow(remoteEnv, workingWindow, this.deps.runtimeConfig.autoCompactThresholdPct);
       const currentSdkEffort = getSdkEffortForModel(mutableModel, mutableEffort);
@@ -3290,7 +3305,7 @@ export class ClaudeCodeAgent extends BaseAgent {
           makerMemoryEnabled,
           // 同一个 scope key 也必须随注册的 session ctx 走: prompt 段用它读索引
           // (上方 memoryScopeKey), 远端工具侧不给就会回落到 workdir 键。
-          ...(opts.makerMemoryScopeKey ? { makerMemoryScopeKey: opts.makerMemoryScopeKey } : {}),
+          ...((makerMemoryEnabled || opts.makerMemoryScopeKey) ? { makerMemoryScopeKey: memoryScopeKey } : {}),
           onApprovalRequest: async (rawParams: unknown) => {
             // 110s timeout — must respond before daemon's 120s server-request timeout.
             // On timeout, dismiss the pending interaction (clears UI) and reject to
@@ -3298,7 +3313,7 @@ export class ClaudeCodeAgent extends BaseAgent {
             const REMOTE_APPROVAL_TIMEOUT_MS = 110_000;
             async function dispatchWithTimeout(
               req: InteractionRequest,
-              dispatchOpts?: { forcePrompt?: boolean },
+              dispatchOpts?: { turnPolicyForcePrompt?: boolean },
             ): Promise<InteractionDecision> {
               let timer: NodeJS.Timeout | undefined;
               try {
@@ -3366,6 +3381,8 @@ export class ClaudeCodeAgent extends BaseAgent {
                 return { kind: 'plan_review', behavior: 'deny', reason: 'resolver kind mismatch' };
               }
               if (decision.behavior === 'allow') {
+                planTurnActive = false;
+                sdkInPlanMode = false;
                 appendActiveCapabilitySelectionText(
                   capabilitySelectionAddedByPlanEdit(
                     this.deps.capabilityRouting,
@@ -3414,6 +3431,9 @@ export class ClaudeCodeAgent extends BaseAgent {
               };
             }
             // Auto allow/block do not need UI, including MCP operations.
+            if (isPlanToolBlocked(remoteToolName)) {
+              return { kind: 'permission', behavior: 'deny', reason: 'The current Plan turn is read-only.' };
+            }
             const canReviewRemoteWithoutUi = mutablePermissionMode === 'auto';
             if (!interactionResolver && !canReviewRemoteWithoutUi) {
               if (isReadOnlyClaudeTool(remoteToolName)) {
@@ -3428,15 +3448,17 @@ export class ClaudeCodeAgent extends BaseAgent {
                 reason: 'no interaction resolver attached; denying non-read-only tool (fail-closed)',
               };
             }
-            if (mutablePermissionMode === 'bypassPermissions') {
-              return { kind: 'permission', behavior: 'allow' };
-            }
-            // 远端会话走同一份 host MCP 策略 —— 否则 SSH 会话里可信 server 又要逐次
-            // 弹窗, prompt-each-time 的"禁止持久化授权"保护也整套缺失。
             const remoteTurnPolicyForcePrompt = forceTurnConfirmation(
               remoteToolName || 'unknown',
               params.input ?? {},
             );
+            if (mutablePermissionMode === 'bypassPermissions') {
+              return remoteTurnPolicyForcePrompt
+                ? { kind: 'permission', behavior: 'deny', reason: 'Permission mode changed; retry within the authorized turn scope.' }
+                : { kind: 'permission', behavior: 'allow' };
+            }
+            // 远端会话走同一份 host MCP 策略 —— 否则 SSH 会话里可信 server 又要逐次
+            // 弹窗, prompt-each-time 的"禁止持久化授权"保护也整套缺失。
             const remoteMcpPolicy = classifyMcpApprovalPolicy(remoteToolName, params.input ?? {});
             const remoteHostApprovalPresentation = mcpApprovalPresentation(
               remoteToolName,
@@ -3468,7 +3490,14 @@ export class ClaudeCodeAgent extends BaseAgent {
                 'linux',
               );
               const modeAfterReview = mutablePermissionMode as PermissionMode;
-              if (modeAfterReview === 'bypassPermissions') return { kind: 'permission', behavior: 'allow' };
+              if (isPlanToolBlocked(remoteToolName)) {
+                return { kind: 'permission', behavior: 'deny', reason: 'The current Plan turn is read-only.' };
+              }
+              if (modeAfterReview === 'bypassPermissions') {
+                return remoteTurnPolicyForcePrompt
+                  ? { kind: 'permission', behavior: 'deny', reason: 'Permission mode changed; retry within the authorized turn scope.' }
+                  : { kind: 'permission', behavior: 'allow' };
+              }
               if (modeAfterReview === 'auto' && autoDecision.verdict === 'allow') {
                 return { kind: 'permission', behavior: 'allow' };
               }
@@ -3512,13 +3541,16 @@ export class ClaudeCodeAgent extends BaseAgent {
                 remoteUnavailableHandoff
                   ? annotatePermissionRequestForUnavailableReview(remotePermissionRequest)
                   : remotePermissionRequest,
-                { forcePrompt: remoteForcePrompt },
+                { turnPolicyForcePrompt: remoteTurnPolicyForcePrompt },
               );
             } catch {
               if (remoteUnavailableHandoff) autoReviewConfirmUndeliveredNotice.notify();
               return { kind: 'permission', behavior: 'deny', reason: 'approval_timeout' };
             }
             notifyIfAutoReviewConfirmUndelivered(remoteUnavailableHandoff, decision);
+            if (isPlanToolBlocked(remoteToolName)) {
+              return { kind: 'permission', behavior: 'deny', reason: 'The current Plan turn is read-only.' };
+            }
             if (decision.kind !== 'permission') {
               return { kind: 'permission', behavior: 'deny', reason: 'resolver kind mismatch' };
             }
@@ -4908,7 +4940,7 @@ export class ClaudeCodeAgent extends BaseAgent {
               log,
               getModel: () => mutableModel,
               getProviderId: () => mutableProviderId,
-              getModelContextWindow: () => resolveModelContextWindow(mutableModel),
+              getModelContextWindow: () => appliedContextWindow,
               getEffort: () => mutableEffort,
               getPermissionMode: () => mutablePermissionMode,
               getFastMode: () => mutableFastMode,
@@ -6706,6 +6738,7 @@ export class ClaudeCodeAgent extends BaseAgent {
           });
         }
         const newContextWindow = resolveModelContextWindow(mutableModel);
+        appliedContextWindow = newContextWindow;
         if (newContextWindow === undefined) {
           // setContextWindow(0) 是 no-op —— tracker 会静默沿用旧模型窗口直到下一个
           // result 的 modelUsage 修正。UI 环 / auto-compact 期间按旧窗口算(偏乐观),
@@ -6882,6 +6915,10 @@ export class ClaudeCodeAgent extends BaseAgent {
         return mutablePlanMode;
       },
 
+      getExecutionPlanMode() {
+        return mutablePlanMode || planTurnActive || sdkInPlanMode;
+      },
+
       async setExtraDirs(newDirs: string[]) {
         if (reviewMode) return;
         // 只覆盖 closure。SDK 没有运行时 setAdditionalDirectories 入口, 但 buildQuery
@@ -6924,6 +6961,8 @@ export class ClaudeCodeAgent extends BaseAgent {
       },
 
       // ── Rewind (Stage 2 C2) ────────────────────────────────────────────────
+
+      isPreparingUserTurn: bridgeStateActive,
 
       isTurnRunning(): boolean {
         // 前台 result/done 到后台 wake 任务自动续 turn 之间，SDK 会短暂把
