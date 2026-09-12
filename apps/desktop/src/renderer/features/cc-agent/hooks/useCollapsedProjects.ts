@@ -163,7 +163,25 @@ export function useCollapsedProjects(
     });
   }, [localPlatform, ownerId]);
 
-  const collapsed = useMemo(() => new Set(Object.keys(stored)), [stored]);
+  const collapsed = useMemo(() => {
+    const activeProjectKeyByIdentity = new Map<string, string>();
+    for (const activeWorkingDir of activeWorkingDirs) {
+      const projectKey = normalizeProjectKey(activeWorkingDir);
+      if (!projectKey) continue;
+      const identity = projectKeyComparisonKey(projectKey, localPlatform) ?? projectKey;
+      if (!activeProjectKeyByIdentity.has(identity)) {
+        activeProjectKeyByIdentity.set(identity, projectKey);
+      }
+    }
+
+    return new Set(
+      Object.keys(stored).map((storedProjectKey) => {
+        const identity =
+          projectKeyComparisonKey(storedProjectKey, localPlatform) ?? storedProjectKey;
+        return activeProjectKeyByIdentity.get(identity) ?? storedProjectKey;
+      }),
+    );
+  }, [activeWorkingDirs, localPlatform, stored]);
 
   // Callback identity changes only at an owner boundary.
   const toggle = useCallback(

@@ -98,8 +98,15 @@ describe('collapsed project owner state', () => {
     );
 
     const hook = renderHook(() => useCollapsedProjects([liveProject], 'owner-a', 'win32'));
-    expect(hook.result.current.collapsed).toEqual(new Set([storedProject]));
+    expect(hook.result.current.collapsed).toEqual(new Set([liveProject]));
     expect(hook.result.current.isAllCollapsed).toBe(true);
+
+    act(() => hook.result.current.toggle(liveProject));
+    expect(hook.result.current.collapsed.size).toBe(0);
+    expect(window.localStorage.getItem(ownerKey)).toBe('{}');
+
+    act(() => hook.result.current.toggle(liveProject));
+    expect(hook.result.current.collapsed).toEqual(new Set([liveProject]));
 
     act(() => hook.result.current.expand(liveProject));
     expect(hook.result.current.collapsed.size).toBe(0);
