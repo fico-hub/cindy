@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import i18n from '@/i18n';
 import { RemoteDesktopViewerWindow } from '../RemoteDesktopViewerWindow';
@@ -8,6 +8,8 @@ import type { ViewerSnapshot } from '../viewerController';
 const lifecycle = vi.hoisted(() => ({
   created: vi.fn(),
   disposed: vi.fn(),
+  releaseInput: vi.fn(),
+  setControl: vi.fn(),
   update: null as ((state: ViewerSnapshot) => void) | null,
 }));
 vi.mock('../viewerController', () => ({
@@ -17,6 +19,8 @@ vi.mock('../viewerController', () => ({
       lifecycle.update = update;
     }
     dispose = lifecycle.disposed;
+    releaseInput = lifecycle.releaseInput;
+    setControl = lifecycle.setControl;
   },
 }));
 vi.mock('@/hooks/useMacFullscreen', () => ({
@@ -27,6 +31,59 @@ vi.mock('@/components/title-bar/WindowControls', () => ({ WindowControls: () => 
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+});
+
+it('explains view-only actions and enables the same actions when control is confirmed', async () => {
+  await i18n.changeLanguage('zh-CN');
+  Object.assign(window, {
+    electronAPI: {
+      remoteDesktopViewer: {
+        onActive: () => () => {},
+        onLocale: () => () => {},
+        state: async () => ({ generation: 1 }),
+        rendererReady: async () => {},
+        presentationReady: async () => {},
+        inputFocus: async () => {},
+      },
+    },
+  });
+  render(<RemoteDesktopViewerWindow />);
+  const state: ViewerSnapshot = {
+    target: { deviceId: 'host', name: 'Windows' },
+    ready: true,
+    controlling: false,
+    controlPending: false,
+    status: 'live',
+    error: null,
+    displayId: 'one',
+    transport: 'direct',
+    latency: null,
+    settings: { fps: 30, bitrate: 0, audio: false },
+    caps: {
+      version: 1,
+      enabled: true,
+      canControl: true,
+      clipboardText: true,
+      platform: 'win32',
+      displays: [],
+    },
+  };
+  await act(async () => lifecycle.update?.(state));
+  fireEvent.click(screen.getByRole('button', { name: '操作' }));
+  const panel = within(screen.getByRole('complementary', { name: '操作' }));
+  expect(panel.getByText(i18n.t('remoteDesktop.viewer.controlRequired'))).toBeDefined();
+  const copy = panel.getByRole('button', {
+    name: i18n.t('remoteDesktop.viewer.copy'),
+  }) as HTMLButtonElement;
+  expect(copy.disabled).toBe(true);
+  fireEvent.click(panel.getByRole('button', { name: i18n.t('remoteDesktop.takeControl') }));
+  expect(lifecycle.setControl).toHaveBeenCalledWith(true);
+  await act(async () => lifecycle.update?.({ ...state, controlPending: true }));
+  expect(panel.getByText(i18n.t('remoteDesktop.viewer.controlPending'))).toBeDefined();
+  expect(copy.disabled).toBe(true);
+  await act(async () => lifecycle.update?.({ ...state, controlling: true }));
+  expect(copy.disabled).toBe(false);
+  expect(panel.queryByText(i18n.t('remoteDesktop.viewer.controlRequired'))).toBeNull();
 });
 
 it.each([
@@ -52,6 +109,7 @@ it.each([
       target: null,
       ready: true,
       controlling: true,
+      controlPending: false,
       status: 'live',
       error: null,
       caps: null,

@@ -83,12 +83,15 @@
       "clear": "Clear",
       "resolution": "Computer resolution",
       "clipboard": "Text clipboard",
-      "copy": "Copy remote text to this computer",
-      "paste": "Paste local text remotely",
+      "copy": "Copy remote text",
+      "paste": "Paste to remote",
       "clipboardDone": "Text transferred",
       "clipboardFailed": "Could not transfer text. Check control access and keep text under 16,384 characters.",
       "settingsFailed": "Could not change the display setting.",
       "inputHint": "Click the picture to type. Ctrl+Alt+Esc releases keyboard focus; Cmd/Ctrl+W closes this window.",
+      "controlPending": "Requesting control…",
+      "controlRequired": "View only. Take control to use the clipboard and desktop actions.",
+      "clipboardHint": "Text only. Copy selected text from the remote computer, or paste this computer's clipboard into the active remote field.",
       "resolutionHint": "Resolution changes affect the actual remote monitor."
     }
   },
@@ -3590,7 +3593,7 @@
         "allowInboundAria": "Toggle whether {{name}} can control this device",
         "peerControlOff": "Remote control not enabled on that device",
         "masterOffHint": "Turn on the master switch above first",
-        "controllingThisMac": "Controlling this device"
+        "controllingThisMac": "Connected to Cindy"
       },
       "toast": {
         "revoked": "Access revoked for this device",
@@ -5659,9 +5662,9 @@
       "requestChanges": "Request changes",
       "planFeedbackPlaceholder": "Feedback (optional)"
     },
-    "controlledBy": "Controlled by {{name}}",
-    "controlledByMultiple": "Controlled by {{count}} devices",
-    "controlledTooltip": "Another device signed in to the same account is remotely controlling this machine. You can revoke its access.",
+    "controlledBy": "{{name}} is connected to Cindy",
+    "controlledByMultiple": "{{count}} devices are connected to Cindy",
+    "controlledTooltip": "These devices are connected to Cindy sessions. This count does not indicate who controls the desktop mouse and keyboard. You can revoke access.",
     "revokeAccess": "Revoke",
     "viewControllers": "View",
     "collapseControlledNotice": "Collapse remote control notice",

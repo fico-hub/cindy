@@ -6,9 +6,12 @@
   color: var(--text-primary);
 }
 .remote-viewer-toolbar {
+  position: relative;
   display: flex;
   flex: none;
   height: 52px;
+  min-width: 0;
+  padding-right: var(--space-3);
   gap: 6px;
   align-items: center;
   border-bottom: 1px solid var(--border-default);
@@ -16,8 +19,7 @@
   -webkit-app-region: drag;
   z-index: 5;
 }
-.remote-viewer-toolbar button,
-.remote-viewer-toolbar select {
+.remote-viewer-toolbar button {
   -webkit-app-region: no-drag;
 }
 .remote-viewer-heading {
@@ -38,32 +40,16 @@
   align-items: center;
   gap: 6px;
   white-space: nowrap;
+  overflow: hidden;
   color: var(--text-secondary);
   font-size: var(--text-12);
   line-height: 1.4;
 }
-.remote-viewer-action {
-  display: inline-flex;
-  justify-content: center;
-  align-items: center;
-  min-height: 44px;
-  min-width: 44px;
-  padding: 0 12px;
-  border-radius: 9999px;
-  cursor: pointer;
-  font-size: 13px;
-}
-.remote-viewer-action:hover {
-  background: var(--surface-chip);
-}
-.remote-viewer-action:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-.remote-viewer-action:focus-visible,
-.remote-viewer-window select:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 2px;
+/* Button owns colors, states, radii and typography; the viewer sizes its toolbar. */
+.remote-viewer-toolbar > .remote-viewer-action {
+  width: var(--space-9);
+  height: var(--space-9);
+  padding: 0;
 }
 .remote-viewer-content {
   --foreground: var(--text-primary);
@@ -167,10 +153,11 @@
 .remote-viewer-settings {
   position: absolute;
   right: 12px;
-  top: 60px;
-  max-height: calc(100vh - 80px);
+  top: calc(100% + var(--space-2));
+  max-height: calc(100vh - 100% - var(--space-5));
   overflow: auto;
   width: 320px;
+  max-width: calc(100vw - 24px);
   padding: 16px;
   display: flex;
   flex-direction: column;
@@ -179,23 +166,27 @@
   border-radius: 12px;
   background: var(--surface);
   z-index: 6;
+  -webkit-app-region: no-drag;
 }
-.remote-viewer-settings label {
-  display: flex;
-  justify-content: space-between;
+.remote-viewer-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, var(--space-40));
   align-items: center;
-  gap: 8px;
-  font-size: 13px;
 }
-.remote-viewer-window select {
-  min-height: 36px;
-  max-width: 150px;
-  padding: 4px 8px;
-  border: 1px solid var(--border-default);
-  border-radius: 9999px;
-  color: var(--text-primary);
-  background: var(--surface);
-  font-size: 12px;
+.remote-viewer-display-select {
+  flex: 0 1 var(--space-40);
+  width: var(--space-40);
+}
+@media (max-width: 620px) {
+  .remote-viewer-toolbar {
+    height: auto;
+    min-height: 52px;
+    flex-wrap: wrap;
+    padding-block: var(--space-1);
+  }
+  .remote-viewer-heading {
+    flex-basis: var(--space-28);
+  }
 }
 .remote-viewer-settings p {
   font-size: 12px;
@@ -208,7 +199,9 @@
   transform: translateY(calc(-100% + 8px));
 }
 .remote-viewer-fullscreen .remote-viewer-toolbar:hover,
-.remote-viewer-fullscreen .remote-viewer-toolbar:focus-within {
+.remote-viewer-fullscreen .remote-viewer-toolbar:focus-within,
+.remote-viewer-fullscreen .remote-viewer-toolbar[data-settings-open='true'],
+.remote-viewer-fullscreen .remote-viewer-toolbar[data-select-open='true'] {
   transform: translateY(0);
 }
 @media (prefers-reduced-motion: reduce) {

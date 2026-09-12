@@ -83,12 +83,15 @@
       "clear": "선명",
       "resolution": "컴퓨터 해상도",
       "clipboard": "텍스트 클립보드",
-      "copy": "원격 텍스트를 이 컴퓨터에 복사",
-      "paste": "로컬 텍스트를 원격으로 붙여넣기",
+      "copy": "원격 텍스트 복사",
+      "paste": "원격으로 붙여넣기",
       "clipboardDone": "텍스트를 전송했습니다",
       "clipboardFailed": "텍스트를 전송할 수 없습니다. 제어 권한을 확인하고 내용을 16,384자 이내로 줄이세요.",
       "settingsFailed": "디스플레이 설정을 변경할 수 없습니다.",
       "inputHint": "화면을 클릭하여 입력하세요. Ctrl+Alt+Esc로 키보드 포커스를 해제하고 Cmd/Ctrl+W로 이 창을 닫습니다.",
+      "controlPending": "제어 권한을 가져오는 중…",
+      "controlRequired": "보기 전용입니다. 클립보드와 데스크톱 작업을 사용하려면 제어 권한을 가져오세요.",
+      "clipboardHint": "텍스트만 전송합니다. 원격 컴퓨터에서 선택한 텍스트를 복사하거나 이 컴퓨터의 클립보드를 원격 입력란에 붙여넣습니다.",
       "resolutionHint": "해상도를 변경하면 원격 컴퓨터의 실제 모니터에 적용됩니다."
     }
   },
@@ -3589,7 +3592,7 @@
         "allowInboundAria": "{{name}}이(가) 본 기기를 제어하도록 허용할지 전환",
         "peerControlOff": "상대방이 제어를 허용하지 않음",
         "masterOffHint": "먼저 위의 메인 스위치를 켜세요",
-        "controllingThisMac": "본 기기를 제어 중"
+        "controllingThisMac": "Cindy에 연결됨"
       },
       "toast": {
         "revoked": "이 기기의 액세스 권한을 철회했습니다",
@@ -5657,9 +5660,9 @@
       "requestChanges": "수정 요청",
       "planFeedbackPlaceholder": "피드백(선택)"
     },
-    "controlledBy": "{{name}} 가 제어 중",
-    "controlledByMultiple": "{{count}}대 기기가 제어 중",
-    "controlledTooltip": "같은 계정으로 로그인한 다른 기기가 이 기기를 원격 제어하고 있습니다. 접근 권한을 철회할 수 있습니다.",
+    "controlledBy": "{{name}}이(가) Cindy에 연결됨",
+    "controlledByMultiple": "기기 {{count}}대가 Cindy에 연결됨",
+    "controlledTooltip": "Cindy 세션에 연결된 기기입니다. 이 수는 데스크톱 마우스와 키보드를 제어하는 기기 수가 아닙니다. 접근 권한을 철회할 수 있습니다.",
     "revokeAccess": "권한 철회",
     "viewControllers": "보기",
     "collapseControlledNotice": "원격 제어 알림 접기",

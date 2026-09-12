@@ -31,8 +31,8 @@
     "allow": "允許遠端桌面",
     "allowHint": "允許已登入的同帳號裝置檢視和操作這台電腦的所有應用程式。需同時開啟上方的裝置控制。",
     "permissionHint": "請在電腦的系統設定中允許螢幕錄製和輔助使用，然後重新連線。",
-    "beingControlled": "手機正在控制桌面",
-    "beingViewed": "手機正在檢視桌面",
+    "beingControlled": "桌面正在被遠端控制",
+    "beingViewed": "桌面正在被遠端檢視",
     "disconnect": "中斷連線",
     "back": "返回",
     "connect": "連線",
@@ -83,12 +83,15 @@
       "clear": "清晰",
       "resolution": "電腦解析度",
       "clipboard": "文字剪貼簿",
-      "copy": "將遠端文字複製到本機",
-      "paste": "將本機文字貼到遠端",
+      "copy": "複製遠端文字",
+      "paste": "貼到遠端",
       "clipboardDone": "文字已傳輸",
       "clipboardFailed": "文字傳輸失敗，請確認已取得控制權，且內容不超過 16,384 字元。",
       "settingsFailed": "無法修改顯示設定。",
       "inputHint": "點擊畫面即可輸入。Ctrl+Alt+Esc 釋放鍵盤焦點；Cmd/Ctrl+W 關閉這個視窗。",
+      "controlPending": "正在取得控制權…",
+      "controlRequired": "目前僅供檢視，取得控制權後可使用剪貼簿和桌面操作。",
+      "clipboardHint": "僅傳輸文字：將遠端選取的文字複製到本機，或將本機剪貼簿貼到遠端目前的輸入框。",
       "resolutionHint": "解析度修改會影響遠端的實際顯示器。"
     }
   },
@@ -3589,7 +3592,7 @@
         "allowInboundAria": "切換是否允許 {{name}} 控制本機",
         "peerControlOff": "對方未允許遠端控制",
         "masterOffHint": "需先開啟上方總開關",
-        "controllingThisMac": "正在控制本機"
+        "controllingThisMac": "已連接到 Cindy"
       },
       "toast": {
         "revoked": "已撤銷該裝置的訪問權限",
@@ -5657,9 +5660,9 @@
       "requestChanges": "要求修改",
       "planFeedbackPlaceholder": "修改意見(可選)"
     },
-    "controlledBy": "正在被 {{name}} 控制",
-    "controlledByMultiple": "正在被 {{count}} 臺裝置控制",
-    "controlledTooltip": "另一臺登入同帳號的裝置正在遠端控制本機。你可以撤銷其訪問權限。",
+    "controlledBy": "{{name}} 已連接到 Cindy",
+    "controlledByMultiple": "{{count}} 臺裝置已連接到 Cindy",
+    "controlledTooltip": "這些裝置連接了 Cindy 的任務，不代表正在控制桌面滑鼠和鍵盤。你可以撤銷其存取權限。",
     "revokeAccess": "撤銷權限",
     "viewControllers": "檢視",
     "collapseControlledNotice": "收起遠端控制提示",

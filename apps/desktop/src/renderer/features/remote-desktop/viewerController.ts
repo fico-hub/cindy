@@ -24,6 +24,7 @@ export interface ViewerSnapshot {
   status: string;
   error: string | null;
   controlling: boolean;
+  controlPending: boolean;
   caps: RemoteDesktopCapabilities | null;
   displayId: string;
   transport: '' | 'video' | 'direct' | 'relay' | 'screenshots';
@@ -41,6 +42,7 @@ export class DesktopViewerController {
     status: 'connecting',
     error: null,
     controlling: false,
+    controlPending: false,
     caps: null,
     displayId: '',
     transport: '',
@@ -147,7 +149,13 @@ export class DesktopViewerController {
     this.runtime?.receive({ type: 'releaseInput' });
     void this.session.stop().catch(() => {});
     this.runtime?.receive({ type: 'stop', preserveFrame });
-    this.publish({ controlling: false, ready: false, transport: '', latency: null });
+    this.publish({
+      controlling: false,
+      controlPending: false,
+      ready: false,
+      transport: '',
+      latency: null,
+    });
   }
   private async connect(takeover = false): Promise<void> {
     if (this.opening || !this.scope.active || this.disposed) return;
@@ -201,24 +209,44 @@ export class DesktopViewerController {
     void this.connect(this.state.error === 'connectionBusy');
   }
   async setControl(enabled: boolean): Promise<void> {
+    if (this.state.controlPending || !this.session.lease) return;
     this.wantsControl = enabled;
     this.runtime.receive({ type: 'releaseInput' });
     const lease = this.session.lease;
+    this.publish({ controlPending: true });
+    this.syncControl();
     try {
       const result = await this.session.control(enabled);
       if (lease !== this.session.lease) return;
-      this.publish({ controlling: result.controlling, error: null });
-      this.runtime.receive({ type: 'control', enabled: result.controlling && this.state.ready });
+      if (!result.controlling) this.wantsControl = false;
+      this.publish({ error: null });
     } catch (error) {
       if (lease !== this.session.lease) return;
+      this.wantsControl = false;
       const code = error instanceof Error ? error.message : '';
       if (/DESKTOP_(LEASE_EXPIRED|STOPPED|DISABLED)|ACCESS_REVOKED|REMOTE_DISABLED/.test(code)) {
-        this.fail(error); return;
+        this.fail(error);
+        return;
       }
-      this.publish({ controlling: lease?.controlling === true,
-        error: enabled ? remoteDesktopFailureKey(code) ?? 'busy' : null });
-      this.runtime.receive({ type: 'control', enabled: false });
+      this.publish({ error: enabled ? (remoteDesktopFailureKey(code) ?? 'busy') : null });
+    } finally {
+      if (lease === this.session.lease) {
+        this.publish({ controlPending: false });
+        this.syncControl();
+      }
     }
+  }
+  /** Buttons and actual keyboard/mouse forwarding use the same confirmed state.
+   * Menu focus only releases held keys; it does not revoke desktop control. */
+  private syncControl(): void {
+    const controlling =
+      this.state.ready &&
+      this.wantsControl &&
+      !this.state.controlPending &&
+      this.session.lease?.controlling === true;
+    if (controlling === this.state.controlling) return;
+    this.publish({ controlling });
+    this.runtime.receive({ type: 'control', enabled: controlling });
   }
   selectDisplay(displayId: string): void {
     if (
@@ -245,6 +273,7 @@ export class DesktopViewerController {
     this.runtime.receive({ type: 'fit' });
   }
   keys(codes: string[]): void {
+    if (!this.state.controlling) return;
     const events: DesktopInput[] = [
       ...codes.map((code) => ({ kind: 'key' as const, code, down: true })),
       ...codes
@@ -255,6 +284,7 @@ export class DesktopViewerController {
     this.runtime.receive({ type: 'events', events });
   }
   async clipboard(action: 'copy' | 'paste'): Promise<void> {
+    if (!this.state.controlling) throw new Error('DESKTOP_VIEW_ONLY');
     this.releaseInput();
     await this.api.clipboard(this.scope.generation, action);
   }
@@ -290,13 +320,8 @@ export class DesktopViewerController {
     try {
       const result = await this.session.heartbeat();
       if (epoch === this.epoch) {
-        if (result.controlling !== this.state.controlling) {
-          this.publish({ controlling: result.controlling });
-          this.runtime.receive({
-            type: 'control',
-            enabled: result.controlling && this.state.ready,
-          });
-        }
+        if (!result.controlling && this.state.controlling) this.wantsControl = false;
+        this.syncControl();
       }
     } catch (error) {
       if (epoch === this.epoch && !(error instanceof Error && error.message === 'INVOKE_TIMEOUT'))
@@ -366,14 +391,16 @@ export class DesktopViewerController {
         if (
           !this.streaming ||
           (transport !== 'video' && transport !== 'direct' && transport !== 'relay')
-        ) break;
+        )
+          break;
         this.publish({
           transport,
           latency:
             typeof message.latencyMs === 'number' &&
             Number.isFinite(message.latencyMs) &&
             message.latencyMs >= 0
-              ? message.latencyMs : null,
+              ? message.latencyMs
+              : null,
         });
         break;
       }
@@ -405,11 +432,9 @@ export class DesktopViewerController {
     }
   }
   private present(status: string): void {
-    const wasReady = this.state.ready;
     this.retryDelay = 1000;
     this.publish({ ready: true, status });
-    if (!wasReady)
-      this.runtime.receive({ type: 'control', enabled: this.session.lease?.controlling === true });
+    this.syncControl();
   }
   dispose(): void {
     this.cancel();

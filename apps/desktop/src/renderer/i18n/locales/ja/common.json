@@ -83,12 +83,15 @@
       "clear": "高画質",
       "resolution": "コンピュータの解像度",
       "clipboard": "テキストクリップボード",
-      "copy": "リモートのテキストをこのコンピュータにコピー",
-      "paste": "ローカルのテキストをリモートに貼り付け",
+      "copy": "リモートのテキストをコピー",
+      "paste": "リモートに貼り付け",
       "clipboardDone": "テキストを転送しました",
       "clipboardFailed": "テキストを転送できません。操作権限を確認し、16,384 文字以内にしてください。",
       "settingsFailed": "表示設定を変更できませんでした。",
       "inputHint": "画面をクリックして入力します。Ctrl+Alt+Esc でキーボードのフォーカスを解除し、Cmd/Ctrl+W でこのウィンドウを閉じます。",
+      "controlPending": "操作権限を取得中…",
+      "controlRequired": "表示のみです。クリップボードとデスクトップ操作を使うには操作権限を取得してください。",
+      "clipboardHint": "テキストのみ転送します。リモートで選択したテキストをコピーするか、このコンピュータのクリップボードをリモートの入力欄に貼り付けます。",
       "resolutionHint": "解像度の変更はリモートの実際のモニターに反映されます。"
     }
   },
@@ -3589,7 +3592,7 @@
         "allowInboundAria": "{{name}} に本機の操作を許可するか切り替え",
         "peerControlOff": "相手側が操作を許可していません",
         "masterOffHint": "先に上のメインスイッチをオンにしてください",
-        "controllingThisMac": "本機を操作中"
+        "controllingThisMac": "Cindy に接続中"
       },
       "toast": {
         "revoked": "このデバイスのアクセス権を撤回しました",
@@ -5657,9 +5660,9 @@
       "requestChanges": "修正を依頼",
       "planFeedbackPlaceholder": "フィードバック(任意)"
     },
-    "controlledBy": "{{name}} が操作中",
-    "controlledByMultiple": "{{count}} 台のデバイスが操作中",
-    "controlledTooltip": "同じアカウントでログイン中の別のデバイスがこの端末をリモート操作しています。アクセス権限を撤回できます。",
+    "controlledBy": "{{name}} が Cindy に接続中",
+    "controlledByMultiple": "{{count}} 台のデバイスが Cindy に接続中",
+    "controlledTooltip": "Cindy のセッションに接続しているデバイスです。この数はデスクトップのマウスやキーボードを操作している台数ではありません。アクセス権限を撤回できます。",
     "revokeAccess": "権限を撤回",
     "viewControllers": "表示",
     "collapseControlledNotice": "リモート操作の通知を折りたたむ",

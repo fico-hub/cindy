@@ -17,6 +17,9 @@ import { WindowControls } from '@/components/title-bar/WindowControls';
 import { useMacFullscreen } from '@/hooks/useMacFullscreen';
 import i18n from '@/i18n';
 import { DesktopViewerController, type ViewerSnapshot } from './viewerController';
+import { Select } from '@/components/ui/select';
+import { Button } from '@/components/ui/button';
+import { FormField } from '@/components/ui/form-field';
 
 /** A clean, standalone remote desktop surface. No App, router, agent or task providers. */
 export function RemoteDesktopViewerWindow() {
@@ -27,6 +30,7 @@ export function RemoteDesktopViewerWindow() {
     controller = useRef<DesktopViewerController | null>(null);
   const [state, setState] = useState<ViewerSnapshot | null>(null);
   const [settings, setSettings] = useState(false),
+    [selectOpen, setSelectOpen] = useState(false),
     [notice, setNotice] = useState<string | null>(null),
     [clipboardBusy, setClipboardBusy] = useState(false);
   const [modes, setModes] = useState<RemoteDesktopDisplayMode[]>([]);
@@ -38,6 +42,7 @@ export function RemoteDesktopViewerWindow() {
       generation.current = value.generation;
       if (!value.active) {
         setSettings(false);
+        setSelectOpen(false);
         setNotice(null);
         setModes([]);
         setClipboardBusy(false);
@@ -103,6 +108,10 @@ export function RemoteDesktopViewerWindow() {
         .then(setModes)
         .catch(() => setModes([]));
   };
+  const onSelectOpenChange = (open: boolean) => {
+    setSelectOpen(open);
+    if (open) controller.current?.releaseInput();
+  };
   const action = 'remote-viewer-action';
   const network = state?.ready && (
     <span className="remote-viewer-network">
@@ -124,6 +133,8 @@ export function RemoteDesktopViewerWindow() {
     <div className={`remote-viewer-window ${isFullscreen ? 'remote-viewer-fullscreen' : ''}`}>
       <header
         className="remote-viewer-toolbar"
+        data-settings-open={settings || undefined}
+        data-select-open={selectOpen || undefined}
         style={{ paddingLeft: isMac && !isFullscreen ? 82 : 12 }}
       >
         <Monitor size={16} />
@@ -142,21 +153,24 @@ export function RemoteDesktopViewerWindow() {
           </div>
         </div>
         {(state?.caps?.displays.length ?? 0) > 1 && (
-          <select
-            aria-label={t('remoteDesktop.display')}
-            value={state?.displayId}
-            onChange={(e) => controller.current?.selectDisplay(e.target.value)}
-          >
-            {state?.caps?.displays.map((display) => (
-              <option key={display.id} value={display.id}>
-                {display.name}
-              </option>
-            ))}
-          </select>
+          <Select
+            label={t('remoteDesktop.display')}
+            className="remote-viewer-display-select"
+            value={state?.displayId ?? ''}
+            options={
+              state?.caps?.displays.map((display) => ({
+                value: display.id,
+                label: display.name,
+              })) ?? []
+            }
+            onValueChange={(value) => controller.current?.selectDisplay(value)}
+            onOpenChange={onSelectOpenChange}
+          />
         )}
-        <button
+        <Button
+          variant="secondary"
           className={action}
-          disabled={!state?.ready || !state.caps?.canControl}
+          disabled={!state?.ready || !state.caps?.canControl || state.controlPending}
           title={t(
             state?.controlling ? 'remoteDesktop.releaseControl' : 'remoteDesktop.takeControl',
           )}
@@ -166,18 +180,20 @@ export function RemoteDesktopViewerWindow() {
           onClick={() => void controller.current?.setControl(!state?.controlling)}
         >
           {state?.controlling ? <MousePointer2 size={16} /> : <Eye size={16} />}
-        </button>
+        </Button>
         {state?.caps?.systemAudio && (
-          <button
+          <Button
+            variant="secondary"
             className={action}
             aria-label={t('remoteDesktop.viewer.sound')}
             aria-pressed={state.settings.audio}
             onClick={() => controller.current?.settings({ audio: !state.settings.audio })}
           >
             {state.settings.audio ? <Volume2 size={16} /> : <VolumeX size={16} />}
-          </button>
+          </Button>
         )}
-        <button
+        <Button
+          variant="secondary"
           className={action}
           aria-label={t(
             isFullscreen
@@ -187,23 +203,191 @@ export function RemoteDesktopViewerWindow() {
           onClick={() => void api.fullscreen()}
         >
           {isFullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="secondary"
           className={action}
           aria-label={t('remoteDesktop.viewer.settings')}
           aria-expanded={settings}
           onClick={toggleSettings}
         >
           <Settings2 size={16} />
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="secondary"
           className={action}
           aria-label={t('remoteDesktop.disconnect')}
           onClick={() => void api.close()}
         >
           <LogOut size={16} />
-        </button>
+        </Button>
         {!isMac && <WindowControls onClose={() => api.close()} />}
+        {settings && (
+          <aside className="remote-viewer-settings" aria-label={t('remoteDesktop.viewer.settings')}>
+            <div className="flex items-center justify-between">
+              <strong>{t('remoteDesktop.viewer.settings')}</strong>
+              <Button variant="secondary" className={action} onClick={() => setSettings(false)}>
+                {t('remoteDesktop.closePermissionGuide')}
+              </Button>
+            </div>
+            <Button
+              variant="secondary"
+              className={action}
+              onClick={() => controller.current?.fit()}
+            >
+              {t('remoteDesktop.fit')}
+            </Button>
+            {state?.caps?.videoSettings && (
+              <>
+                <FormField label={t('remoteDesktop.viewer.fps')} className="remote-viewer-field">
+                  {({ id }) => (
+                    <Select
+                      id={id}
+                      className="w-full"
+                      label={t('remoteDesktop.viewer.fps')}
+                      value={String(state.settings.fps)}
+                      options={[
+                        { value: '30', label: '30 fps' },
+                        { value: '60', label: '60 fps' },
+                      ]}
+                      onValueChange={(value) =>
+                        controller.current?.settings({ fps: Number(value) as 30 | 60 })
+                      }
+                      onOpenChange={onSelectOpenChange}
+                    />
+                  )}
+                </FormField>
+                <FormField
+                  label={t('remoteDesktop.viewer.quality')}
+                  className="remote-viewer-field"
+                >
+                  {({ id }) => (
+                    <Select
+                      id={id}
+                      className="w-full"
+                      label={t('remoteDesktop.viewer.quality')}
+                      value={String(state.settings.bitrate)}
+                      options={[0, 2000000, 8000000, 20000000].map((value, index) => ({
+                        value: String(value),
+                        label: t(
+                          `remoteDesktop.viewer.${['automatic', 'smooth', 'balanced', 'clear'][index]}`,
+                        ),
+                      }))}
+                      onValueChange={(value) =>
+                        controller.current?.settings({
+                          bitrate: Number(value) as 0 | 2000000 | 8000000 | 20000000,
+                        })
+                      }
+                      onOpenChange={onSelectOpenChange}
+                    />
+                  )}
+                </FormField>
+              </>
+            )}
+            {modes.length > 0 && (
+              <FormField
+                label={t('remoteDesktop.viewer.resolution')}
+                className="remote-viewer-field"
+              >
+                {({ id }) => (
+                  <Select
+                    id={id}
+                    className="w-full"
+                    label={t('remoteDesktop.viewer.resolution')}
+                    disabled={!state?.controlling || state.controlPending}
+                    value={modes.find((mode) => mode.current)?.id ?? ''}
+                    options={modes.map((mode) => ({
+                      value: mode.id,
+                      label: `${mode.width} × ${mode.height}`,
+                    }))}
+                    onValueChange={(value) =>
+                      void controller.current
+                        ?.resolution(value)
+                        .then(() => setModes([]))
+                        .catch(() => setNotice(t('remoteDesktop.viewer.settingsFailed')))
+                    }
+                    onOpenChange={onSelectOpenChange}
+                  />
+                )}
+              </FormField>
+            )}
+            {!state?.controlling && (
+              <div className="flex flex-col gap-2" role="status">
+                <p>
+                  {t(
+                    !state?.ready
+                      ? 'remoteDesktop.connecting'
+                      : state.controlPending
+                        ? 'remoteDesktop.viewer.controlPending'
+                        : 'remoteDesktop.viewer.controlRequired',
+                  )}
+                </p>
+                <Button
+                  variant="secondary"
+                  disabled={!state?.ready || !state.caps?.canControl || state.controlPending}
+                  loading={state?.controlPending}
+                  onClick={() => void controller.current?.setControl(true)}
+                >
+                  {t('remoteDesktop.takeControl')}
+                </Button>
+              </div>
+            )}
+            {state?.caps?.clipboardText && (
+              <div className="flex flex-col gap-2">
+                <span className="flex items-center gap-2">
+                  <Clipboard size={16} />
+                  {t('remoteDesktop.viewer.clipboard')}
+                </span>
+                <p>{t('remoteDesktop.viewer.clipboardHint')}</p>
+                <Button
+                  variant="secondary"
+                  className={action}
+                  disabled={!state.controlling || state.controlPending || clipboardBusy}
+                  onClick={() => void clipboard('copy')}
+                >
+                  {t('remoteDesktop.viewer.copy')}
+                </Button>
+                <Button
+                  variant="secondary"
+                  className={action}
+                  disabled={!state.controlling || state.controlPending || clipboardBusy}
+                  onClick={() => void clipboard('paste')}
+                >
+                  {t('remoteDesktop.viewer.paste')}
+                </Button>
+              </div>
+            )}
+            <Button
+              variant="secondary"
+              className={action}
+              disabled={!state?.controlling || state.controlPending}
+              onClick={() =>
+                controller.current?.keys(
+                  state?.caps?.platform === 'darwin' ? ['MetaLeft', 'F3'] : ['MetaLeft', 'KeyD'],
+                )
+              }
+            >
+              {t('remoteDesktop.showDesktop')}
+            </Button>
+            <Button
+              variant="secondary"
+              className={action}
+              disabled={!state?.controlling || state.controlPending}
+              onClick={() =>
+                controller.current?.keys(
+                  state?.caps?.platform === 'darwin'
+                    ? ['ControlLeft', 'ArrowUp']
+                    : ['MetaLeft', 'Tab'],
+                )
+              }
+            >
+              {t('remoteDesktop.allWindows')}
+            </Button>
+            <p>{t('remoteDesktop.viewer.inputHint')}</p>
+            {state?.caps?.displayModes && <p>{t('remoteDesktop.viewer.resolutionHint')}</p>}
+            {notice && <p role="status">{notice}</p>}
+          </aside>
+        )}
       </header>
       <div ref={root} className="remote-viewer-content">
         <div id="stage" tabIndex={0} aria-label={t('remoteDesktop.title')}>
@@ -222,11 +406,11 @@ export function RemoteDesktopViewerWindow() {
           aria-label={t('remoteDesktop.viewer.inputHint')}
         />
         <div id="mouse-buttons" hidden>
-          <button id="mouse-left" />
-          <button id="mouse-right" />
-          <button id="mouse-wheel">
+          <Button variant="secondary" id="mouse-left" />
+          <Button variant="secondary" id="mouse-right" />
+          <Button variant="secondary" id="mouse-wheel">
             <span id="mouse-wheel-grip" />
-          </button>
+          </Button>
         </div>
         {(!state?.ready || state?.error || state?.status === 'reconnecting') && (
           <div className="remote-viewer-connection" role="status">
@@ -244,143 +428,37 @@ export function RemoteDesktopViewerWindow() {
                   )}
             </span>
             {state?.error && (
-              <button className={action} onClick={() => controller.current?.retry()}>
+              <Button
+                variant="secondary"
+                className={action}
+                onClick={() => controller.current?.retry()}
+              >
                 {t(
                   state.error === 'connectionBusy' && state.caps?.connectionTakeover
                     ? 'remoteDesktop.takeoverConnection'
                     : 'remoteDesktop.connect',
                 )}
-              </button>
+              </Button>
             )}
-            {state?.error === 'permissionHint' && <button className={action} onClick={() => {
-              void controller.current?.permissionGuide().then(() => setNotice(t('remoteDesktop.permissionGuideOpened')))
-                .catch(() => setNotice(t('remoteDesktop.permissionActionFailed')));
-              setSettings(true);
-            }}>{t('remoteDesktop.openGuideOnComputer')}</button>}
-          </div>
-        )}
-        {isFullscreen && network && (
-          <div className="remote-viewer-network-overlay">{network}</div>
-        )}
-      </div>
-      {settings && (
-        <aside className="remote-viewer-settings" aria-label={t('remoteDesktop.viewer.settings')}>
-          <div className="flex items-center justify-between">
-            <strong>{t('remoteDesktop.viewer.settings')}</strong>
-            <button className={action} onClick={() => setSettings(false)}>
-              {t('remoteDesktop.closePermissionGuide')}
-            </button>
-          </div>
-          <button className={action} onClick={() => controller.current?.fit()}>
-            {t('remoteDesktop.fit')}
-          </button>
-          {state?.caps?.videoSettings && (
-            <>
-              <label>
-                {t('remoteDesktop.viewer.fps')}
-                <select
-                  value={state.settings.fps}
-                  onChange={(e) =>
-                    controller.current?.settings({ fps: Number(e.target.value) as 30 | 60 })
-                  }
-                >
-                  <option value={30}>30 fps</option>
-                  <option value={60}>60 fps</option>
-                </select>
-              </label>
-              <label>
-                {t('remoteDesktop.viewer.quality')}
-                <select
-                  value={state.settings.bitrate}
-                  onChange={(e) =>
-                    controller.current?.settings({
-                      bitrate: Number(e.target.value) as 0 | 2000000 | 8000000 | 20000000,
-                    })
-                  }
-                >
-                  {[0, 2000000, 8000000, 20000000].map((value, index) => (
-                    <option key={value} value={value}>
-                      {t(
-                        `remoteDesktop.viewer.${['automatic', 'smooth', 'balanced', 'clear'][index]}`,
-                      )}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </>
-          )}
-          {modes.length > 0 && (
-            <label>
-              {t('remoteDesktop.viewer.resolution')}
-              <select
-                disabled={!state?.controlling}
-                value={modes.find((mode) => mode.current)?.id ?? ''}
-                onChange={(e) =>
+            {state?.error === 'permissionHint' && (
+              <Button
+                variant="secondary"
+                className={action}
+                onClick={() => {
                   void controller.current
-                    ?.resolution(e.target.value)
-                    .then(() => setModes([]))
-                    .catch(() => setNotice(t('remoteDesktop.viewer.settingsFailed')))
-                }
+                    ?.permissionGuide()
+                    .then(() => setNotice(t('remoteDesktop.permissionGuideOpened')))
+                    .catch(() => setNotice(t('remoteDesktop.permissionActionFailed')));
+                  setSettings(true);
+                }}
               >
-                {modes.map((mode) => (
-                  <option key={mode.id} value={mode.id}>
-                    {mode.width} × {mode.height}
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-          {state?.caps?.clipboardText && (
-            <div className="flex flex-col gap-2">
-              <span className="flex items-center gap-2">
-                <Clipboard size={16} />
-                {t('remoteDesktop.viewer.clipboard')}
-              </span>
-              <button
-                className={action}
-                disabled={!state.controlling || clipboardBusy}
-                onClick={() => void clipboard('copy')}
-              >
-                {t('remoteDesktop.viewer.copy')}
-              </button>
-              <button
-                className={action}
-                disabled={!state.controlling || clipboardBusy}
-                onClick={() => void clipboard('paste')}
-              >
-                {t('remoteDesktop.viewer.paste')}
-              </button>
-            </div>
-          )}
-          <button
-            className={action}
-            disabled={!state?.controlling}
-            onClick={() =>
-              controller.current?.keys(
-                state?.caps?.platform === 'darwin' ? ['MetaLeft', 'F3'] : ['MetaLeft', 'KeyD'],
-              )
-            }
-          >
-            {t('remoteDesktop.showDesktop')}
-          </button>
-          <button
-            className={action}
-            disabled={!state?.controlling}
-            onClick={() =>
-              controller.current?.keys(
-                state?.caps?.platform === 'darwin'
-                  ? ['ControlLeft', 'ArrowUp']
-                  : ['MetaLeft', 'Tab'],
-              )
-            }
-          >
-            {t('remoteDesktop.allWindows')}
-          </button>
-          <p>{t('remoteDesktop.viewer.inputHint')}</p>
-          {state?.caps?.displayModes && <p>{t('remoteDesktop.viewer.resolutionHint')}</p>}
-          {notice && <p role="status">{notice}</p>}
-        </aside>
-      )}
+                {t('remoteDesktop.openGuideOnComputer')}
+              </Button>
+            )}
+          </div>
+        )}
+        {isFullscreen && network && <div className="remote-viewer-network-overlay">{network}</div>}
+      </div>
     </div>
   );
 }

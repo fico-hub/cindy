@@ -23,6 +23,7 @@ try {
   const errors = [];
   viewer.on('pageerror', (e) => errors.push(e.message));
   const requests = [];
+  let controlling = false;
   await viewer.exposeFunction('viewerRequest', async (request) => {
     requests.push(request.op);
     switch (request.op) {
@@ -35,7 +36,15 @@ try {
           automaticReconnect: true,
           videoSettings: true,
           platform: 'win32',
-          displays: [{ id: 'one', name: 'Test display', width: 1280, height: 720 }],
+          displays: [
+            {
+              id: 'one',
+              name: 'PG32UCDP — a long monitor name that must stay inside the selector',
+              width: 1280,
+              height: 720,
+            },
+            { id: 'two', name: 'Second monitor', width: 1920, height: 1080 },
+          ],
         };
       case 'start':
         return {
@@ -44,9 +53,10 @@ try {
           display: { id: 'one', width: 1280, height: 720 },
         };
       case 'control':
+        controlling = request.enabled;
         return { controlling: request.enabled };
       case 'heartbeat':
-        return { controlling: true };
+        return { controlling };
       case 'frame':
         return { jpeg: null };
       case 'stop':
@@ -178,13 +188,47 @@ try {
   await host.waitForFunction(() =>
     window.inputs.some((event) => event.kind === 'text' && event.text.includes('d')),
   );
-  await viewer.screenshot({ path: path.join(artifacts, 'light.png') });
+  const checkSelect = async (trigger, screenshot) => {
+    const control = await trigger.boundingBox();
+    await trigger.click();
+    const menu = viewer.getByRole('listbox');
+    await menu.waitFor();
+    const panel = await menu.boundingBox();
+    const viewport = viewer.viewportSize();
+    assert(control && panel && viewport);
+    assert(Math.abs(control.width - panel.width) < 1, 'menu matches its trigger width');
+    assert(
+      panel.x >= 0 && panel.x + panel.width <= viewport.width,
+      'menu stays within horizontal bounds',
+    );
+    assert(
+      panel.y >= 0 && panel.y + panel.height <= viewport.height,
+      'menu stays within vertical bounds',
+    );
+    assert(
+      await menu.evaluate((element) => element.scrollWidth <= element.clientWidth),
+      'long options wrap inside the menu',
+    );
+    await viewer.keyboard.press('ArrowDown');
+    await viewer.screenshot({ animations: 'disabled', path: path.join(artifacts, screenshot) });
+    await viewer.keyboard.press('Escape');
+    await menu.waitFor({ state: 'hidden' });
+    await viewer.waitForFunction(() => document.activeElement?.getAttribute('role') === 'combobox');
+  };
+  await checkSelect(viewer.getByRole('combobox'), 'display-select.png');
+  assert(
+    !(await host.evaluate(() => window.inputs)).some(
+      (event) => event.kind === 'key' && ['ArrowDown', 'Escape'].includes(event.code),
+    ),
+    'menu keyboard navigation never reaches the remote computer',
+  );
+  await viewer.screenshot({ animations: 'disabled', path: path.join(artifacts, 'light.png') });
   await viewer.evaluate(async () => {
     const { themeService } = await import('/themes/theme-service.ts');
     const { cindyDark } = await import('/themes/builtin/cindy-dark.ts');
     themeService.applyTheme(cindyDark);
   });
-  await viewer.screenshot({ path: path.join(artifacts, 'dark.png') });
+  await viewer.screenshot({ animations: 'disabled', path: path.join(artifacts, 'dark.png') });
   await host.evaluate(() => window.peer.close());
   await viewer.waitForFunction(
     () =>
@@ -199,7 +243,10 @@ try {
     0,
     'screenshots do not inherit video RTT',
   );
-  await viewer.screenshot({ path: path.join(artifacts, 'screenshot-relay.png') });
+  await viewer.screenshot({
+    animations: 'disabled',
+    path: path.join(artifacts, 'screenshot-relay.png'),
+  });
   await viewer.waitForFunction(
     () => document.querySelector('.remote-viewer-network')?.textContent.includes('Direct'),
     {},
@@ -219,13 +266,38 @@ try {
     !/\?{2,}|\uFFFD/u.test(await settings.innerText()),
     'Chinese settings must remain readable',
   );
-  await viewer.screenshot({ path: path.join(artifacts, 'settings-zh-dark.png') });
+  await viewer.screenshot({
+    animations: 'disabled',
+    path: path.join(artifacts, 'settings-zh-dark.png'),
+  });
+  await checkSelect(settings.getByRole('combobox').first(), 'fps-select-zh-dark.png');
   await viewer.evaluate(async () => {
     const { themeService } = await import('/themes/theme-service.ts');
     const { cindyLight } = await import('/themes/builtin/cindy-light.ts');
     themeService.applyTheme(cindyLight);
   });
-  await viewer.screenshot({ path: path.join(artifacts, 'settings-zh-light.png') });
+  await viewer.screenshot({
+    animations: 'disabled',
+    path: path.join(artifacts, 'settings-zh-light.png'),
+  });
+  await checkSelect(settings.getByRole('combobox').nth(1), 'quality-select-zh-light.png');
+  const releaseLabel = await viewer.evaluate(async () =>
+    (await import('/i18n/index.ts')).default.t('remoteDesktop.releaseControl'),
+  );
+  await viewer.getByRole('button', { name: releaseLabel, exact: true }).click();
+  const copyButton = settings.getByRole('button', { name: '复制远端文字', exact: true });
+  assert(await copyButton.isDisabled(), 'view-only actions explain why control is required');
+  await settings.getByText('当前仅查看，取得控制权后可使用剪贴板和桌面操作。').waitFor();
+  const takeLabel = await viewer.evaluate(async () =>
+    (await import('/i18n/index.ts')).default.t('remoteDesktop.takeControl'),
+  );
+  await settings.getByRole('button', { name: takeLabel, exact: true }).click();
+  await viewer.waitForFunction(() => {
+    const button = [...document.querySelectorAll('aside button')].find(
+      (item) => item.textContent === '复制远端文字',
+    );
+    return button && !button.disabled;
+  });
   assert.equal(
     requests.filter((op) => op === 'start').length,
     1,
@@ -242,7 +314,23 @@ try {
     bounds && bounds.x >= 0 && bounds.x + bounds.width <= 720,
     'transport remains visible at minimum window width',
   );
-  await viewer.screenshot({ path: path.join(artifacts, 'transport-compact.png') });
+  await viewer.screenshot({
+    animations: 'disabled',
+    path: path.join(artifacts, 'transport-compact.png'),
+  });
+  await viewer.setViewportSize({ width: 480, height: 420 });
+  const toolbar = await viewer.locator('header').boundingBox();
+  const settingsBounds = await settings.boundingBox();
+  assert(
+    await viewer.locator('header').evaluate((element) => element.scrollWidth <= innerWidth),
+    'wrapped toolbar does not overflow',
+  );
+  assert(
+    toolbar && settingsBounds && settingsBounds.y >= toolbar.y + toolbar.height,
+    'settings follow the wrapped toolbar',
+  );
+  await checkSelect(settings.getByRole('combobox').first(), 'fps-select-narrow.png');
+  await viewer.setViewportSize({ width: 720, height: 420 });
   if (controllerPlatform === 'darwin') {
     await viewer.getByRole('button', { name: '关闭', exact: true }).click();
     await viewer.locator('#stage').click({ position: { x: 100, y: 100 } });
@@ -252,8 +340,27 @@ try {
     await viewer.waitForFunction(
       () => document.querySelector('.remote-viewer-toolbar').getBoundingClientRect().bottom <= 9,
     );
-    assert((await overlay.innerText()).includes('电脑直连'), 'fullscreen retains the transport indicator');
-    await viewer.screenshot({ path: path.join(artifacts, 'transport-fullscreen.png') });
+    assert(
+      (await overlay.innerText()).includes('电脑直连'),
+      'fullscreen retains the transport indicator',
+    );
+    await viewer.screenshot({
+      animations: 'disabled',
+      path: path.join(artifacts, 'transport-fullscreen.png'),
+    });
+    await viewer.mouse.move(400, 2);
+    await viewer.waitForFunction(
+      () => document.querySelector('header').getBoundingClientRect().top >= -1,
+    );
+    const displaySelect = viewer.getByRole('combobox');
+    await displaySelect.click();
+    await viewer.getByRole('listbox').hover();
+    assert(
+      (await viewer.locator('header').boundingBox()).y >= -1,
+      'portalled menu keeps the fullscreen toolbar visible',
+    );
+    await viewer.keyboard.press('Escape');
+    await viewer.getByRole('listbox').waitFor({ state: 'hidden' });
   }
   assert.deepEqual(errors, []);
   console.log(
