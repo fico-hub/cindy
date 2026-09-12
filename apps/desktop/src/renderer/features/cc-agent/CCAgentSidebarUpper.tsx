@@ -49,6 +49,7 @@ import { cn } from '@/lib/utils';
 import { toast } from '@/lib/toast';
 import { isDataOwnerPushCurrent } from '@/contexts/dataOwnerGeneration';
 import { useCCSessions } from '@/hooks/useCCSessions';
+import { useRecentWorkdirs } from '@/hooks/useRecentWorkdirs';
 import { refreshPendingAlerts, usePendingAlertAttention } from '@/hooks/usePendingAlertAttention';
 import { useAppShortcut } from '@/hooks/useAppShortcut';
 import { useModifierHold } from '@/hooks/useModifierHold';
@@ -128,11 +129,15 @@ import { useSessionLifecycleActions } from './hooks/useSessionLifecycleActions';
 import { useSidebarFilter, type UseSidebarFilterReturn } from './hooks/useSidebarFilter';
 import { useHiddenProjects, type UseHiddenProjectsReturn } from './hooks/useHiddenProjects';
 import {
+  buildPersistentLocalProjects,
+  filterPersistentLocalProjectsByLastActivity,
   normalizeProjectKey,
   normalizeWorkingDir,
   projectIdentityKey,
   projectIdentityKeyForSession,
   pinnedSessionIdsInDisplayOrder,
+  persistentProjectMatchesVendor,
+  type PersistentLocalProject,
   type ProjectNode,
 } from './lib/projectGrouping';
 import { projectDisplayLabelWithMachine } from './lib/remoteProjectIdentity';
@@ -142,6 +147,7 @@ import {
 } from './lib/projectBulkArchiveAction';
 import { sessionActivityMs } from './lib/dateSessionGrouping';
 import { matchesSidebarSessionStatus } from './lib/sidebarSessionStatusFilter';
+import { observeSidebarTaskChanges } from './lib/sidebarTaskObserver';
 import { sortProjectsForSidebar, sortSessionsForSidebar } from './lib/sidebarProjectSorting';
 import { resolveDisplayedProjectOrder } from '@cindy/maker-shared/project-order-sync';
 import {
@@ -180,7 +186,11 @@ import {
   type AutomationScheduleSessionInfo,
   type AutomationSessionGroup,
 } from './lib/automationSidebarGrouping';
-import { getSessionDeviceId } from '@/features/device-link/remoteProjectsStore';
+import {
+  getSessionDeviceId,
+  remoteProjectsStore,
+  useRemoteScheduleIndex,
+} from '@/features/device-link/remoteProjectsStore';
 import {
   getRemoteSessionActivity,
   useRemoteSessionActivity,
@@ -222,7 +232,9 @@ import {
 } from './hooks/helpers/sidebarFilterCore';
 import {
   activePinnedSidebarEntryIds,
+  buildPinnedSidebarRank,
   pinnedProjectEntryId,
+  pinnedSidebarEntryComparisonKey,
   projectKeyFromPinnedEntryId,
 } from './lib/pinnedSidebarOrder';
 import { createLogger } from '@/lib/logger';
@@ -416,7 +428,25 @@ export function CCAgentSidebarUpper() {
     [allSessionsForAttention, remoteProjectSessions, selectedMachineId],
   );
   const projectAliases = useProjectAliases();
-  const searchProjectGroups = useProjectGroups(searchProjectSessions, projectAliases.aliases);
+  const { entries: recentWorkdirs } = useRecentWorkdirs();
+  const persistentLocalProjects = useMemo<PersistentLocalProject[]>(
+    () => buildPersistentLocalProjects(recentWorkdirs, allSessionsForAttention, localPlatform),
+    [recentWorkdirs, allSessionsForAttention, localPlatform],
+  );
+  const searchPersistentLocalProjects = useMemo(
+    () =>
+      selectedMachineId === MACHINE_ALL || selectedMachineId.includes(MACHINE_LOCAL)
+        ? persistentLocalProjects
+        : [],
+    [persistentLocalProjects, selectedMachineId],
+  );
+  const searchProjectGroups = useProjectGroups(
+    searchProjectSessions,
+    projectAliases.aliases,
+    false,
+    searchPersistentLocalProjects,
+    localPlatform,
+  );
   const restorableSelectionProjectKeys = useMemo(
     () => new Set(searchProjectGroups.projects.map((project) => project.projectKey)),
     [searchProjectGroups.projects],
@@ -464,6 +494,7 @@ export function CCAgentSidebarUpper() {
   const activeSessionId = orcaMatch?.params.sessionId ?? match?.params.sessionId;
   const filesSessionId = filesMatch?.params.sessionId;
   const scheduleSessionIndex = usePublishedAutomationScheduleSessionIndex();
+  const remoteScheduleIndex = useRemoteScheduleIndex();
   // 侧栏右侧 urgent 红点的"额外"来源:定时任务未读且失败(status != 'success')。
   // sessionAttentionStore 只跟踪 chat 内 attention;schedule 未读通过 sidebarNotifications
   // 合并进 hasAttentionNotification,但 attentionKind 缺失导致默认走绿(见 SessionItem
@@ -471,11 +502,11 @@ export function CCAgentSidebarUpper() {
   // 把它们提到 urgent 红档,避免"失败的 automation 被涂成 Completed"的误导。
   const unreadFailedScheduleSessionIds = useMemo(() => {
     const next = new Set<string>();
-    for (const [sessionId, info] of scheduleSessionIndex) {
+    for (const [sessionId, info] of [...scheduleSessionIndex, ...remoteScheduleIndex]) {
       if (info.hasUnreadFailedRun) next.add(sessionId);
     }
     return next;
-  }, [scheduleSessionIndex]);
+  }, [scheduleSessionIndex, remoteScheduleIndex]);
   const navigate = useNavigate();
 
   // Workdir-browse mode (skillhub Market sidebar pattern). When the user
@@ -561,6 +592,7 @@ export function CCAgentSidebarUpper() {
    * 不限定容器:展开态与 rail 折叠态是两个不同组件,扫整个 document 才能两种形态
    * 都覆盖。只送键盘需要的三个字段,不整份 session 过 IPC。 */
   const publishedTaskKeyRef = useRef<string>('');
+  const sidebarRootRef = useRef<HTMLDivElement>(null);
   const publishSidebarTasks = useCallback(() => {
     if (isSecondaryWindow()) return;
     const renderedIds = getVisibleSidebarSessionIds();
@@ -569,8 +601,9 @@ export function CCAgentSidebarUpper() {
     // 否则 AG 键还会打开上一份已经看不见的任务。完整活动表仍要带上,最近发送
     // / 优先 / 自定义不能被折叠裁掉。
     const catalogSessions = sessionsWithRemote.filter((session) => session.status === 'active');
+    const catalogSessionIds = new Set(catalogSessions.map((session) => session.id));
     const visibleProjection = visibleSessionsWithRemote
-      .filter((session) => !catalogSessions.some((active) => active.id === session.id))
+      .filter((session) => !catalogSessionIds.has(session.id))
       .slice(0, WORKLOUDER_CODEX_AGENT_SLOT_COUNT);
     const remainingCatalogSlots = Math.max(0, 100 - visibleProjection.length);
     const tasks = [...visibleProjection, ...catalogSessions.slice(0, remainingCatalogSlots)].map(
@@ -603,26 +636,9 @@ export function CCAgentSidebarUpper() {
     // 展开/折叠项目、分组重排这类纯 UI 变化不会动 visibleSessionsWithRemote,
     // 但会改渲染顺序 —— 跟序号徽标同样的做法,靠 DOM 变化跟住。
     if (typeof MutationObserver === 'undefined' || typeof document === 'undefined') return;
-    // 观察面是整个 document(展开态与 rail 是两个组件),流式输出时 mutation 会非常
-    // 密集 —— 每帧最多重算一次,别让它变成热路径。
-    let frame: number | null = null;
-    const observer = new MutationObserver(() => {
-      if (frame !== null) return;
-      frame = requestAnimationFrame(() => {
-        frame = null;
-        publishSidebarTasks();
-      });
-    });
-    observer.observe(document.body, {
-      childList: true,
-      subtree: true,
-      attributes: true,
-      attributeFilter: ['class', 'hidden', 'aria-hidden'],
-    });
-    return () => {
-      observer.disconnect();
-      if (frame !== null) cancelAnimationFrame(frame);
-    };
+    const sidebarRoot = sidebarRootRef.current;
+    if (!sidebarRoot) return;
+    return observeSidebarTaskChanges(sidebarRoot, publishSidebarTasks);
   }, [publishSidebarTasks]);
 
   // rail 未读集与展开态(ExpandedView.sidebarNotifications)同口径:把"定时任务有未读运行"的
@@ -630,12 +646,12 @@ export function CCAgentSidebarUpper() {
   // 完成未读(如重启后 attention store 还没填充)会丢绿点(codex review)。
   const railNotifications = useMemo(() => {
     const unread = new Set<string>();
-    for (const [sessionId, info] of scheduleSessionIndex) {
+    for (const [sessionId, info] of [...scheduleSessionIndex, ...remoteScheduleIndex]) {
       if (info.hasUnreadRun) unread.add(sessionId);
     }
     if (unread.size === 0) return attentionNotifications;
     return new Set([...attentionNotifications, ...unread]);
-  }, [attentionNotifications, scheduleSessionIndex]);
+  }, [attentionNotifications, scheduleSessionIndex, remoteScheduleIndex]);
 
   useOrcaWorkerAttentionWatcher(sessionsHook.sessions, activeSessionId);
 
@@ -651,15 +667,22 @@ export function CCAgentSidebarUpper() {
       const fullActivePinnedIds = activePinnedSidebarEntryIds(
         filter.manualPinnedOrder,
         pinnedSessionIds,
+        localPlatform,
       );
-      const baseOrder = normalizeManualPinnedOrder(filter.manualPinnedOrder, fullActivePinnedIds);
-      const merged = mergeVisibleReorder(baseOrder, visibleNewOrder);
+      const comparisonKey = (entryId: string) =>
+        pinnedSidebarEntryComparisonKey(entryId, localPlatform);
+      const baseOrder = normalizeManualPinnedOrder(
+        filter.manualPinnedOrder,
+        fullActivePinnedIds,
+        comparisonKey,
+      );
+      const merged = mergeVisibleReorder(baseOrder, visibleNewOrder, comparisonKey);
       void filter.setManualPinnedOrder(merged, fullActivePinnedIds, baseOrder).catch((err) => {
         log.warn('failed to persist rail pinned order', err);
         toast.error(t('ccAgent.sidebar.pinFailed'));
       });
     },
-    [sessionsHook.sessions, remoteProjectSessions, filter, t],
+    [sessionsHook.sessions, remoteProjectSessions, filter, localPlatform, t],
   );
 
   return (
@@ -669,7 +692,7 @@ export function CCAgentSidebarUpper() {
     // 路过几行热态就丢了,体感退回"每行都要重新等 500ms"(session-git-pr-context)。
     <Tooltip.Provider skipDelayDuration={1500}>
       <SessionAttentionUrgencyProvider urgentSessionIds={unreadFailedScheduleSessionIds}>
-        <div className="relative flex flex-1 flex-col overflow-hidden">
+        <div ref={sidebarRootRef} className="relative flex flex-1 flex-col overflow-hidden">
           {/* Expanded — fade out when collapsed.
           min-w-0 让内层跟着外层 aside 的实际宽度走，配合 SessionItem 里的
           `min-w-0 flex-1 truncate` 才能正确截断。原来写死 min-w-[260px] 是
@@ -723,6 +746,7 @@ export function CCAgentSidebarUpper() {
                 hiddenProjects={hiddenProjects}
                 projectAliases={projectAliases}
                 scheduleSessionIndex={scheduleSessionIndex}
+                persistentLocalProjects={persistentLocalProjects}
               />
             </div>
           </div>
@@ -772,6 +796,7 @@ interface ExpandedProps {
   hiddenProjects: UseHiddenProjectsReturn;
   projectAliases: ReturnType<typeof useProjectAliases>;
   scheduleSessionIndex: ReturnType<typeof usePublishedAutomationScheduleSessionIndex>;
+  persistentLocalProjects: readonly PersistentLocalProject[];
 }
 
 /** rail 未分类隐藏态的空列表(引用稳定,免得 lampScope 发布 effect 空转)。 */
@@ -802,6 +827,7 @@ function ExpandedView({
   hiddenProjects,
   projectAliases,
   scheduleSessionIndex,
+  persistentLocalProjects,
 }: ExpandedProps) {
   const { t, i18n } = useTranslation();
   const localPlatform = window.electronAPI.platform;
@@ -1074,15 +1100,16 @@ function ExpandedView({
       onSessionNeedsReply: handleSessionNeedsReply,
     },
   );
+  const remoteScheduleIndex = useRemoteScheduleIndex();
   const attentionKinds = useSessionAttentionKinds();
   const urgentSet = useSessionAttentionUrgencySet();
   const unreadScheduleSessionIds = useMemo(() => {
     const next = new Set<string>();
-    for (const [sessionId, info] of scheduleSessionIndex) {
+    for (const [sessionId, info] of [...scheduleSessionIndex, ...remoteScheduleIndex]) {
       if (info.hasUnreadRun) next.add(sessionId);
     }
     return next;
-  }, [scheduleSessionIndex]);
+  }, [scheduleSessionIndex, remoteScheduleIndex]);
   const sidebarNotifications = useMemo(() => {
     if (unreadScheduleSessionIds.size === 0) return notifications;
     return new Set([...notifications, ...unreadScheduleSessionIds]);
@@ -1091,16 +1118,18 @@ function ExpandedView({
 
   const markAutomationSessionRunsRead = useCallback(
     (sessionId: string) => {
-      const info = scheduleSessionIndex.get(sessionId);
+      const info =
+        remoteProjectsStore.getSessionScheduleInfo(sessionId) ??
+        scheduleSessionIndex.get(sessionId);
       // 成功进入即已读；历史失败在任务内容实际展示时确认，保留横幅、只清红点。
       const successUnreadRunIds = info ? unreadSuccessScheduleRunIds(info) : [];
       if (successUnreadRunIds.length === 0) return;
       // …AndSync:settle 后无条件触发 renderer 本地刷新。跨实例场景下这些 runId
       // 可能在 DB 里早已被另一实例标为已读(main no-op 且不广播),没有本地刷新
       // 通道的话,这里的过期未读快照永远等不到事件、红点无法自愈。
-      void markScheduleRunsReadAndSync(successUnreadRunIds);
+      void markScheduleRunsReadAndSync(successUnreadRunIds, getSessionDeviceId(sessionId));
     },
-    [scheduleSessionIndex],
+    [scheduleSessionIndex, remoteScheduleIndex],
   );
   const orcaLeadWorkerMap = useOrcaLeadWorkerMap(sessions);
   const effectiveRunningSessionIds = useMemo(() => {
@@ -1185,6 +1214,13 @@ function ExpandedView({
   // 机器切换栏选中机器后整体过滤:本机 → 只本地会话;远程 → 只该机器会话。
   // 过滤在源头做,下游 grouping / pinned / projects / dialogues / date-grouped / search 自动继承。
   const selectedMachineId = useEffectiveSelectedMachineId();
+  const visiblePersistentLocalProjects = useMemo(
+    () =>
+      selectedMachineId === MACHINE_ALL || selectedMachineId.includes(MACHINE_LOCAL)
+        ? persistentLocalProjects
+        : [],
+    [persistentLocalProjects, selectedMachineId],
+  );
   const localHostProjectOrder = useLocalHostProjectOrder({
     custom: filter.projectOrder === 'custom',
     keys: filter.manualProjectOrder,
@@ -1367,26 +1403,58 @@ function ExpandedView({
     if (cutoff === null) return sidebarSessions;
     return sidebarSessions.filter((s) => sessionActivityMs(s) >= cutoff);
   }, [sidebarSessions, filter.lastActivity]);
+  const activityFilteredPersistentLocalProjects = useMemo(
+    () =>
+      filterPersistentLocalProjectsByLastActivity(
+        visiblePersistentLocalProjects,
+        cutoffForLastActivity(filter.lastActivity),
+      ),
+    [filter.lastActivity, visiblePersistentLocalProjects],
+  );
 
   /* ---- Grouping & collapse ---- */
-  const allGroups = useProjectGroups(sidebarSessions, projectAliases.aliases);
-  const groups = useProjectGroups(activityFilteredSessions, projectAliases.aliases);
+  const allGroups = useProjectGroups(
+    sidebarSessions,
+    projectAliases.aliases,
+    false,
+    visiblePersistentLocalProjects,
+    localPlatform,
+  );
+  const groups = useProjectGroups(
+    activityFilteredSessions,
+    projectAliases.aliases,
+    false,
+    activityFilteredPersistentLocalProjects,
+    localPlatform,
+  );
   // 普通项目目录也需要保留「所有会话都已单独置顶」的项目身份，供用户继续
   // 从 ProjectNode 菜单置顶整个项目；实际项目子行在渲染前仍会排除已置顶会话。
   const groupsWithPinnedProjects = useProjectGroups(
     activityFilteredSessions,
     projectAliases.aliases,
     true,
+    activityFilteredPersistentLocalProjects,
+    localPlatform,
   );
   // Project pinning is independent from conversation pinning. This catalogue
   // keeps pinned conversations inside their project solely for project identity
   // and project-level actions; the normal project tree above remains deduped.
-  const allProjectGroups = useProjectGroups(sidebarSessions, projectAliases.aliases, true);
+  const allProjectGroups = useProjectGroups(
+    sidebarSessions,
+    projectAliases.aliases,
+    true,
+    visiblePersistentLocalProjects,
+    localPlatform,
+  );
   const activeWorkingDirs = useMemo(
     () => allProjectGroups.projects.map((p) => p.projectKey),
     [allProjectGroups.projects],
   );
-  const collapse = useCollapsedProjects(activeWorkingDirs, sidebarSettingsSnapshot.dataOwnerId);
+  const collapse = useCollapsedProjects(
+    activeWorkingDirs,
+    sidebarSettingsSnapshot.dataOwnerId,
+    localPlatform,
+  );
 
   // 项目过滤 GC 的「宇宙」用**全量**(不按机器过滤)项目键 —— 否则在某机器作用域下 remount,
   // gcProjectsAgainstActive 会把其它机器的项目从已保存的项目过滤里误删(它们只是被切换栏隐藏、
@@ -1396,7 +1464,13 @@ function ExpandedView({
     () => [...sessions, ...remoteProjectSessions].filter(passesOrcaAndStatus),
     [sessions, remoteProjectSessions, passesOrcaAndStatus],
   );
-  const projectUniverse = useProjectGroups(unfilteredProjectSessions, projectAliases.aliases, true);
+  const projectUniverse = useProjectGroups(
+    unfilteredProjectSessions,
+    projectAliases.aliases,
+    true,
+    persistentLocalProjects,
+    localPlatform,
+  );
   // Visibility is a negative overlay only. Keep the raw universe above for
   // filter/manual-order GC, and expose a separate catalogue to sidebar UI.
   const visibleProjectUniverse = useMemo(
@@ -1527,16 +1601,29 @@ function ExpandedView({
     }
     return keys;
   }, [filter.manualPinnedOrder]);
+  const pinnedProjectComparisonKeys = useMemo(
+    () => buildProjectKeyComparisonSet(pinnedProjectKeys, localPlatform),
+    [pinnedProjectKeys, localPlatform],
+  );
 
   const restorableProjectKeys = useMemo(
     () =>
       collectRestorableProjectKeys({
         sessions: scopedSidebarSessions,
+        persistentLocalProjects: visiblePersistentLocalProjects,
         lastActivityCutoff: cutoffForLastActivity(filter.lastActivity),
         pinnedProjectKeys,
         vendorPredicate,
+        localPlatform,
       }),
-    [filter.lastActivity, pinnedProjectKeys, scopedSidebarSessions, vendorPredicate],
+    [
+      filter.lastActivity,
+      localPlatform,
+      pinnedProjectKeys,
+      scopedSidebarSessions,
+      vendorPredicate,
+      visiblePersistentLocalProjects,
+    ],
   );
   const restorableProjectKeysRef = useRef(restorableProjectKeys);
   restorableProjectKeysRef.current = restorableProjectKeys;
@@ -1564,7 +1651,10 @@ function ExpandedView({
       ) {
         return [];
       }
-      if (!pinnedProjectKeys.has(project.projectKey)) return [];
+      if (
+        !projectKeyComparisonSetHas(pinnedProjectComparisonKeys, project.projectKey, localPlatform)
+      )
+        return [];
 
       return [
         {
@@ -1575,7 +1665,12 @@ function ExpandedView({
         },
       ];
     });
-  }, [allProjectGroups.projects, hiddenProjectComparisonKeys, localPlatform, pinnedProjectKeys]);
+  }, [
+    allProjectGroups.projects,
+    hiddenProjectComparisonKeys,
+    localPlatform,
+    pinnedProjectComparisonKeys,
+  ]);
 
   const visiblePinnedEntries = useMemo<PinnedSidebarEntry[]>(() => {
     const entries: PinnedSidebarEntry[] = [
@@ -1596,14 +1691,15 @@ function ExpandedView({
     // without a rank remain at the end in their existing pinnedAt order.
     const order = filter.manualPinnedOrder;
     if (order.length === 0) return entries;
-    const rank = new Map<string, number>();
-    order.forEach((id, idx) => rank.set(id, idx));
+    const rank = buildPinnedSidebarRank(order, localPlatform);
     return entries.sort((a, b) => {
-      const ra = rank.get(a.id) ?? Number.MAX_SAFE_INTEGER;
-      const rb = rank.get(b.id) ?? Number.MAX_SAFE_INTEGER;
+      const ra =
+        rank.get(pinnedSidebarEntryComparisonKey(a.id, localPlatform)) ?? Number.MAX_SAFE_INTEGER;
+      const rb =
+        rank.get(pinnedSidebarEntryComparisonKey(b.id, localPlatform)) ?? Number.MAX_SAFE_INTEGER;
       return ra - rb;
     });
-  }, [visiblePinnedSessions, visiblePinnedProjects, filter.manualPinnedOrder]);
+  }, [visiblePinnedSessions, visiblePinnedProjects, filter.manualPinnedOrder, localPlatform]);
 
   const visibleUnclassified = useMemo(() => {
     const sessions = vendorPredicate
@@ -1666,13 +1762,19 @@ function ExpandedView({
 
   const visibleProjectsWithVendor = useMemo(() => {
     const unpinnedProjects = visibleProjects.filter(
-      (project) => !pinnedProjectKeys.has(project.projectKey),
+      (project) =>
+        !projectKeyComparisonSetHas(pinnedProjectComparisonKeys, project.projectKey, localPlatform),
     );
     const projects = unpinnedProjects.flatMap((project) => {
       const matchingSessions = vendorPredicate
         ? project.sessions.filter(vendorPredicate)
         : project.sessions;
-      if (matchingSessions.length === 0) return [];
+      if (
+        matchingSessions.length === 0 &&
+        (!project.isPersistentLocal ||
+          (vendorPredicate && !persistentProjectMatchesVendor(project, filter.vendor)))
+      )
+        return [];
       return [
         {
           ...project,
@@ -1685,8 +1787,16 @@ function ExpandedView({
       hostProjectSort.sortBy,
       hostProjectSort.order,
       hostProjectSort.projectOrder,
+      localPlatform,
     );
-  }, [visibleProjects, pinnedProjectKeys, vendorPredicate, hostProjectSort]);
+  }, [
+    visibleProjects,
+    pinnedProjectComparisonKeys,
+    localPlatform,
+    vendorPredicate,
+    filter.vendor,
+    hostProjectSort,
+  ]);
 
   // 折叠 rail 没有独立的 Pinned 项目瓷砖，因此项目面板必须保留置顶项目，
   // 否则侧栏折叠后这些项目及其取消置顶入口都会完全不可达。
@@ -1695,7 +1805,12 @@ function ExpandedView({
       const matchingSessions = vendorPredicate
         ? project.sessions.filter(vendorPredicate)
         : project.sessions;
-      if (matchingSessions.length === 0) return [];
+      if (
+        matchingSessions.length === 0 &&
+        (!project.isPersistentLocal ||
+          (vendorPredicate && !persistentProjectMatchesVendor(project, filter.vendor)))
+      )
+        return [];
       return [
         {
           ...project,
@@ -1708,8 +1823,9 @@ function ExpandedView({
       hostProjectSort.sortBy,
       hostProjectSort.order,
       hostProjectSort.projectOrder,
+      localPlatform,
     );
-  }, [visibleProjects, vendorPredicate, hostProjectSort]);
+  }, [visibleProjects, vendorPredicate, filter.vendor, hostProjectSort, localPlatform]);
 
   /**
    * Pinned 拖拽落定回调。SortableList 给的是当前 visible（含 vendor / projectsFilter
@@ -1731,15 +1847,22 @@ function ExpandedView({
       const fullActivePinnedIds = activePinnedSidebarEntryIds(
         filter.manualPinnedOrder,
         pinnedSessionIds,
+        localPlatform,
       );
-      const baseOrder = normalizeManualPinnedOrder(filter.manualPinnedOrder, fullActivePinnedIds);
-      const merged = mergeVisibleReorder(baseOrder, visibleNewOrder);
+      const comparisonKey = (entryId: string) =>
+        pinnedSidebarEntryComparisonKey(entryId, localPlatform);
+      const baseOrder = normalizeManualPinnedOrder(
+        filter.manualPinnedOrder,
+        fullActivePinnedIds,
+        comparisonKey,
+      );
+      const merged = mergeVisibleReorder(baseOrder, visibleNewOrder, comparisonKey);
       void filter.setManualPinnedOrder(merged, fullActivePinnedIds, baseOrder).catch((err) => {
         log.warn('failed to persist pinned order', err);
         toast.error(t('ccAgent.sidebar.pinFailed'));
       });
     },
-    [sessions, remoteProjectSessions, filter, t],
+    [sessions, remoteProjectSessions, filter, localPlatform, t],
   );
 
   // D 期:按日期分组已删除(visibleDateSessions 随 DateGroupedSessionsSection 一并下线)。
@@ -3739,6 +3862,7 @@ function CollapsedView({
   const startingSessionIds = useStartingSessionIds(runningSessionIds);
   // 瓷砖未读点颜色按 attention kind(done 绿 / awaiting TapTap 蓝 / error 红);组件层
   // 取一次,renderItem 里查表(renderItem 非组件,不能 per-item 用 hook)。
+
   const attentionKinds = useSessionAttentionKinds();
   // 失败 automation urgency 集合 —— rail 瓷砖也要按此把 failed schedule 涂红,不能
   // 让"失败的定时任务"落到默认绿色 done tone(否则和 SessionItem 不一致,
@@ -4022,6 +4146,7 @@ function RailPanels({
   // onOpenChange —— openSection 离开 projects 就同步清掉菜单状态,否则组件常驻
   // (只是 return null),下次打开面板旧菜单会按旧坐标复现并引用旧项目(review)。
   // 与下方 showAllProjects 的复位同构。
+
   const attentionKinds = useSessionAttentionKinds();
   const urgentSet = useSessionAttentionUrgencySet();
   // 项目列表「显示全部」:面板关闭后复位(与 ProjectsSection 的段收起复位同语义)。
