@@ -382,6 +382,25 @@ const connect = async () => {
 };
 
 describe("remote desktop controls", () => {
+  it("retries an initial capabilities timeout normally on a legacy host", async () => {
+    const original = fixture.invoke.getMockImplementation()!;
+    let attempts = 0;
+    fixture.invoke.mockImplementation(async (...args) => {
+      if (args[2][0].op === "capabilities") {
+        attempts++;
+        if (attempts === 1)
+          throw Object.assign(new Error("timeout"), { code: "INVOKE_TIMEOUT" });
+        return { ...(await original(...args)), automaticReconnect: undefined };
+      }
+      return original(...args);
+    });
+    await connect();
+    await act(async () => vi.advanceTimersByTimeAsync(6000));
+    expect(host.textContent).not.toContain("remoteDesktop.upgrade");
+    expect(requests().filter((request) => request.op === "start")).toEqual([
+      { op: "start", displayId: "display" },
+    ]);
+  });
   it("keeps the video when a fallback input is rejected because control was released", async () => {
     await connect();
     const original = fixture.invoke.getMockImplementation()!;

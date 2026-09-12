@@ -33,6 +33,48 @@ function fixture() {
   };
 }
 describe('standalone remote viewer authority', () => {
+  it.each(['target', 'owner'])(
+    'does not block a new %s behind the old scope cleanup',
+    async (changed) => {
+      const current = fixture();
+      let resolve!: (value: unknown) => void;
+      let starts = 0;
+      current.request.mockImplementation(async (_target, request, check) => {
+        check();
+        if (request.op === 'start' && ++starts === 1)
+          return new Promise((done) => {
+            resolve = done;
+          });
+        return request.op === 'start'
+          ? { lease: 'new-lease', display: { id: 'screen' }, controlling: false }
+          : {};
+      });
+      const old = current.connection.request(current.connection.generation, {
+        op: 'start',
+        displayId: 'screen',
+      });
+      if (changed === 'owner') current.owner('account-b:2');
+      current.connection.bind({
+        deviceId: changed === 'target' ? 'computer-b' : 'computer-a',
+        name: 'New scope',
+      });
+      current.connection.setActive(true);
+      const latest = await current.connection.request(current.connection.generation, {
+        op: 'start',
+        displayId: 'screen',
+      });
+      expect(latest).toMatchObject({ ok: true, result: { lease: 'new-lease' } });
+      resolve({ lease: 'old-lease', display: { id: 'screen' }, controlling: false });
+      expect(await old).toEqual({ ok: false, code: 'DESKTOP_STOPPED' });
+      expect(current.connection.snapshot().active).toBe(true);
+      const stops = current.request.mock.calls.filter(([, request]) => request.op === 'stop');
+      if (changed === 'owner') expect(stops).toHaveLength(0);
+      else
+        expect(stops.map(([target, request]) => ({ target, request }))).toEqual([
+          { target: 'computer-a', request: { op: 'stop', lease: 'old-lease' } },
+        ]);
+    },
+  );
   it('view-only cannot read or write the local clipboard even when the renderer asks', async () => {
     const f = fixture();
     await f.connection.request(f.connection.generation, { op: 'start', displayId: 'screen' });

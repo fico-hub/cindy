@@ -70,6 +70,17 @@
     "directConnection": "Direct to computer",
     "videoRelay": "Server video relay",
     "screenshotRelay": "Server screenshot relay",
+    "shortcut": {
+      "open": "Open remote desktop",
+      "checking": "Checking remote desktop…",
+      "opening": "Opening remote desktop…",
+      "unavailable": "Remote desktop unavailable: {{reason}}",
+      "offline": "This computer is offline.",
+      "controlDisabled": "Allow control of this computer in Remote control settings.",
+      "unsupported": "This device does not support remote desktop.",
+      "checkFailed": "Could not check this computer. Hover again to retry.",
+      "noDisplay": "No available display on this computer."
+    },
     "viewer": {
       "settings": "Controls",
       "sound": "Sound",

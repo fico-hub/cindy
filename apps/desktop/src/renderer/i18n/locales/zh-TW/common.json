@@ -70,6 +70,17 @@
     "directConnection": "電腦直連",
     "videoRelay": "伺服器影片中繼",
     "screenshotRelay": "伺服器截圖中繼",
+    "shortcut": {
+      "open": "開啟遠端桌面",
+      "checking": "正在檢查遠端桌面…",
+      "opening": "正在開啟遠端桌面…",
+      "unavailable": "無法連線至遠端桌面：{{reason}}",
+      "offline": "這台電腦已離線。",
+      "controlDisabled": "請先在遠端控制設定中允許控制這台電腦。",
+      "unsupported": "此裝置不支援遠端桌面。",
+      "checkFailed": "無法確認電腦狀態，重新移入游標可重試。",
+      "noDisplay": "這台電腦沒有可用的顯示器。"
+    },
     "viewer": {
       "settings": "操作",
       "sound": "聲音",

@@ -683,12 +683,12 @@ export default function RemoteDesktopScreen() {
         if (current !== generation.current) return;
         mark("link-ready");
         const resuming = displayId ? false : recovery.current.resuming;
-        recovery.current.resuming = true;
         const { caps: result, lease: next } =
           await viewerSession.current!.connect({
             displayId: displayId ?? recovery.current.displayId,
             resume: resuming,
             takeover,
+            onStart: () => { recovery.current.resuming = true; },
             isCurrent: () => current === generation.current && alive.current,
             onCapabilities: (result) => {
               mark("capabilities");

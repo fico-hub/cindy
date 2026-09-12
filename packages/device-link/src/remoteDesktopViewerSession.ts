@@ -9,6 +9,16 @@ export type DesktopViewerRequest = <T>(
   beforeSend?: () => void,
 ) => Promise<T>;
 
+/** Local lifecycle callbacks do not change the remote wire protocol. */
+interface ViewerConnectOptions {
+  displayId?: string;
+  resume?: boolean;
+  takeover?: boolean;
+  isCurrent: () => boolean;
+  onCapabilities?: (caps: RemoteDesktopCapabilities) => void;
+  onStart?: () => void;
+}
+
 /** Viewer-side lease ownership, shared by native Mobile and the Desktop window.
  * A viewer never owns the shared Device Link: stop releases only its own lease.
  */
@@ -18,20 +28,41 @@ export class RemoteDesktopViewerSession {
   private controlPending: Promise<unknown> | null = null;
   private controlGeneration = 0;
   private releaseUnconfirmed = false;
+  private lifecycle: Promise<void> | null = null;
   constructor(private readonly request: DesktopViewerRequest) {}
 
   get lease(): RemoteDesktopLease | null {
     return this.active;
   }
 
-  async connect(options: {
-    displayId?: string;
-    resume?: boolean;
-    takeover?: boolean;
-    isCurrent: () => boolean;
-    onCapabilities?: (caps: RemoteDesktopCapabilities) => void;
-  }): Promise<{ caps: RemoteDesktopCapabilities; lease: RemoteDesktopLease }> {
+  connect(
+    options: ViewerConnectOptions,
+  ): Promise<{ caps: RemoteDesktopCapabilities; lease: RemoteDesktopLease }> {
     const generation = ++this.generation;
+    return this.serialize(() => this.startConnection(generation, options));
+  }
+
+  /** A cancelled start must finish retiring its lease before this viewer starts again. */
+  private serialize<T>(operation: () => Promise<T>): Promise<T> {
+    let pending: Promise<T>;
+    try {
+      // Idle teardown dispatches immediately, preserving Mobile's exit-lock ordering.
+      pending = this.lifecycle ? this.lifecycle.then(operation) : operation();
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    const settled = () => {
+      if (this.lifecycle === tail) this.lifecycle = null;
+    };
+    const tail = pending.then(settled, settled);
+    this.lifecycle = tail;
+    return pending;
+  }
+
+  private async startConnection(
+    generation: number,
+    options: ViewerConnectOptions,
+  ): Promise<{ caps: RemoteDesktopCapabilities; lease: RemoteDesktopLease }> {
     const check = () => {
       if (generation !== this.generation || !options.isCurrent())
         throw new Error("DESKTOP_VIDEO_STOPPED");
@@ -51,6 +82,7 @@ export class RemoteDesktopViewerSession {
     const display =
       caps.displays.find((d) => d.id === options.displayId) ?? caps.displays[0];
     if (!display) throw new Error("DESKTOP_DISPLAY_MISSING");
+    options.onStart?.();
     const lease = await this.request<RemoteDesktopLease>(
       {
         op: "start",
@@ -64,7 +96,7 @@ export class RemoteDesktopViewerSession {
       check,
     );
     if (generation !== this.generation || !options.isCurrent()) {
-      void this.request({ op: "stop", lease: lease.lease }).catch(() => {});
+      await this.request({ op: "stop", lease: lease.lease }).catch(() => {});
       throw new Error("DESKTOP_VIDEO_STOPPED");
     }
     this.active = lease;
@@ -134,13 +166,15 @@ export class RemoteDesktopViewerSession {
     this.controlPending = null;
     this.controlGeneration++;
     this.releaseUnconfirmed = false;
-    return lease
-      ? this.request({
-          op: "stop",
-          lease: lease.lease,
-          ...(lockScreen ? { lockScreen: true } : {}),
-        })
-      : Promise.resolve();
+    return this.serialize(() =>
+      lease
+        ? this.request({
+            op: "stop",
+            lease: lease.lease,
+            ...(lockScreen ? { lockScreen: true } : {}),
+          })
+        : Promise.resolve(),
+    );
   }
 }
 

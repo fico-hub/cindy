@@ -175,13 +175,13 @@ export class DesktopViewerController {
     });
     try {
       const resume = this.resuming;
-      this.resuming = true;
       const { caps, lease } = await this.session.connect({
         displayId: this.state.displayId || undefined,
         resume,
         takeover,
         isCurrent: () => this.epoch === epoch && !this.disposed && this.scope.active,
         onCapabilities: (caps) => this.publish({ caps }),
+        onStart: () => { this.resuming = true; },
       });
       if (epoch !== this.epoch) return;
       this.publish({ caps, displayId: lease.display.id, status: 'connecting' });

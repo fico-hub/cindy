@@ -29,6 +29,7 @@ export class RemoteViewerConnection {
   private controlGeneration = 0;
   private controlPending = false;
   private clipboardPending: object | null = null;
+  private lifecycle: Promise<void> | null = null;
   constructor(
     private readonly deps: {
       owner(): string;
@@ -38,8 +39,11 @@ export class RemoteViewerConnection {
     },
   ) {}
   bind(target: RemoteViewerTarget): void {
+    const owner = this.deps.owner();
+    const sameScope = this.owner === owner && this.target?.deviceId === target.deviceId;
     this.deactivate();
-    this.owner = this.deps.owner();
+    if (!sameScope) this.lifecycle = null;
+    this.owner = owner;
     this.target = target;
     this.attempted = false;
   }
@@ -82,6 +86,21 @@ export class RemoteViewerConnection {
     if (!this.mediaAttempt || attempt !== this.mediaAttempt)
       throw new Error('DESKTOP_VIDEO_STOPPED');
   }
+  /** Renderer replacement revokes authority immediately but must not bypass same-peer cleanup. */
+  private serializeLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+    let pending: Promise<T>;
+    try {
+      pending = this.lifecycle ? this.lifecycle.then(operation) : operation();
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    const settled = () => {
+      if (this.lifecycle === tail) this.lifecycle = null;
+    };
+    const tail = pending.then(settled, settled);
+    this.lifecycle = tail;
+    return pending;
+  }
   deactivate(): void {
     this.generation++;
     this.active = false;
@@ -97,11 +116,11 @@ export class RemoteViewerConnection {
     this.clipboardPending = null;
     this.starting = false;
     if (lease && target && owner === this.deps.owner())
-      void this.deps
-        .request(target.deviceId, { op: 'stop', lease }, () => {
+      void this.serializeLifecycle(() =>
+        this.deps.request(target.deviceId, { op: 'stop', lease }, () => {
           if (owner !== this.deps.owner()) throw new Error('DESKTOP_STOPPED');
-        })
-        .catch(() => {});
+        }),
+      ).catch(() => {});
   }
   async request(
     generation: number,
@@ -143,39 +162,48 @@ export class RemoteViewerConnection {
       if (isControl) this.controlPending = true;
       if (isStart) {
         this.starting = true;
-        this.attempted = true;
       }
       this.pending++;
       try {
-        const result = await this.deps.request(target.deviceId, request, check);
-        if (isStart) {
-          const lease = result as RemoteDesktopLease;
-          if (!lease || typeof lease.lease !== 'string') throw new Error('DESKTOP_UNAVAILABLE');
-          if (!this.active || generation !== this.generation || owner !== this.deps.owner()) {
-            if (owner === this.deps.owner())
-              void this.deps
-                .request(target.deviceId, { op: 'stop', lease: lease.lease }, () => {
-                  if (owner !== this.deps.owner()) throw new Error('DESKTOP_STOPPED');
-                })
-                .catch(() => {});
-            throw new Error('DESKTOP_STOPPED');
+        const execute = async () => {
+          check();
+          if ('lease' in request && request.lease !== this.lease)
+            throw new Error('DESKTOP_LEASE_EXPIRED');
+          if (isStart) this.attempted = true;
+          const result = await this.deps.request(target.deviceId, request, check);
+          if (isStart) {
+            const lease = result as RemoteDesktopLease;
+            if (!lease || typeof lease.lease !== 'string') throw new Error('DESKTOP_UNAVAILABLE');
+            if (!this.active || generation !== this.generation || owner !== this.deps.owner()) {
+              if (owner === this.deps.owner())
+                await this.deps
+                  .request(target.deviceId, { op: 'stop', lease: lease.lease }, () => {
+                    if (owner !== this.deps.owner()) throw new Error('DESKTOP_STOPPED');
+                  })
+                  .catch(() => {});
+              throw new Error('DESKTOP_STOPPED');
+            }
+            this.lease = lease.lease;
           }
-          this.lease = lease.lease;
-        }
-        this.check(generation);
-        if (
-          controlGeneration === this.controlGeneration &&
-          (isControl ||
-            (request.op === 'heartbeat' && !controlPendingAtStart && !this.controlPending))
-        ) {
-          this.controlling =
-            this.wantsControl &&
-            !!result &&
-            typeof result === 'object' &&
-            'controlling' in result &&
-            result.controlling === true;
-        }
-        if (request.op === 'stop' && this.lease === request.lease) this.lease = null;
+          this.check(generation);
+          if (
+            controlGeneration === this.controlGeneration &&
+            (isControl ||
+              (request.op === 'heartbeat' && !controlPendingAtStart && !this.controlPending))
+          ) {
+            this.controlling =
+              this.wantsControl &&
+              !!result &&
+              typeof result === 'object' &&
+              'controlling' in result &&
+              result.controlling === true;
+          }
+          if (request.op === 'stop' && this.lease === request.lease) this.lease = null;
+          return result;
+        };
+        const result = await (isStart || request.op === 'stop'
+          ? this.serializeLifecycle(execute)
+          : execute());
         return { ok: true, result };
       } finally {
         this.pending--;

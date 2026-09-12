@@ -4,6 +4,12 @@
 
 Desktop can open a same-account computer's remote desktop from its device card
 in Remote control settings, or the task-list machine menu's Remote desktop submenu.
+When the sidebar is grouped by machine, hovering or keyboard-focusing a remote
+machine reveals a desktop shortcut. A debounced, read-only capability check
+distinguishes available desktops from offline, disabled, revoked or unsupported
+targets; unavailable shortcuts show a crossed-out monitor with an explanation.
+Hovering never starts desktop capture or takes over another viewer, and clicking
+the shortcut does not expand or collapse the machine group.
 It opens a clean, independent window with native mouse/keyboard input and a small
 toolbar. Reopening the same target focuses its existing window. Full screen,
 view-only/control, display selection, sound, video settings and text
@@ -25,6 +31,17 @@ remote text to the local clipboard or pastes local text remotely. Transfers use
 the existing authorized Main bridge, are ordered and user-triggered, and report
 failure without reconnecting. There is no background clipboard monitoring or
 automatic context-menu synchronization; images, files and cut are not bridged.
+
+The shared viewer session marks recovery only when a start is attempted, so an
+initial capability-query timeout does not turn a retry against a legacy host into
+an unsupported resume. Start and stop operations are serialized per viewer,
+including cleanup of a late lease; superseded display choices are discarded before
+they reach the host. An idle stop still dispatches immediately for Mobile exit
+locking. This recovery stays within one viewer's lease and never closes a peer
+link or the shared relay; regression tests cover another peer remaining responsive
+and preserve explicit confirmation before taking over someone else's desktop.
+Main retains the same owner/target cleanup barrier across Renderer replacement;
+rebinding to a different owner or target does not wait on that old barrier.
 
 The window reuses the existing resource-usage auxiliary-window controller and
 factory for hidden prewarming, two-phase readiness, hide/reuse and bounded crash
@@ -57,6 +74,11 @@ so other tasks, file views and peers keep their existing connections.
 The local real-Chromium harness uses the production Desktop viewer with a
 synthetic canvas host, validates video, keyboard and same-lease media recovery,
 and saves Light/Dark screenshots in a unique system temporary directory:
+
+Only the disposable test browser disables mDNS host-address masking. The fixture
+records both data-channel input and the preload-bridge fallback. Recovery uses an
+explicit closed-peer event and checks decoded frames on the replacement peer;
+it does not measure how quickly a real network outage is detected.
 
 ```sh
 node apps/desktop/scripts/remote-desktop-viewer-smoke.mjs http://localhost:<vite-port> /path/to/chrome

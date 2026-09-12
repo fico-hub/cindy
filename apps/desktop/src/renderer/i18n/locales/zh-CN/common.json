@@ -70,6 +70,17 @@
     "directConnection": "电脑直连",
     "videoRelay": "服务器视频中转",
     "screenshotRelay": "服务器截图中转",
+    "shortcut": {
+      "open": "打开远程桌面",
+      "checking": "正在检查远程桌面…",
+      "opening": "正在打开远程桌面…",
+      "unavailable": "无法连接远程桌面：{{reason}}",
+      "offline": "这台电脑已离线。",
+      "controlDisabled": "请先在远程控制设置中允许控制这台电脑。",
+      "unsupported": "此设备不支持远程桌面。",
+      "checkFailed": "未能确认电脑状态，重新悬停可重试。",
+      "noDisplay": "这台电脑没有可用的显示器。"
+    },
     "viewer": {
       "settings": "操作",
       "sound": "声音",

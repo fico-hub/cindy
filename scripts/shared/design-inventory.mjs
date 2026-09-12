@@ -397,6 +397,8 @@ export function catalogSurfaces() {
       reachableComponents: [
         'MainLayout',
         'Sidebar',
+        'ProjectsSection',
+        'DeviceSectionHeader',
         'RightSidebar',
         'WindowControls',
         'ChromeActions',
@@ -412,6 +414,8 @@ export function catalogSurfaces() {
       styleRoots: [
         'apps/desktop/src/renderer/components/layout',
         'apps/desktop/src/renderer/components/sidebar',
+        'apps/desktop/src/renderer/features/cc-agent/sidebar/sections/ProjectsSection.tsx',
+        'apps/desktop/src/renderer/features/cc-agent/sidebar/DeviceSectionHeader.tsx',
         'apps/desktop/src/renderer/components/title-bar',
         'apps/desktop/src/renderer/layout',
         'apps/desktop/src/renderer/features/right-sidebar',

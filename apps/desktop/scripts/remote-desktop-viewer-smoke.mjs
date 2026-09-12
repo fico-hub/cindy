@@ -13,13 +13,30 @@ assert(['localhost', '127.0.0.1'].includes(origin.hostname));
 const controllerPlatform = process.argv[4] ?? 'win32';
 assert(['win32', 'darwin'].includes(controllerPlatform));
 const artifacts = await fs.mkdtemp(path.join(os.tmpdir(), 'cindy-viewer-smoke-'));
-const browser = await chromium.launch({ executablePath: process.argv[3], headless: true });
+const browser = await chromium.launch({
+  executablePath: process.argv[3],
+  headless: true,
+  args: ['--disable-features=WebRtcHideLocalIpsWithMdns'],
+});
 try {
-  const context = await browser.newContext({ viewport: { width: 1180, height: 780 } });
+  const context = await browser.newContext({
+    viewport: { width: 1180, height: 780 },
+    colorScheme: 'light',
+  });
   const host = await context.newPage(),
     viewer = await context.newPage();
-  await host.goto(origin.origin);
-  await host.setContent('<canvas width="1280" height="720"></canvas>');
+  const hostUrl = new URL('/remote-desktop-smoke-host', origin.origin).href;
+  await host.route(hostUrl, (route) =>
+    route.fulfill({
+      contentType: 'text/html',
+      body: '<canvas width="1280" height="720"></canvas>',
+    }),
+  );
+  await host.goto(hostUrl);
+  await host.evaluate(() => {
+    window.inputs = [];
+    window.inputRoutes = { bridge: [], datachannel: [] };
+  });
   const errors = [];
   viewer.on('pageerror', (error) => {
     errors.push(error.message);
@@ -59,6 +76,12 @@ try {
         return { controlling: request.enabled };
       case 'heartbeat':
         return { controlling };
+      case 'input':
+        await host.evaluate((events) => {
+          window.inputs.push(...events);
+          window.inputRoutes.bridge.push(...events);
+        }, request.events);
+        return { ok: true };
       case 'frame':
         return { jpeg: null };
       case 'stop':
@@ -80,12 +103,13 @@ try {
             }, 60);
             const rtc = new RTCPeerConnection({ iceServers: [] });
             window.peer = rtc;
-            window.inputs = [];
             const stream = canvas.captureStream(15);
             stream.getTracks().forEach((track) => rtc.addTrack(track, stream));
             rtc.ondatachannel = ({ channel }) => {
               channel.onmessage = ({ data }) => {
-                window.inputs.push(...JSON.parse(data).events);
+                const events = JSON.parse(data).events;
+                window.inputs.push(...events);
+                window.inputRoutes.datachannel.push(...events);
               };
             };
             await rtc.setRemoteDescription({ type: 'offer', sdp });
@@ -108,6 +132,19 @@ try {
     }
   });
   await viewer.addInitScript((controllerPlatform) => {
+    window.viewerPeers = [];
+    const NativePeerConnection = window.RTCPeerConnection;
+    window.RTCPeerConnection = class extends NativePeerConnection {
+      constructor(...args) {
+        super(...args);
+        window.viewerPeers.push(this);
+      }
+      createDataChannel(...args) {
+        const channel = super.createDataChannel(...args);
+        if (channel.label === 'input-v1') this.inputChannel = channel;
+        return channel;
+      }
+    };
     const noop = () => {},
       off = () => noop;
     const scope = {
@@ -167,6 +204,22 @@ try {
     { timeout: 25000 },
   );
   await viewer.waitForFunction(() => document.querySelector('.remote-viewer-network') !== null);
+  const readVideoStats = () =>
+    viewer.evaluate(async () => {
+      const peer = window.viewerPeers.at(-1);
+      const stats = [...(await peer.getStats()).values()].find(
+        (report) => report.type === 'inbound-rtp' && report.kind === 'video',
+      );
+      return {
+        peers: window.viewerPeers.length,
+        connection: peer.connectionState,
+        width: document.querySelector('video').videoWidth,
+        framesDecoded: stats?.framesDecoded ?? 0,
+        bytesReceived: stats?.bytesReceived ?? 0,
+      };
+    });
+  const initialVideo = await readVideoStats();
+  assert(initialVideo.framesDecoded > 0 && initialVideo.bytesReceived > 0);
   const stage = await viewer.locator('#stage').boundingBox();
   assert(stage);
   assert.equal(await viewer.locator('#stage').evaluate((element) => element.style.cursor), 'none');
@@ -197,6 +250,32 @@ try {
   await viewer.keyboard.type('desktop');
   await host.waitForFunction(() =>
     window.inputs.some((event) => event.kind === 'text' && event.text.includes('d')),
+  );
+  await viewer.waitForFunction(() => window.viewerPeers.at(-1).inputChannel.readyState === 'open');
+  await viewer.keyboard.press('ArrowRight');
+  await host.waitForFunction(() =>
+    window.inputRoutes.datachannel.some(
+      (event) => event.kind === 'key' && event.code === 'ArrowRight' && !event.down,
+    ),
+  );
+  await viewer.evaluate(() => window.viewerPeers.at(-1).inputChannel.close());
+  await viewer.waitForFunction(
+    () => window.viewerPeers.at(-1).inputChannel.readyState === 'closed',
+  );
+  const bridgedRequests = requests.filter((op) => op === 'input').length;
+  const bridgedInputs = await host.evaluate(() => window.inputRoutes.bridge.length);
+  await viewer.mouse.move(stage.x + 480, stage.y + 330);
+  await viewer.keyboard.type('bridge');
+  await host.waitForFunction((before) => {
+    const events = window.inputRoutes.bridge.slice(before);
+    return (
+      events.some((event) => event.kind === 'move') &&
+      events.some((event) => event.kind === 'text' && event.text.includes('b'))
+    );
+  }, bridgedInputs);
+  assert(
+    requests.filter((op) => op === 'input').length > bridgedRequests,
+    'mouse and keyboard input fall back to the preload bridge when the data channel closes',
   );
   const checkSelect = async (trigger, screenshot) => {
     const control = await trigger.boundingBox();
@@ -268,6 +347,11 @@ try {
   await viewer.screenshot({ animations: 'disabled', path: path.join(artifacts, 'dark.png') });
   await checkExitDialog('dark');
   await host.evaluate(() => window.peer.close());
+  await viewer.evaluate(() => {
+    const peer = window.viewerPeers.at(-1);
+    peer.close();
+    peer.dispatchEvent(new Event('connectionstatechange'));
+  });
   await viewer.waitForFunction(
     () =>
       document
@@ -294,6 +378,15 @@ try {
     requests.filter((op) => op === 'start').length,
     1,
     'media recovery must retain its lease',
+  );
+  const recoveredVideo = await readVideoStats();
+  assert(recoveredVideo.peers > initialVideo.peers, 'media recovery creates a new peer');
+  assert.equal(recoveredVideo.connection, 'connected');
+  assert(
+    recoveredVideo.width > 0 &&
+      recoveredVideo.framesDecoded > 0 &&
+      recoveredVideo.bytesReceived > 0,
+    'media recovery must decode new WebRTC frames, not just retain the old frame',
   );
   assert.deepEqual(errors, []);
   await viewer.evaluate(() => window.applyViewerLocale('zh-CN'));
@@ -406,10 +499,15 @@ try {
       video: true,
       keyboard: true,
       mouse: true,
+      dataChannelInput: true,
+      bridgeInput: true,
       clipboardShortcuts: true,
       exitConfirmation: true,
       controllerPlatform,
       mediaRecovery: true,
+      recoveryFault: 'closed-peer-event',
+      initialVideo,
+      recoveredVideo,
       chineseSettings: true,
       localeKeepsLease: true,
       lightDarkArtifacts: artifacts,
