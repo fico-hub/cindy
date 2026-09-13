@@ -74,7 +74,9 @@ describe('existing Session delivery Host authorization', () => {
     expect(await h.service.send(input)).toMatchObject({ ok: true, targetSessionId: 'fable-original' });
     expect(h.approve).toHaveBeenCalledOnce();
     expect(h.approve.mock.calls[0][0]).toMatchObject({ kind: 'permission',
-      input: { session_id: 'fable-original', title: 'Original Fable', message: input.message },
+      input: { session_id: 'fable-original', title: 'Original Fable', message: input.message,
+        model: 'fable', agent_kind: 'claude-code', provider_id: 'anthropic', permission_mode: 'ask',
+        plan_mode_enabled: false, effort: 'high', fast_mode: false },
       metadata: { hostOwnedConfirmation: 'bot_existing_session_delivery' } });
     expect(h.enqueue).toHaveBeenCalledOnce();
     expect(db.prepare('SELECT model, permission_mode FROM sessions WHERE id=?').get(input.targetSessionId))
@@ -91,6 +93,15 @@ describe('existing Session delivery Host authorization', () => {
     db.prepare("UPDATE bot_profiles SET status='paused'").run();
     const h = harness(); expect(await h.service.send(input)).toMatchObject({ ok: false, errorCode: 'NOT_A_BOT_SESSION' });
     expect(h.approve).not.toHaveBeenCalled(); expect(h.enqueue).not.toHaveBeenCalled();
+  });
+  it('rejects a Review target before prompting or preparing external input', async () => {
+    db.prepare("UPDATE sessions SET source='review' WHERE id=?").run(input.targetSessionId);
+    const h = harness();
+    expect(await h.service.send(input)).toMatchObject({ ok: false, errorCode: 'INVALID_TARGET' });
+    expect(h.approve).not.toHaveBeenCalled();
+    expect(h.deps.restoreQueue).not.toHaveBeenCalled();
+    expect(h.deps.prepare).not.toHaveBeenCalled();
+    expect(h.enqueue).not.toHaveBeenCalled();
   });
   it.each([null, 'ssh-original-host'])('shows the actual execution location before approval (remote=%s)', async remoteHostId => {
     db.prepare('UPDATE sessions SET remote_host_id=? WHERE id=?').run(remoteHostId, input.targetSessionId);

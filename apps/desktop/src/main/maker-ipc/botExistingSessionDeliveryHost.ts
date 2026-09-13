@@ -63,6 +63,7 @@ export function createDesktopBotExistingSessionDelivery(deps: HostDeps) {
         assertCaller();
         if (!target || target.status !== 'active') throw new ExistingSessionDeliveryError('TARGET_UNAVAILABLE', 'The target is missing, archived or deleted. No replacement Session was created.');
         if (target.source === 'bot') throw new ExistingSessionDeliveryError('INVALID_TARGET', 'Use teammate messaging for a teammate main Session.');
+        if (target.source === 'review') throw new ExistingSessionDeliveryError('INVALID_TARGET', 'Review Sessions do not accept external input. Send follow-up work to the original task instead.');
         return { owned, target };
       };
       const original = await read();
@@ -107,6 +108,13 @@ export function createDesktopBotExistingSessionDelivery(deps: HostDeps) {
                 : t('botExistingSessionDelivery.localTarget'),
               remote_host_id: original.target.remoteHostId,
               working_directory: original.target.workingDir,
+              model: original.target.model,
+              agent_kind: original.target.agentKind,
+              provider_id: original.target.providerId,
+              permission_mode: original.target.permissionMode,
+              plan_mode_enabled: original.target.planModeEnabled,
+              effort: original.target.effort,
+              fast_mode: original.target.fastMode,
             },
             metadata: { hostOwnedConfirmation: 'bot_existing_session_delivery' },
           };
